@@ -62,6 +62,21 @@ def _insert_one(session: Session, account: Account, source: str, op: RawOperatio
     return True
 
 
+def _load_known_keys(session: Session, keys: list[str]) -> set[str]:
+    """Читает уже занятые dedup_key из БД. Вынесена в отдельную функцию модуля, а не
+    инлайн в append_operations, только ради тестируемости: тесты подменяют её через
+    monkeypatch, чтобы вернуть пустое множество и тем самым честно воспроизвести
+    fallback-ветку append_operations на настоящем PostgreSQL (см.
+    test_append_operations_falls_back_to_row_by_row_on_bulk_conflict) — сама вставка,
+    конфликт уникальности и откат при этом остаются настоящими, подменяется только
+    чтение известных ключей."""
+    return set(
+        session.execute(
+            select(Transaction.dedup_key).where(Transaction.dedup_key.in_(keys))
+        ).scalars()
+    )
+
+
 def append_operations(
     session: Session, account: Account, source: str, operations: list[RawOperation]
 ) -> AppendResult:
@@ -71,11 +86,7 @@ def append_operations(
     # RawOperation несёт поле payload: dict, поэтому сам объект не hashable —
     # держим ключи в списке, параллельном operations, а не в словаре с op как ключом.
     keys = [natural_key(source, account.external_id, op) for op in operations]
-    known = set(
-        session.execute(
-            select(Transaction.dedup_key).where(Transaction.dedup_key.in_(keys))
-        ).scalars()
-    )
+    known = _load_known_keys(session, keys)
 
     to_insert: list[tuple[RawOperation, str]] = []
     skipped = 0
@@ -92,11 +103,12 @@ def append_operations(
         return AppendResult(inserted=0, skipped=skipped)
 
     # Быстрый путь: один общий flush на весь батч (SQLAlchemy сам батчирует вставку
-    # через insertmanyvalues). Замер на 5000 операциях показал, что SAVEPOINT на каждую
-    # строку даёт +46% времени против одного flush на батч (task-5-report.md, раунд 2) —
-    # при первой полной синхронизации истории счёта (тысячи операций, синхронный вызов
-    # из POST /api/sync/tbank) это ощутимо, поэтому конфликт по dedup_key обрабатывается
-    # не построчным SAVEPOINT сразу, а как редкое исключение из быстрого пути.
+    # через insertmanyvalues). Замер на 5000 операциях (3 прогона) показал SAVEPOINT на
+    # каждую строку медленнее одного flush на батч на 63-95% — методика и полные цифры
+    # в task-5-report.md, раунд 2. При первой полной синхронизации истории счёта (тысячи
+    # операций, синхронный вызов из POST /api/sync/tbank) это ощутимо, поэтому конфликт
+    # по dedup_key обрабатывается не построчным SAVEPOINT сразу, а как редкое исключение
+    # из быстрого пути.
     transactions = []
     for op, key in to_insert:
         instrument = resolve_instrument(session, op)
@@ -123,5 +135,6 @@ def append_operations(
         session.flush()
         return AppendResult(inserted=inserted, skipped=skipped + conflict_skipped)
 
-    session.flush()
+    # Второй flush() здесь не нужен: он уже случился внутри блока with session.begin_nested()
+    # выше — к этому моменту нечего сбрасывать, добавление было бы чистым no-op.
     return AppendResult(inserted=len(transactions), skipped=skipped)

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 
+import app.ledger.service as ledger_service
 from app.instruments.service import _insert_instrument
 from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
@@ -18,10 +19,10 @@ def make_account(session) -> Account:
     return account
 
 
-def buy_op(external_id: str | None = "op-1") -> RawOperation:
+def buy_op(external_id: str | None = "op-1", executed_at: datetime | None = None) -> RawOperation:
     return RawOperation(
         external_id=external_id, op_type=OperationType.BUY,
-        executed_at=datetime(2026, 3, 12, 10, 30, tzinfo=timezone.utc),
+        executed_at=executed_at or datetime(2026, 3, 12, 10, 30, tzinfo=timezone.utc),
         isin="RU0009029540", ticker="SBER", quantity=Decimal("35"),
         price=Decimal("142.5"), amount=Decimal("-4987.5"), currency="RUB",
         fee=Decimal("1.4963"), payload={},
@@ -111,3 +112,34 @@ def test_instrument_isin_conflict_at_insert_reuses_existing(session):
     assert first.id == second.id
     count = session.execute(select(func.count()).select_from(Instrument)).scalar_one()
     assert count == 1
+
+
+def test_append_operations_falls_back_to_row_by_row_on_bulk_conflict(session, monkeypatch):
+    """append_operations сначала пытается вставить весь батч одним общим flush (быстрый
+    путь). Эта гонка та же, что в test_dedup_conflict_at_insert_is_skipped_not_raised, но
+    здесь нужно проверить именно обвязку append_operations вокруг неё — пакетный
+    add_all()+flush() под общим SAVEPOINT, перехват IntegrityError, построчный
+    fallback-цикл через _insert_one и пересчёт inserted/skipped — а не саму _insert_one.
+
+    Настоящую параллельность здесь не воспроизвести (фикстура session живёт во внешней
+    транзакции с откатом, а append-only триггер не даст убрать committed-мусор от второй
+    сессии). Поэтому подменяем только чтение уже известных ключей (_load_known_keys) —
+    единственный управляемый шов, — чтобы оно вернуло пустое множество. Тогда
+    append_operations по-настоящему попытается вставить уже существующую в БД операцию,
+    пакетный flush по-настоящему упадёт на uq_transaction_dedup_key, и по-настоящему
+    отработает fallback: сама вставка, конфликт и откат — не мок."""
+    account = make_account(session)
+
+    existing_op = buy_op(external_id=None)
+    existing_key = natural_key("tbank", account.external_id, existing_op)
+    assert _insert_one(session, account, "tbank", existing_op, existing_key) is True
+
+    new_op = buy_op(external_id=None, executed_at=datetime(2026, 3, 13, 10, 30, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(ledger_service, "_load_known_keys", lambda session, keys: set())
+
+    result = append_operations(session, account, "tbank", [existing_op, new_op])
+
+    assert result.inserted == 1
+    assert result.skipped == 1
+    assert count_tx(session) == 2
