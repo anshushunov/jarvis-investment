@@ -26,6 +26,9 @@ def _entries(session: Session, account: Account) -> list[LedgerEntry]:
 def rebuild_positions(session: Session, account: Account) -> int:
     result = fold(_entries(session, account), currency=account.currency)
 
+    # Delete and re-insert happen inside the caller's transaction (no commit here), so
+    # a crash or exception between them leaves the old rows intact under rollback —
+    # readers never observe an account with zero positions mid-rebuild.
     session.execute(delete(Position).where(Position.account_id == account.id))
 
     kept = 0

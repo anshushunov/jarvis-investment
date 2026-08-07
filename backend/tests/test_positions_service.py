@@ -73,3 +73,24 @@ def test_cash_operations_do_not_create_positions(session):
     add_tx(session, account, None, OperationType.DEPOSIT, 1, "0", "0", "50000")
 
     assert rebuild_positions(session, account) == 0
+
+
+def test_rebuild_does_not_touch_other_accounts_positions(session):
+    account1 = setup_account(session)
+    account2 = Account(broker="tbank", kind="brokerage", external_id="acc-2",
+                       name="ИИС", currency="RUB")
+    session.add(account2)
+    session.flush()
+    instrument = add_instrument(session)
+
+    add_tx(session, account2, instrument, OperationType.BUY, 1, "5", "200", "-1000")
+    assert rebuild_positions(session, account2) == 1
+
+    add_tx(session, account1, instrument, OperationType.BUY, 2, "10", "100", "-1000")
+    assert rebuild_positions(session, account1) == 1
+
+    positions = {p.account_id: p for p in session.query(Position).all()}
+    assert set(positions) == {account1.id, account2.id}
+    assert positions[account1.id].quantity == Decimal("10.00000000")
+    assert positions[account2.id].quantity == Decimal("5.00000000")
+    assert positions[account2.id].average_price == Decimal("200.0000")
