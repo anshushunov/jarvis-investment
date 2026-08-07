@@ -32,3 +32,28 @@ def test_quotation_handles_negative_variation_margin():
 
 def test_quotation_zero():
     assert quotation_to_decimal(0, 0) == Decimal("0.0000")
+
+
+def test_money_rejects_bool():
+    with pytest.raises(TypeError):
+        money(True)  # type: ignore[arg-type]
+
+
+def test_money_rejects_nan():
+    with pytest.raises(ValueError):
+        money("nan")
+
+
+def test_money_rejects_inf():
+    with pytest.raises(ValueError):
+        money("inf")
+
+
+def test_money_rejects_negative_inf():
+    with pytest.raises(ValueError):
+        money("-inf")
+
+
+def test_quantity_rejects_nan():
+    with pytest.raises(ValueError):
+        quantity("nan")
