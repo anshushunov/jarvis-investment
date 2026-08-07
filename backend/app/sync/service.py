@@ -66,9 +66,15 @@ def sync_broker(session: Session, connector: BrokerConnector, since: datetime) -
             # Настоящая ошибка PostgreSQL (например, битые данные счёта) переводит
             # транзакцию в aborted-состояние — откатываем SAVEPOINT именно этого счёта,
             # а не всю транзакцию, чтобы сессия осталась пригодна для следующего счёта.
-            # Откат SAVEPOINT стирает и уже присвоенные выше числа вместе с самими
-            # данными — это согласовано: то, что физически исчезло из БД, не должно
-            # фигурировать в отчёте как вставленное.
+            # Откат SAVEPOINT стирает и уже присвоенные выше числа (run.account_id,
+            # run.inserted, run.skipped) вместе с самими данными — SQLAlchemy
+            # восстанавливает атрибуты run до состояния на момент начала SAVEPOINT,
+            # включая случай, когда откат происходит уже после того, как эти поля
+            # получили ненулевые значения. Это не предположение: см.
+            # test_db_level_failure_after_operations_written_keeps_run_and_session_consistent
+            # в tests/test_sync_service.py — там записан фактически наблюдаемый после
+            # отката run.account_id=None, run.inserted=0, а следующий счёт при этом
+            # обрабатывается штатно (флаш на несуществующий account_id не падает).
             savepoint.rollback()
             run.status = "failed"
             run.error = f"Ошибка базы данных при обработке счёта: {error}"

@@ -50,6 +50,30 @@ class TwoAccountsConnector:
         return []
 
 
+class LateDbFailureConnector:
+    """Счёт заводится и операция записывается успешно; настоящая ошибка PostgreSQL
+    (DataError) случается только на шаге сверки — снимок брокера содержит ISIN
+    длиннее колонки reconciliation.isin (String(12)). Проверяет самый неприятный
+    сценарий отката SAVEPOINT: он происходит уже ПОСЛЕ того, как run.account_id,
+    run.inserted и run.skipped были присвоены реальным ненулевым значениям."""
+
+    source = "tbank"
+
+    def fetch_accounts(self):
+        return [
+            BrokerAccount(external_id="acc-late-fail", name="Просядет на сверке", kind="brokerage"),
+            BrokerAccount(external_id="acc-2", name="ИИС", kind="brokerage"),
+        ]
+
+    def fetch_operations(self, account_external_id, since):
+        return [buy()] if account_external_id == "acc-late-fail" else []
+
+    def fetch_positions(self, account_external_id):
+        if account_external_id == "acc-late-fail":
+            return [BrokerPosition(isin="RU0009029540XX", ticker="FAKE", quantity=Decimal("1"))]
+        return []
+
+
 def buy() -> RawOperation:
     return RawOperation(
         external_id="op-1", op_type=OperationType.BUY,
@@ -127,3 +151,34 @@ def test_db_level_failure_on_one_account_does_not_break_others(session):
 
     accounts = session.query(Account).all()
     assert [a.external_id for a in accounts] == ["acc-2"]
+
+
+def test_db_level_failure_after_operations_written_keeps_run_and_session_consistent(session):
+    """Не декларация, а факт: ошибка PostgreSQL, случившаяся уже после того как счёт
+    завёлся и операция записалась (на шаге сверки), обязана откатить SAVEPOINT этого
+    счёта целиком — включая сам счёт, операцию и уже присвоенные run.account_id /
+    run.inserted / run.skipped, — а не оставить запись прогона рассинхронизированной
+    с содержимым БД и не уронить финальный flush на внешнем ключе к откатившемуся
+    счёту (что утащило бы за собой обработку остальных счетов)."""
+    runs = sync_broker(session, LateDbFailureConnector(), SINCE)
+
+    assert len(runs) == 2
+    failed_run, ok_run = runs
+
+    assert failed_run.status == "failed"
+    assert failed_run.error.startswith("Ошибка базы данных")
+
+    from app.models import Transaction
+    assert session.query(Account).filter_by(external_id="acc-late-fail").count() == 0
+    assert session.query(Transaction).count() == 0
+
+    # Запись прогона обязана быть согласована с фактическим содержимым БД после
+    # отката SAVEPOINT: операций не осталось — inserted/skipped должны отражать
+    # именно это, а не значения, вычисленные до отката.
+    assert failed_run.inserted == 0
+    assert failed_run.skipped == 0
+    assert failed_run.account_id is None
+
+    # SAVEPOINT не должен утащить за собой обработку остальных счетов.
+    assert ok_run.status == "success"
+    assert session.query(Account).filter_by(external_id="acc-2").count() == 1
