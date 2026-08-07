@@ -62,6 +62,7 @@ class ReconciliationOut(BaseModel):
 
 
 class SyncRunOut(BaseModel):
+    account: str
     broker: str
     status: str
     inserted: int

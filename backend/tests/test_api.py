@@ -122,6 +122,44 @@ class RecordingConnector:
         return []
 
 
+class SameNameAccountsConnector:
+    """Два счёта с одинаковым именем — коннектор Т-Банка подставляет такую
+    заглушку («Счёт»), если брокер имени не дал. Подпись счёта в ответе
+    обязана различать их всё равно (за счёт внешнего идентификатора)."""
+
+    source = "tbank"
+
+    def fetch_accounts(self):
+        return [
+            BrokerAccount(external_id="acc-a", name="Счёт", kind="brokerage"),
+            BrokerAccount(external_id="acc-b", name="Счёт", kind="brokerage"),
+        ]
+
+    def fetch_operations(self, account_external_id, since):
+        return []
+
+    def fetch_positions(self, account_external_id):
+        return []
+
+
+class AccountCreationFailsConnector:
+    """Счёт с kind длиннее колонки account.kind (String(16)) — Postgres
+    прерывает транзакцию DataError'ом ещё на заведении счёта, SAVEPOINT
+    откатывает и его тоже. run.account_id остаётся None — ссылки на счёт,
+    о котором шла речь, в записи прогона нет."""
+
+    source = "tbank"
+
+    def fetch_accounts(self):
+        return [BrokerAccount(external_id="broken", name="Битый счёт", kind="x" * 20)]
+
+    def fetch_operations(self, account_external_id, since):
+        return []
+
+    def fetch_positions(self, account_external_id):
+        return []
+
+
 def test_sync_tbank_endpoint_returns_runs(client, session):
     connector = RecordingConnector()
     app.dependency_overrides[get_tbank_connector] = lambda: connector
@@ -129,9 +167,28 @@ def test_sync_tbank_endpoint_returns_runs(client, session):
     payload = client.post("/api/sync/tbank").json()
 
     assert payload == [{
-        "broker": "tbank", "status": "success",
+        "account": "Брокерский (acc-1)", "broker": "tbank", "status": "success",
         "inserted": 0, "skipped": 0, "mismatches": 0, "error": None,
     }]
+
+
+def test_sync_response_distinguishes_accounts_with_same_name(client, session):
+    app.dependency_overrides[get_tbank_connector] = lambda: SameNameAccountsConnector()
+
+    payload = client.post("/api/sync/tbank").json()
+
+    labels = [row["account"] for row in payload]
+    assert labels == ["Счёт (acc-a)", "Счёт (acc-b)"]
+    assert len(set(labels)) == 2
+
+
+def test_sync_response_uses_meaningful_label_when_account_creation_fails(client, session):
+    app.dependency_overrides[get_tbank_connector] = lambda: AccountCreationFailsConnector()
+
+    payload = client.post("/api/sync/tbank").json()
+
+    assert payload[0]["status"] == "failed"
+    assert payload[0]["account"] == "счёт не определён"
 
 
 def test_sync_first_run_uses_deep_history(client, session):
@@ -146,8 +203,12 @@ def test_sync_first_run_uses_deep_history(client, session):
 
 
 def test_sync_repeat_run_uses_window_since_last_success(client, session):
+    existing_account = Account(broker="tbank", kind="brokerage", external_id="acc-1", name="Брокерский")
+    session.add(existing_account)
+    session.flush()
+
     last_started = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    session.add(SyncRun(broker="tbank", status="success",
+    session.add(SyncRun(broker="tbank", account_id=existing_account.id, status="success",
                         started_at=last_started, finished_at=last_started))
     session.flush()
 

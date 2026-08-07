@@ -4,7 +4,12 @@ from decimal import Decimal
 from app.connectors.base import BrokerAccount, BrokerPosition
 from app.ledger.schemas import RawOperation
 from app.models import Account, OperationType, Position, SyncRun
-from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS, resolve_since, sync_broker
+from app.sync.service import (
+    DEFAULT_HISTORY_DAYS,
+    SYNC_OVERLAP_DAYS,
+    resolve_since_for_account,
+    sync_broker,
+)
 
 SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -71,6 +76,31 @@ class LateDbFailureConnector:
     def fetch_positions(self, account_external_id):
         if account_external_id == "acc-late-fail":
             return [BrokerPosition(isin="RU0009029540XX", ticker="FAKE", quantity=Decimal("1"))]
+        return []
+
+
+class TwoAccountsRecordingConnector:
+    """Двойник с двумя счетами, который запоминает, какое значение `since`
+    синхронизация фактически передала в fetch_operations для каждого из
+    них — нужен, чтобы проверить, что резолвинг `since` идёт по счёту, а не
+    по брокеру целиком."""
+
+    source = "tbank"
+
+    def __init__(self):
+        self.received_since: dict[str, datetime] = {}
+
+    def fetch_accounts(self):
+        return [
+            BrokerAccount(external_id="acc-with-history", name="Брокерский", kind="brokerage"),
+            BrokerAccount(external_id="acc-without-history", name="ИИС", kind="iis"),
+        ]
+
+    def fetch_operations(self, account_external_id, since):
+        self.received_since[account_external_id] = since
+        return []
+
+    def fetch_positions(self, account_external_id):
         return []
 
 
@@ -184,49 +214,86 @@ def test_db_level_failure_after_operations_written_keeps_run_and_session_consist
     assert session.query(Account).filter_by(external_id="acc-2").count() == 1
 
 
-def test_resolve_since_uses_deep_history_when_no_successful_run(session):
-    since = resolve_since(session, "tbank")
+def _make_account(session, external_id="acc-1", name="Брокерский") -> Account:
+    account = Account(broker="tbank", kind="brokerage", external_id=external_id, name=name)
+    session.add(account)
+    session.flush()
+    return account
+
+
+def test_resolve_since_uses_deep_history_when_no_successful_run_for_account(session):
+    account = _make_account(session)
+    since = resolve_since_for_account(session, account.id)
     expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
     assert abs((since - expected).total_seconds()) < 5
 
 
 def test_resolve_since_ignores_failed_runs_without_success(session):
-    session.add(SyncRun(broker="tbank", status="failed",
+    account = _make_account(session)
+    session.add(SyncRun(broker="tbank", account_id=account.id, status="failed",
                         started_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
     session.flush()
 
-    since = resolve_since(session, "tbank")
+    since = resolve_since_for_account(session, account.id)
     expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
     assert abs((since - expected).total_seconds()) < 5
 
 
 def test_resolve_since_uses_window_from_last_successful_run(session):
+    account = _make_account(session)
     last_started = datetime(2026, 3, 1, tzinfo=timezone.utc)
-    session.add(SyncRun(broker="tbank", status="success", started_at=last_started))
+    session.add(SyncRun(broker="tbank", account_id=account.id, status="success", started_at=last_started))
     session.flush()
 
-    since = resolve_since(session, "tbank")
+    since = resolve_since_for_account(session, account.id)
     assert since == last_started - timedelta(days=SYNC_OVERLAP_DAYS)
 
 
 def test_resolve_since_picks_latest_successful_run_not_first(session):
+    account = _make_account(session)
     session.add_all([
-        SyncRun(broker="tbank", status="success",
+        SyncRun(broker="tbank", account_id=account.id, status="success",
                 started_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
-        SyncRun(broker="tbank", status="success",
+        SyncRun(broker="tbank", account_id=account.id, status="success",
                 started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)),
     ])
     session.flush()
 
-    since = resolve_since(session, "tbank")
+    since = resolve_since_for_account(session, account.id)
     assert since == datetime(2026, 3, 1, tzinfo=timezone.utc) - timedelta(days=SYNC_OVERLAP_DAYS)
 
 
-def test_resolve_since_is_scoped_per_broker(session):
-    session.add(SyncRun(broker="other-broker", status="success",
+def test_resolve_since_is_scoped_per_account_not_broker(session):
+    """Точка отсчёта другого счёта того же брокера не должна протекать в
+    резолвинг текущего — иначе счёт, который ни разу не синхронизировался,
+    получит чужое узкое окно и его история тихо никогда не подтянется."""
+    account_with_history = _make_account(session, external_id="acc-with-history")
+    account_without_history = _make_account(session, external_id="acc-without-history")
+    session.add(SyncRun(broker="tbank", account_id=account_with_history.id, status="success",
                         started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)))
     session.flush()
 
-    since = resolve_since(session, "tbank")
+    since = resolve_since_for_account(session, account_without_history.id)
     expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
     assert abs((since - expected).total_seconds()) < 5
+
+
+def test_sync_broker_resolves_since_independently_per_account(session):
+    """Многосчётный сценарий целиком через sync_broker (since=None, как в
+    проде): один счёт этого брокера уже синхронизировался успешно раньше,
+    другой — ни разу. Первый обязан получить узкое окно от своей же
+    истории, второй — глубокую историю, а не окно соседа."""
+    existing_account = _make_account(session, external_id="acc-with-history")
+    last_started = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    session.add(SyncRun(broker="tbank", account_id=existing_account.id, status="success",
+                        started_at=last_started))
+    session.flush()
+
+    connector = TwoAccountsRecordingConnector()
+    sync_broker(session, connector)
+
+    assert connector.received_since["acc-with-history"] == last_started - timedelta(days=SYNC_OVERLAP_DAYS)
+
+    expected_deep = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    since_without_history = connector.received_since["acc-without-history"]
+    assert abs((since_without_history - expected_deep).total_seconds()) < 5

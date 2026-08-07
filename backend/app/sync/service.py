@@ -21,17 +21,24 @@ DEFAULT_HISTORY_DAYS = 365 * 5
 SYNC_OVERLAP_DAYS = 3
 
 
-def resolve_since(session: Session, broker: str) -> datetime:
-    """Точка отсчёта для следующей синхронизации этого брокера.
+def resolve_since_for_account(session: Session, account_id: int) -> datetime:
+    """Точка отсчёта для следующей синхронизации конкретного счёта.
 
-    Если по брокеру уже был хотя бы один успешный прогон — берём момент его
-    начала с запасом SYNC_OVERLAP_DAYS назад, а не глубокую историю заново:
-    при десятках тысяч операций и синхронизации по расписанию вычитывать всю
-    историю каждый раз слишком дорого. Если успешных прогонов ещё не было —
-    берём DEFAULT_HISTORY_DAYS вглубь."""
+    Если у этого счёта уже был хотя бы один успешный прогон — берём момент
+    его начала с запасом SYNC_OVERLAP_DAYS назад, а не глубокую историю
+    заново: при десятках тысяч операций и синхронизации по расписанию
+    вычитывать всю историю каждый раз слишком дорого. Если успешных
+    прогонов по этому счёту ещё не было — берём DEFAULT_HISTORY_DAYS вглубь.
+
+    Считать это по брокеру целиком (взять последний успешный прогон среди
+    ЛЮБОГО счёта брокера) нельзя: при частичном сбое синхронизации — а такое
+    уже случалось вживую — один счёт успешно синхронизировался, а другой
+    нет. Общая по брокеру точка отсчёта в следующий раз возьмёт время
+    успеха счёта-соседа и подсунет узкое окно счёту, который вообще ни разу
+    не синхронизировался, — его история тогда тихо никогда не подтянется."""
     last_started_at = session.execute(
         select(func.max(SyncRun.started_at)).where(
-            SyncRun.broker == broker, SyncRun.status == "success"
+            SyncRun.account_id == account_id, SyncRun.status == "success"
         )
     ).scalar_one()
 
@@ -60,7 +67,19 @@ def _get_or_create_account(session: Session, broker: str, broker_account) -> Acc
     return account
 
 
-def sync_broker(session: Session, connector: BrokerConnector, since: datetime) -> list[SyncRun]:
+def sync_broker(
+    session: Session, connector: BrokerConnector, since: datetime | None = None
+) -> list[SyncRun]:
+    """Синхронизирует все счета брокера.
+
+    `since=None` (обычный режим планировщика и REST-эндпоинта) — точка
+    отсчёта вычисляется для каждого счёта отдельно через
+    resolve_since_for_account, внутри цикла, потому что у разных счётов
+    этого брокера история успешных прогонов может отличаться (см. её
+    docstring). Явно переданное значение `since` — точка отсчёта одна на
+    все счета и переопределяет резолвинг; это осознанная лазейка для
+    ручного полного пересчёта истории (и для тестов, которым нужен
+    предсказуемый фиксированный since)."""
     runs: list[SyncRun] = []
 
     for broker_account in connector.fetch_accounts():
@@ -76,7 +95,8 @@ def sync_broker(session: Session, connector: BrokerConnector, since: datetime) -
             account = _get_or_create_account(session, connector.source, broker_account)
             run.account_id = account.id
 
-            operations = connector.fetch_operations(account.external_id, since)
+            account_since = since if since is not None else resolve_since_for_account(session, account.id)
+            operations = connector.fetch_operations(account.external_id, account_since)
             result = append_operations(session, account, connector.source, operations)
             # Присваиваем сразу, а не одной группой в конце: если сбой случится на
             # следующих шагах (пересборка позиций, получение снимка брокера, сверка),
