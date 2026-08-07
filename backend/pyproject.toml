@@ -11,8 +11,9 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "httpx>=0.28",
-    # "tinkoff-investments>=0.2.0b110",  # TODO(task 9): пакет удалён с PyPI, upstream архивирован.
-    # Замена (git-источник архива / свой REST-клиент / сторонний пакет) выбирается в задаче 9.
+    # tinkoff-investments (task 9): пакет удалён с PyPI, upstream архивирован.
+    # Заменён собственным REST-клиентом поверх httpx (app/connectors/tbank).
+    "certifi>=2026.7.22",
 ]
 
 [dependency-groups]
