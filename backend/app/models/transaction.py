@@ -27,7 +27,13 @@ class OperationType(StrEnum):
 class Transaction(Base):
     __tablename__ = "transaction"
     __table_args__ = (
-        UniqueConstraint("source", "external_id", name="uq_transaction_source_external"),
+        # Область действия — счёт, а не весь источник: T-Invest переиспользует один и
+        # тот же internal id для двух РАЗНЫХ записей на РАЗНЫХ счетах одного владельца
+        # (обе стороны перевода между своими счетами делят один "id" — живое
+        # подтверждение см. fix-ledger-unique-report.md). Ограничение только на
+        # (source, external_id) без account_id ложно принимало такую пару за дубль и
+        # роняло весь батч синхронизации второго счёта.
+        UniqueConstraint("account_id", "source", "external_id", name="uq_transaction_source_external"),
         UniqueConstraint("dedup_key", name="uq_transaction_dedup_key"),
         Index("ix_transaction_account_executed", "account_id", "executed_at"),
     )

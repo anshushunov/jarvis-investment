@@ -143,3 +143,40 @@ def test_append_operations_falls_back_to_row_by_row_on_bulk_conflict(session, mo
     assert result.inserted == 1
     assert result.skipped == 1
     assert count_tx(session) == 2
+
+
+def test_append_operations_skips_external_id_conflict_without_losing_rest_of_batch(session, monkeypatch):
+    """Живой дефект: у T-Invest один и тот же внешний идентификатор операции (external_id)
+    иногда переиспользуется для двух записей с РАЗНЫМ содержанием (например, брокер
+    повторно отдаёт операцию с чуть изменившимся содержанием в пересекающееся окно
+    повторной синхронизации, SYNC_OVERLAP_DAYS) — то есть с разными dedup_key. Такая пара
+    не ловится проверкой по dedup_key, а падает только на uq_transaction_source_external.
+    До этой правки append_operations не перехватывал это ограничение — конфликт всплывал
+    наружу как DBAPIError и ронял batch целиком (см. fix-ledger-unique-report.md), хотя по
+    смыслу задачи это тоже дубль, который нужно пропустить, а не потерять остальные
+    легитимные операции того же батча.
+
+    Тот же управляемый шов, что и в test_append_operations_falls_back_to_row_by_row_on_bulk_conflict:
+    подменяем только чтение известных dedup_key (_load_known_keys), чтобы дойти до
+    настоящей вставки и настоящего конфликта — на этот раз по external_id, а не по
+    dedup_key."""
+    account = make_account(session)
+
+    existing_op = buy_op(external_id="ext-shared")
+    existing_key = natural_key("tbank", account.external_id, existing_op)
+    assert _insert_one(session, account, "tbank", existing_op, existing_key) is True
+
+    # Тот же external_id, что и existing_op, но другое содержание (другой executed_at) —
+    # значит другой dedup_key. Дубль по uq_transaction_source_external, а не по dedup_key.
+    conflicting_op = buy_op(
+        external_id="ext-shared", executed_at=datetime(2026, 3, 13, 10, 30, tzinfo=timezone.utc)
+    )
+    new_op = buy_op(external_id="ext-2", executed_at=datetime(2026, 3, 14, 10, 30, tzinfo=timezone.utc))
+
+    monkeypatch.setattr(ledger_service, "_load_known_keys", lambda session, keys: set())
+
+    result = append_operations(session, account, "tbank", [conflicting_op, new_op])
+
+    assert result.inserted == 1
+    assert result.skipped == 1
+    assert count_tx(session) == 2

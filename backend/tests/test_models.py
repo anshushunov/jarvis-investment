@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.models import Account, Instrument, OperationType, Transaction
@@ -62,6 +62,42 @@ def test_external_id_unique_per_source(session):
     with pytest.raises(IntegrityError):
         session.commit()
     session.rollback()
+
+
+def test_external_id_can_repeat_across_different_accounts(session):
+    """T-Invest переиспользует один и тот же external id для двух разных записей на
+    разных счетах одного владельца — например, обе стороны перевода между своими
+    счетами делят общий идентификатор (живое подтверждение и разбор данных —
+    fix-ledger-unique-report.md). uq_transaction_source_external должен быть
+    ограничен рамками счёта (account_id, source, external_id), а не source целиком,
+    иначе такая пара ложно считается дублем."""
+    account_a = Account(broker="tbank", kind="brokerage", external_id="acc-a",
+                        name="Первый", currency="RUB")
+    account_b = Account(broker="tbank", kind="brokerage", external_id="acc-b",
+                        name="Второй", currency="RUB")
+    session.add_all([account_a, account_b])
+    session.flush()
+
+    shared_external_id = "8b344af2-3735-4bca-bb13-9c9901fc8047"
+
+    def make(account_id: int, dedup_key: str) -> Transaction:
+        return Transaction(
+            account_id=account_id, instrument_id=None, op_type=OperationType.OTHER,
+            executed_at=datetime(2026, 4, 13, tzinfo=timezone.utc),
+            quantity=Decimal("0"), price=Decimal("0"), amount=Decimal("40000.0000"),
+            currency="RUB", fee=Decimal("0"), external_id=shared_external_id,
+            source="tbank", payload={"operation_type": "OPERATION_TYPE_INP_MULTI"},
+            dedup_key=dedup_key,
+        )
+
+    session.add(make(account_a.id, "dedup-shared-a"))
+    session.add(make(account_b.id, "dedup-shared-b"))
+    session.commit()
+
+    count = session.execute(
+        select(func.count()).select_from(Transaction).where(Transaction.external_id == shared_external_id)
+    ).scalar_one()
+    assert count == 2
 
 
 def _make_transaction(account_id: int, external_id: str) -> Transaction:

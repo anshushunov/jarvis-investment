@@ -12,6 +12,23 @@ from app.models import Account, Transaction
 
 # UniqueConstraint("dedup_key", name="uq_transaction_dedup_key") в app/models/transaction.py.
 _DEDUP_KEY_UNIQUE_CONSTRAINT = "uq_transaction_dedup_key"
+# UniqueConstraint("account_id", "source", "external_id", name="uq_transaction_source_external")
+# там же. Тот же внешний идентификатор брокера на этом же счёте, но с иным dedup_key —
+# например, брокер повторно отдал операцию с чуть изменившимся содержанием при
+# пересекающемся окне повторной синхронизации (см. SYNC_OVERLAP_DAYS в app/sync/service.py).
+# По смыслу задачи это тоже «уже записано», а не ошибка — живое подтверждение и разбор
+# в fix-ledger-unique-report.md.
+_SOURCE_EXTERNAL_UNIQUE_CONSTRAINT = "uq_transaction_source_external"
+
+
+def _is_duplicate_conflict(exc: IntegrityError) -> bool:
+    """True, если exc — конфликт по одному из двух уникальных ограничений журнала,
+    которые по смыслу задачи означают «дубль, пропустить», а не ошибку. Любой другой
+    IntegrityError (внешний ключ, NOT NULL) — ошибка вызывающего кода и обязан
+    всплыть наружу, а не быть проглоченным."""
+    return is_unique_violation(exc, _DEDUP_KEY_UNIQUE_CONSTRAINT) or is_unique_violation(
+        exc, _SOURCE_EXTERNAL_UNIQUE_CONSTRAINT
+    )
 
 
 @dataclass(frozen=True)
@@ -42,11 +59,12 @@ def _build_transaction(
 
 def _insert_one(session: Session, account: Account, source: str, op: RawOperation, key: str) -> bool:
     """Вставляет одну операцию под собственным SAVEPOINT. Возвращает False, если это
-    дубль по dedup_key, обнаруженный только на вставке — гонка с параллельным вызовом
-    append_operations по тому же счёту (плановая синхронизация и ручная синхронизация
-    через API могут пересечься по времени). Это медленный, но безопасный путь на
-    единичную строку — append_operations прибегает к нему только тогда, когда быстрый
-    пакетный flush всего батча уже столкнулся с конфликтом (см. append_operations)."""
+    дубль — конфликт по dedup_key (гонка с параллельным вызовом append_operations по
+    тому же счёту) или по (account_id, source, external_id) (тот же внешний
+    идентификатор брокера уже записан для этого счёта, см. _is_duplicate_conflict) —
+    обнаруженный только на вставке. Это медленный, но безопасный путь на единичную
+    строку — append_operations прибегает к нему только тогда, когда быстрый пакетный
+    flush всего батча уже столкнулся с конфликтом (см. append_operations)."""
     instrument = resolve_instrument(session, op)
     transaction = _build_transaction(account, source, op, key, instrument.id if instrument else None)
     try:
@@ -54,7 +72,7 @@ def _insert_one(session: Session, account: Account, source: str, op: RawOperatio
             session.add(transaction)
             session.flush()
     except IntegrityError as exc:
-        if not is_unique_violation(exc, _DEDUP_KEY_UNIQUE_CONSTRAINT):
+        if not _is_duplicate_conflict(exc):
             raise
         # SQLAlchemy сам изгоняет transaction из сессии при откате SAVEPOINT — повторный
         # explicit expunge здесь лишний и падает с InvalidRequestError.
@@ -107,8 +125,8 @@ def append_operations(
     # каждую строку медленнее одного flush на батч на 63-95% — методика и полные цифры
     # в task-5-report.md, раунд 2. При первой полной синхронизации истории счёта (тысячи
     # операций, синхронный вызов из POST /api/sync/tbank) это ощутимо, поэтому конфликт
-    # по dedup_key обрабатывается не построчным SAVEPOINT сразу, а как редкое исключение
-    # из быстрого пути.
+    # по любому из двух уникальных ограничений журнала обрабатывается не построчным
+    # SAVEPOINT сразу, а как редкое исключение из быстрого пути.
     transactions = []
     for op, key in to_insert:
         instrument = resolve_instrument(session, op)
@@ -119,12 +137,15 @@ def append_operations(
             session.add_all(transactions)
             session.flush()
     except IntegrityError as exc:
-        if not is_unique_violation(exc, _DEDUP_KEY_UNIQUE_CONSTRAINT):
+        if not _is_duplicate_conflict(exc):
             raise
-        # Гонка: кто-то другой вставил дубль между нашим SELECT known и этим flush.
-        # SQLAlchemy откатил SAVEPOINT и изгнал весь transactions из сессии. Медленный,
-        # но надёжный путь — вставить по одной операции под своим SAVEPOINT, чтобы
-        # отделить реально столкнувшуюся строку (или несколько) от легитимных новых.
+        # Гонка/дубль: либо кто-то другой вставил такой же dedup_key между нашим SELECT
+        # known и этим flush, либо в батче нашлась операция с уже занятым на этом счёте
+        # (account_id, source, external_id), но другим содержанием (см.
+        # _is_duplicate_conflict и fix-ledger-unique-report.md). SQLAlchemy откатил
+        # SAVEPOINT и изгнал весь transactions из сессии. Медленный, но надёжный путь —
+        # вставить по одной операции под своим SAVEPOINT, чтобы отделить реально
+        # столкнувшуюся строку (или несколько) от легитимных новых.
         inserted = 0
         conflict_skipped = 0
         for op, key in to_insert:
