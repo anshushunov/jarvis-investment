@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -6,6 +5,7 @@ import httpx
 import respx
 
 from app.connectors.base import BrokerAccount, BrokerPosition
+from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
 from app.models import OperationType
 
@@ -15,6 +15,18 @@ OPERATIONS = f"{BASE}/tinkoff.public.invest.api.contract.v1.OperationsService"
 INSTRUMENTS = f"{BASE}/tinkoff.public.invest.api.contract.v1.InstrumentsService"
 
 TOKEN = "test-token-not-real"  # nosec: тестовое значение, не боевой токен
+
+
+def _mock_instrument_lists(**by_kind: list[dict]) -> dict[str, respx.Route]:
+    """Мокает все пять списочных методов справочника инструментов
+    (INSTRUMENT_LIST_KINDS). По умолчанию каждый отдаёт пустой список; нужный
+    вид переопределяется через by_kind, например _mock_instrument_lists(Shares=[...])."""
+    routes = {}
+    for kind in INSTRUMENT_LIST_KINDS:
+        routes[kind] = respx.post(f"{INSTRUMENTS}/{kind}").mock(
+            return_value=httpx.Response(200, json={"instruments": by_kind.get(kind, [])})
+        )
+    return routes
 
 
 @respx.mock
@@ -39,7 +51,7 @@ def test_fetch_accounts_maps_iis_and_default_kind():
 
 
 @respx.mock
-def test_fetch_operations_resolves_instrument_and_skips_unexecuted():
+def test_fetch_operations_resolves_instrument_via_bulk_list_and_skips_unexecuted():
     respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
         return_value=httpx.Response(200, json={
             "hasNext": False,
@@ -78,10 +90,11 @@ def test_fetch_operations_resolves_instrument_and_skips_unexecuted():
             ],
         })
     )
-    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
-        return_value=httpx.Response(200, json={
-            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
-        })
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
+    )
+    instrument_by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={"instrument": {}})
     )
 
     operations = TBankConnector(TOKEN).fetch_operations(
@@ -100,6 +113,80 @@ def test_fetch_operations_resolves_instrument_and_skips_unexecuted():
     deposit = next(op for op in operations if op.external_id == "500000003")
     assert deposit.op_type == OperationType.DEPOSIT
     assert deposit.isin is None
+
+    # Инструмент нашёлся в списочном индексе — поштучный запасной путь не нужен.
+    assert instrument_by_figi.call_count == 0
+
+
+@respx.mock
+def test_fetch_operations_falls_back_to_get_instrument_by_when_not_in_bulk_lists():
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000004",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T10:30:00Z",
+                    "figi": "TCS00A0EXOTIC",
+                    "quantity": "1",
+                    "price": {"currency": "rub", "units": "100", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-100", "nano": 0},
+                },
+            ],
+        })
+    )
+    # Ни один списочный метод не знает этот FIGI (например, структурный продукт
+    # или DFA — они не входят в INSTRUMENT_LIST_KINDS).
+    _mock_instrument_lists()
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC"}
+        })
+    )
+
+    operations = TBankConnector(TOKEN).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert len(operations) == 1
+    assert operations[0].isin == "RU000AEXOTIC"
+    assert operations[0].ticker == "EXOTIC"
+
+
+@respx.mock
+def test_fetch_operations_without_figis_does_not_call_instrument_lists():
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000005",
+                    "type": "OPERATION_TYPE_INPUT",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-01T00:00:00Z",
+                    "figi": "",
+                    "quantity": "0",
+                    "price": {"currency": "rub", "units": "0", "nano": 0},
+                    "payment": {"currency": "rub", "units": "100000", "nano": 0},
+                },
+            ],
+        })
+    )
+    shares_route = respx.post(f"{INSTRUMENTS}/Shares").mock(
+        return_value=httpx.Response(200, json={"instruments": []})
+    )
+
+    operations = TBankConnector(TOKEN).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert len(operations) == 1
+    # Ни одного FIGI в операциях — строить списочный индекс незачем.
+    assert shares_route.call_count == 0
 
 
 @respx.mock
@@ -123,10 +210,8 @@ def test_fetch_positions_skips_entries_without_isin():
             ],
         })
     )
-    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
-        return_value=httpx.Response(200, json={
-            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
-        })
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
     )
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
@@ -153,10 +238,8 @@ def test_fetch_positions_keeps_full_precision_for_fractional_quantity():
             ],
         })
     )
-    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
-        return_value=httpx.Response(200, json={
-            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
-        })
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
     )
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
@@ -176,18 +259,12 @@ def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
             ],
         })
     )
-
-    def instrument_responder(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if body["id"] == "BBG0047315Y7":
-            return httpx.Response(200, json={
-                "instrument": {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"}
-            })
-        return httpx.Response(200, json={
-            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
-        })
-
-    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(side_effect=instrument_responder)
+    _mock_instrument_lists(
+        Shares=[
+            {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"},
+            {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"},
+        ],
+    )
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 

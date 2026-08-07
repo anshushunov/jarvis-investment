@@ -1,6 +1,7 @@
 import ssl
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import certifi
 import httpx
@@ -16,6 +17,45 @@ OPERATIONS_PAGE_LIMIT = 1000
 # непустой cursor бесконечно: 500 страниц по 1000 операций — 500 000 операций,
 # заведомо больше истории любого реального счёта.
 MAX_OPERATIONS_PAGES = 500
+
+# Справочник инструментов отдаёт списки целиком по видам инструментов — это
+# используется коннектором, чтобы построить индекс FIGI → инструмент за
+# несколько вызовов вместо одного вызова GetInstrumentBy на каждый уникальный
+# FIGI (при истории в годы уникальных инструментов набираются сотни, и именно
+# это раньше упиралось в ограничение частоты запросов). instrumentStatus=ALL
+# (а не BASE) выбран намеренно: BASE не включает инструменты, переставшие
+# торговаться (делистинг, заморозка после 2022 года), а именно такие часто
+# встречаются в истории операций за несколько лет.
+INSTRUMENT_LIST_KINDS = ("Shares", "Bonds", "Etfs", "Currencies", "Futures")
+INSTRUMENT_STATUS_ALL = "INSTRUMENT_STATUS_ALL"
+
+# Устойчивость к 429 (Too Many Requests): T-Invest API ограничивает частоту
+# запросов, и поштучные вызовы (GetInstrumentBy на инструмент, которого нет в
+# списочном индексе) — ровно то место, где лимит реально срабатывает при
+# синхронизации нескольких счетов подряд. Без повтора один 429 роняет весь
+# fetch_operations/fetch_positions вместо того, чтобы подождать и попробовать
+# снова.
+MAX_RETRY_ATTEMPTS = 5
+INITIAL_RETRY_DELAY_SECONDS = 1.0
+RETRY_BACKOFF_MULTIPLIER = 2.0
+MAX_RETRY_DELAY_SECONDS = 30.0
+TOO_MANY_REQUESTS = 429
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Сколько ждать по заголовку Retry-After, если сервер его прислал.
+    Понимает только форму "число секунд" (delta-seconds из RFC 7231) — форму
+    HTTP-date не разбираем: у T-Invest API это JSON-шлюз, а не CDN/кеш, и
+    delta-seconds для лимита запросов ожидаема; если формат не распознан,
+    вызывающий код просто использует собственный экспоненциальный шаг."""
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
 
 # T-Bank (бывший Tinkoff) выпускает сертификат *.tinkoff.ru через цепочку
 # Минцифры (Russian Trusted Root CA), которой нет в стандартном наборе
@@ -37,25 +77,42 @@ class TBankClient:
     только вызовы читающих методов и разбор JSON-конвертов вида {"поле": [...]}.
     """
 
-    def __init__(self, token: str, base_url: str = DEFAULT_BASE_URL, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = 15.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._ssl_context = _build_ssl_context()
+        # Внедряемая функция паузы — в тестах подменяется на фейк, чтобы
+        # повтор при 429 не спал по-настоящему.
+        self._sleep = sleep
 
     def _post(self, service: str, method: str, body: dict[str, Any]) -> dict[str, Any]:
-        response = httpx.post(
-            f"{self.base_url}/{service}/{method}",
-            json=body,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-            },
-            timeout=self.timeout,
-            verify=self._ssl_context,
-        )
-        response.raise_for_status()
-        return response.json()
+        url = f"{self.base_url}/{service}/{method}"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        delay = INITIAL_RETRY_DELAY_SECONDS
+        attempt = 1
+        while True:
+            response = httpx.post(url, json=body, headers=headers, timeout=self.timeout, verify=self._ssl_context)
+            if response.status_code == TOO_MANY_REQUESTS and attempt < MAX_RETRY_ATTEMPTS:
+                wait_seconds = _retry_after_seconds(response) or delay
+                self._sleep(wait_seconds)
+                delay = min(delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY_SECONDS)
+                attempt += 1
+                continue
+            # Не 429 — обычный успех/ошибка. 429 на последней попытке — тоже
+            # сюда: попытки исчерпаны, ошибка обязана всплыть наружу, а не
+            # тихо вернуть неполные данные.
+            response.raise_for_status()
+            return response.json()
 
     def get_accounts(self) -> list[dict]:
         return self._post(USERS_SERVICE, "GetAccounts", {}).get("accounts", [])
@@ -90,5 +147,17 @@ class TBankClient:
         return self._post(OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account_id}).get("positions", [])
 
     def get_instrument_by_figi(self, figi: str) -> dict | None:
+        """Поштучное разрешение одного инструмента по FIGI. Оставлен как
+        запасной путь для того, чего не нашлось в list_instruments (см. там же) —
+        не как основной способ резолвинга множества инструментов."""
         body = {"idType": "INSTRUMENT_ID_TYPE_FIGI", "id": figi}
         return self._post(INSTRUMENTS_SERVICE, "GetInstrumentBy", body).get("instrument")
+
+    def list_instruments(self, kind: str) -> list[dict]:
+        """Полный список инструментов одного вида (kind — literal-имя метода
+        InstrumentsService: один из INSTRUMENT_LIST_KINDS). Несколько таких
+        вызовов дают почти полное покрытие FIGI → инструмент за фиксированное
+        число запросов вместо одного запроса на каждый уникальный инструмент
+        в истории счёта."""
+        body = {"instrumentStatus": INSTRUMENT_STATUS_ALL}
+        return self._post(INSTRUMENTS_SERVICE, kind, body).get("instruments", [])

@@ -4,7 +4,11 @@ import httpx
 import pytest
 import respx
 
-from app.connectors.tbank.client import TBankClient
+from app.connectors.tbank.client import (
+    INITIAL_RETRY_DELAY_SECONDS,
+    MAX_RETRY_ATTEMPTS,
+    TBankClient,
+)
 
 BASE = "https://invest-public-api.tinkoff.ru/rest"
 USERS = f"{BASE}/tinkoff.public.invest.api.contract.v1.UsersService"
@@ -176,3 +180,84 @@ def test_http_error_raises():
     respx.post(f"{USERS}/GetAccounts").mock(return_value=httpx.Response(500))
     with pytest.raises(httpx.HTTPStatusError):
         TBankClient(TOKEN).get_accounts()
+
+
+@respx.mock
+def test_list_instruments_requests_status_all_and_parses_items():
+    route = respx.post(f"{INSTRUMENTS}/Shares").mock(
+        return_value=httpx.Response(200, json={
+            "instruments": [
+                {"figi": "BBG004730N88", "isin": "RU0009029540", "ticker": "SBER"},
+            ]
+        })
+    )
+
+    instruments = TBankClient(TOKEN).list_instruments("Shares")
+
+    assert instruments == [{"figi": "BBG004730N88", "isin": "RU0009029540", "ticker": "SBER"}]
+    sent_body = route.calls.last.request.content
+    assert b'"instrumentStatus":"INSTRUMENT_STATUS_ALL"' in sent_body
+
+
+@respx.mock
+def test_list_instruments_returns_empty_list_when_no_instruments_key():
+    respx.post(f"{INSTRUMENTS}/Bonds").mock(return_value=httpx.Response(200, json={}))
+    assert TBankClient(TOKEN).list_instruments("Bonds") == []
+
+
+class _FakeSleep:
+    """Записывает паузы вместо того, чтобы реально спать — тесты на повтор
+    при 429 не должны занимать секунды реального времени."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+@respx.mock
+def test_post_retries_on_429_then_succeeds():
+    route = respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[
+            httpx.Response(429),
+            httpx.Response(200, json={"accounts": []}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    accounts = TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert accounts == []
+    assert route.call_count == 2
+    assert sleep.calls == [INITIAL_RETRY_DELAY_SECONDS]  # без Retry-After — свой экспоненциальный шаг
+
+
+@respx.mock
+def test_post_waits_according_to_retry_after_header():
+    respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "3"}),
+            httpx.Response(200, json={"accounts": []}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert sleep.calls == [3.0]
+
+
+@respx.mock
+def test_post_raises_after_exhausting_retries():
+    route = respx.post(f"{USERS}/GetAccounts").mock(
+        return_value=httpx.Response(429)
+    )
+    sleep = _FakeSleep()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert route.call_count == MAX_RETRY_ATTEMPTS
+    # Пауза только между попытками, после последней — не спим, а поднимаем ошибку.
+    assert len(sleep.calls) == MAX_RETRY_ATTEMPTS - 1
