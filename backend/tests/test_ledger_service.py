@@ -3,9 +3,11 @@ from decimal import Decimal
 
 from sqlalchemy import func, select
 
+from app.instruments.service import _insert_instrument
+from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
-from app.ledger.service import append_operations
-from app.models import Account, OperationType, Transaction
+from app.ledger.service import _insert_one, append_operations
+from app.models import Account, Instrument, OperationType, Transaction
 
 
 def make_account(session) -> Account:
@@ -73,3 +75,39 @@ def test_cash_operation_has_no_instrument(session):
     append_operations(session, account, "tbank", [deposit])
     tx = session.execute(select(Transaction)).scalar_one()
     assert tx.instrument_id is None
+
+
+def test_dedup_conflict_at_insert_is_skipped_not_raised(session):
+    """Гонка между двумя параллельными вызовами append_operations по одному счёту
+    (например, плановая синхронизация и ручной POST /api/sync/tbank почти одновременно):
+    оба видят один и тот же dedup_key ещё не занятым на этапе предварительного SELECT,
+    и только на INSERT срабатывает uq_transaction_dedup_key. В одном потоке эту гонку
+    через append_operations не воспроизвести — SELECT в начале второго вызова уже увидит
+    строку первого. Поэтому обходим предварительную проверку и вызываем внутреннюю
+    функцию вставки _insert_one дважды подряд с одним и тем же dedup_key — уникальный
+    индекс срабатывает по-настоящему, а ветка обработки конфликта оказывается покрыта."""
+    account = make_account(session)
+    # external_id=None: конфликт должен проверяться именно по dedup_key, а не попутно
+    # словить uq_transaction_source_external из-за одинакового external_id.
+    op = buy_op(external_id=None)
+    key = natural_key("tbank", account.external_id, op)
+
+    assert _insert_one(session, account, "tbank", op, key) is True
+    assert _insert_one(session, account, "tbank", op, key) is False
+    assert count_tx(session) == 1
+
+
+def test_instrument_isin_conflict_at_insert_reuses_existing(session):
+    """Аналогичная гонка на уровне резолюции инструмента: два вызова append_operations
+    впервые видят один и тот же новый ISIN одновременно. resolve_instrument сам её не
+    воспроизведёт (предварительный select найдёт уже вставленную строку) — вызываем
+    внутреннюю _insert_instrument дважды подряд, минуя select, чтобы сработал реальный
+    уникальный индекс ix_instrument_isin."""
+    op = buy_op()
+
+    first = _insert_instrument(session, op)
+    second = _insert_instrument(session, op)
+
+    assert first.id == second.id
+    count = session.execute(select(func.count()).select_from(Instrument)).scalar_one()
+    assert count == 1
