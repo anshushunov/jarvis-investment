@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import Date, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,4 +20,4 @@ class Instrument(Base):
     sector: Mapped[str | None] = mapped_column(String(64))
     asset_class: Mapped[str | None] = mapped_column(String(32))
     maturity_date: Mapped[date | None] = mapped_column(Date)
-    face_value: Mapped[object | None] = mapped_column(Numeric(20, 4))
+    face_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))

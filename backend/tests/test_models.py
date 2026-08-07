@@ -59,3 +59,4 @@ def test_external_id_unique_per_source(session):
     session.add(make("dup-1"))
     with pytest.raises(IntegrityError):
         session.commit()
+    session.rollback()

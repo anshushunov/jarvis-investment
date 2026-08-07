@@ -32,5 +32,6 @@ def session(test_engine):
     db = factory()
     yield db
     db.close()
-    transaction.rollback()
+    if transaction.is_active:
+        transaction.rollback()
     connection.close()
