@@ -121,3 +121,73 @@ def test_snapshot_roundtrip_keeps_decimal(session):
     assert stored.by_asset_class["equity"] == "2300.0000"
     assert Decimal(stored.by_asset_class["equity"]) == Decimal("2300.0000")
     assert Decimal(stored.by_account["Брокерский"]) == Decimal("7350.0000")
+
+
+def test_position_with_zero_price_shows_full_loss(session):
+    account = seed(session)
+    defaulted = Instrument(isin="RU000DEFAUL1", ticker="DEFLT", secid="DEFLT",
+                           kind="share", currency="RUB", issuer="Дефолтный эмитент")
+    session.add(defaulted)
+    session.flush()
+    session.add(Position(account_id=account.id, instrument_id=defaulted.id,
+                         quantity=Decimal("10"), average_price=Decimal("50")))
+    session.add(Price(instrument_id=defaulted.id, on_date=date(2026, 3, 12),
+                       close=Decimal("0"), source="moex"))
+    session.flush()
+
+    rows = {row.ticker: row for row in position_rows(session)}
+    row = rows["DEFLT"]
+    assert row.last_price is not None
+    assert row.market_value == Decimal("0.0000")
+    assert row.profit == Decimal("-500.0000")
+    assert row.profit_percent == Decimal("-100.0000")
+
+
+def test_by_account_keeps_distinct_names_as_own_rows(session):
+    first = Account(broker="tbank", kind="brokerage", external_id="acc-a",
+                    name="ИИС", currency="RUB")
+    second = Account(broker="sber", kind="brokerage", external_id="acc-b",
+                     name="Брокерский Сбер", currency="RUB")
+    share = Instrument(isin="RU0009029540", ticker="SBER", secid="SBER",
+                       kind="share", currency="RUB", issuer="Сбербанк")
+    session.add_all([first, second, share])
+    session.flush()
+    session.add_all([
+        Position(account_id=first.id, instrument_id=share.id,
+                 quantity=Decimal("1"), average_price=Decimal("100")),
+        Position(account_id=second.id, instrument_id=share.id,
+                 quantity=Decimal("2"), average_price=Decimal("100")),
+    ])
+    session.add(Price(instrument_id=share.id, on_date=date(2026, 3, 12),
+                       close=Decimal("150"), source="moex"))
+    session.flush()
+
+    overview = portfolio_overview(session)
+    assert overview.by_account["ИИС"] == Decimal("150.0000")
+    assert overview.by_account["Брокерский Сбер"] == Decimal("300.0000")
+
+
+def test_by_account_disambiguates_same_name_accounts(session):
+    first = Account(broker="tbank", kind="brokerage", external_id="acc-x",
+                    name="Счёт", currency="RUB")
+    second = Account(broker="tbank", kind="iis", external_id="acc-y",
+                     name="Счёт", currency="RUB")
+    share = Instrument(isin="RU0009029540", ticker="SBER", secid="SBER",
+                       kind="share", currency="RUB", issuer="Сбербанк")
+    session.add_all([first, second, share])
+    session.flush()
+    session.add_all([
+        Position(account_id=first.id, instrument_id=share.id,
+                 quantity=Decimal("1"), average_price=Decimal("100")),
+        Position(account_id=second.id, instrument_id=share.id,
+                 quantity=Decimal("2"), average_price=Decimal("100")),
+    ])
+    session.add(Price(instrument_id=share.id, on_date=date(2026, 3, 12),
+                       close=Decimal("150"), source="moex"))
+    session.flush()
+
+    overview = portfolio_overview(session)
+    assert len(overview.by_account) == 2
+    assert overview.by_account["Счёт (acc-x)"] == Decimal("150.0000")
+    assert overview.by_account["Счёт (acc-y)"] == Decimal("300.0000")
+    assert sum(overview.by_account.values()) == overview.positions_value
