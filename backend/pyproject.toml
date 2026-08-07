@@ -11,8 +11,8 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "httpx>=0.28",
-    # "tinkoff-investments>=0.2.0b110",  # TODO(task 9): пакет временно в карантине на PyPI
-    # (см. task-1-report.md, раздел "Проблемы и сомнения"), вернуть перед задачей 9.
+    # "tinkoff-investments>=0.2.0b110",  # TODO(task 9): пакет удалён с PyPI, upstream архивирован.
+    # Замена (git-источник архива / свой REST-клиент / сторонний пакет) выбирается в задаче 9.
 ]
 
 [dependency-groups]

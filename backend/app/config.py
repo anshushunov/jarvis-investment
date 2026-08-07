@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file="../.env", extra="ignore")
 
-    database_url: str = "postgresql+psycopg://jarvis:jarvis@localhost:5432/jarvis"
+    database_url: str = "postgresql+psycopg://jarvis:jarvis@localhost:5433/jarvis"
     tbank_token: str = ""
     moex_base_url: str = "https://iss.moex.com/iss"
 

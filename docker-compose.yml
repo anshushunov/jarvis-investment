@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: jarvis
       POSTGRES_PASSWORD: jarvis
       POSTGRES_DB: jarvis
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jarvis"]
