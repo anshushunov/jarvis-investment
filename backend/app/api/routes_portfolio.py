@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analytics.service import portfolio_overview, position_rows
+from app.api.account_labels import account_label
 from app.api.schemas import HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
 from app.db import get_session
 from app.models import DailySnapshot, Reconciliation
@@ -45,6 +46,10 @@ def get_reconciliations(session: Session = Depends(get_session)) -> list[Reconci
         ReconciliationOut(
             isin=row.isin, status=row.status,
             ledger_quantity=row.ledger_quantity, broker_quantity=row.broker_quantity,
+            # Сверка считается по каждому счёту отдельно — один и тот же ISIN
+            # может дать две строки на двух разных счетах, неразличимые без
+            # подписи счёта (см. отчёт задачи 15, раунд правок 1).
+            account=account_label(session, row.account_id),
         )
         for row in rows
     ]

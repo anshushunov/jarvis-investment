@@ -55,6 +55,7 @@ class ReconciliationOut(BaseModel):
     status: str
     ledger_quantity: Decimal
     broker_quantity: Decimal
+    account: str
 
     @field_serializer("ledger_quantity", "broker_quantity")
     def serialize_quantity(self, value: Decimal) -> str:

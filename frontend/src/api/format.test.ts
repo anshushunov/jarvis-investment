@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, formatPercent, formatQuantity } from "./format";
+import { formatDate, formatMoney, formatPercent, formatQuantity } from "./format";
 
 describe("formatMoney", () => {
   it("группирует разряды неразрывными пробелами и добавляет рубль", () => {
@@ -36,5 +36,16 @@ describe("formatQuantity", () => {
 
   it("сохраняет дробные паи", () => {
     expect(formatQuantity("0.50000000")).toBe("0,5");
+  });
+});
+
+describe("formatDate", () => {
+  it("переводит календарную дату в формат ДД.ММ.ГГГГ", () => {
+    expect(formatDate("2026-08-07")).toBe("07.08.2026");
+  });
+
+  it("возвращает null вместо отсутствующей даты", () => {
+    expect(formatDate(null)).toBeNull();
+    expect(formatDate(undefined)).toBeNull();
   });
 });

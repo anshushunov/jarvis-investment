@@ -94,6 +94,32 @@ def test_reconciliations_endpoint_lists_findings(client, session):
     rows = client.get("/api/reconciliations").json()
     assert rows[0]["status"] == "quantity_mismatch"
     assert rows[0]["broker_quantity"] == "12.00000000"
+    assert rows[0]["account"] == "Брокерский (acc-1)"
+
+
+def test_reconciliations_endpoint_distinguishes_accounts_with_same_isin(client, session):
+    # Сверка считается по каждому счёту отдельно: один и тот же ISIN может
+    # дать две строки на двух разных счетах, а имя счёта не обязано быть
+    # уникальным (коннектор Т-Банка подставляет заглушку «Счёт»). Подпись в
+    # ответе обязана всё равно их различать.
+    account_a = Account(broker="tbank", kind="brokerage", external_id="acc-a", name="Счёт")
+    account_b = Account(broker="tbank", kind="iis", external_id="acc-b", name="Счёт")
+    session.add_all([account_a, account_b])
+    session.flush()
+
+    session.add_all([
+        Reconciliation(account_id=account_a.id, isin="RU0009029540",
+                       ledger_quantity=Decimal("10"), broker_quantity=Decimal("12"),
+                       status="quantity_mismatch"),
+        Reconciliation(account_id=account_b.id, isin="RU0009029540",
+                       ledger_quantity=Decimal("5"), broker_quantity=Decimal("5.5"),
+                       status="quantity_mismatch"),
+    ])
+    session.flush()
+
+    rows = client.get("/api/reconciliations").json()
+    labels = {row["account"] for row in rows if row["isin"] == "RU0009029540"}
+    assert labels == {"Счёт (acc-a)", "Счёт (acc-b)"}
 
 
 def test_empty_portfolio_returns_zeroes(client, session):

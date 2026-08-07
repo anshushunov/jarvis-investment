@@ -2,7 +2,17 @@ import { formatMoney, formatQuantity } from "../api/format";
 import { ChangeValue } from "./MoneyValue";
 import type { PositionRow } from "../api/client";
 
-export function PositionsTable({ rows }: { rows: PositionRow[] }) {
+export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: string | null }) {
+  // Сбой запроса — не то же самое, что «позиций пока нет»: приглашение
+  // «запустите синхронизацию» при реальном сбое сети было бы враньём.
+  if (error) {
+    return (
+      <div className="card" style={{ color: "var(--red)", fontSize: 13 }}>
+        Не удалось загрузить позиции: {error}
+      </div>
+    );
+  }
+
   if (rows.length === 0) {
     return (
       <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>

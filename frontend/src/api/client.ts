@@ -33,6 +33,9 @@ export interface ReconciliationRow {
   status: string;
   ledger_quantity: string;
   broker_quantity: string;
+  // Подпись счёта, к которому относится расхождение (сверка считается по
+  // каждому счёту отдельно — один ISIN может дать две строки на двух счетах).
+  account: string;
 }
 
 export interface SyncRunResult {
@@ -46,10 +49,26 @@ export interface SyncRunResult {
   error: string | null;
 }
 
+// FastAPI сериализует HTTPException как {"detail": "..."} — настоящая причина
+// сбоя (например, «Не задан TBANK_TOKEN в .env») лежит в теле ответа; без
+// этого пользователь видит только код состояния, который ничего не объясняет.
+async function describeError(path: string, response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    const detail = (body as { detail?: unknown } | null)?.detail;
+    if (typeof detail === "string" && detail.trim() !== "") {
+      return detail;
+    }
+  } catch {
+    // Тело не JSON или пустое — довольствуемся кодом состояния ниже.
+  }
+  return `Запрос ${path} завершился с кодом ${response.status}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, init);
   if (!response.ok) {
-    throw new Error(`Запрос ${path} завершился с кодом ${response.status}`);
+    throw new Error(await describeError(path, response));
   }
   return response.json() as Promise<T>;
 }

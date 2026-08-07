@@ -1,4 +1,5 @@
 import ReactECharts from "echarts-for-react";
+import { formatMoney } from "../api/format";
 
 const LABELS: Record<string, string> = {
   equity: "Акции",
@@ -31,7 +32,11 @@ const COLORS: Record<string, string> = {
 export function AllocationChart({ data }: { data: Record<string, string> }) {
   const entries = Object.entries(data).map(([key, value]) => ({
     name: LABELS[key] ?? key,
+    // value — только геометрия сектора, число здесь разрешено (écharts не
+    // умеет строки). raw — исходная строка от бэкенда, идёт в подсказку через
+    // ту же formatMoney, что и весь остальной интерфейс, а не через число.
     value: Number.parseFloat(value),
+    raw: value,
     itemStyle: { color: COLORS[key] },
   }));
 
@@ -49,7 +54,14 @@ export function AllocationChart({ data }: { data: Record<string, string> }) {
       <ReactECharts
         style={{ height: 260 }}
         option={{
-          tooltip: { trigger: "item", valueFormatter: (v: number) => `${v.toLocaleString("ru-RU")} ₽` },
+          tooltip: {
+            trigger: "item",
+            // Подсказка идёт владельцу на экран, а не в геометрию графика —
+            // сумма форматируется через formatMoney из исходной строки
+            // (params.data.raw), а не пересчётом уже сконвертированного числа.
+            formatter: (params: { marker: string; name: string; data: { raw: string } }) =>
+              `${params.marker}${params.name}: ${formatMoney(params.data.raw)}`,
+          },
           legend: { bottom: 0, textStyle: { color: "#9aa5c4" } },
           series: [{
             type: "pie",

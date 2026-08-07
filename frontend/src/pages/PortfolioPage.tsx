@@ -23,6 +23,12 @@ export function PortfolioPage() {
   if (overview.isError) return <div style={{ padding: 32 }}>Бэкенд недоступен. Запущен ли он на порту 8001?</div>;
 
   const asOf = formatDate(overview.data!.as_of);
+  // Сбой запроса — не то же самое, что легитимно пустой ответ (нет позиций,
+  // нет истории, нет расхождений): каждый компонент получает сообщение об
+  // ошибке отдельно и решает, как его показать, отличимо от пустого состояния.
+  const positionsError = positions.isError ? (positions.error as Error).message : null;
+  const historyError = history.isError ? (history.error as Error).message : null;
+  const reconciliationsError = reconciliations.isError ? (reconciliations.error as Error).message : null;
 
   return (
     <div style={{ maxWidth: 1180, margin: "0 auto", padding: "32px 24px", display: "grid", gap: 14 }}>
@@ -33,7 +39,7 @@ export function PortfolioPage() {
         </span>
       </div>
 
-      {reconciliations.data && <ReconciliationBanner rows={reconciliations.data} />}
+      <ReconciliationBanner rows={reconciliations.data ?? []} error={reconciliationsError} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
         <SummaryCard
@@ -43,12 +49,12 @@ export function PortfolioPage() {
           syncResult={sync.data ?? null}
           syncErrorMessage={sync.isError ? (sync.error as Error).message : null}
         />
-        <ValueChart points={history.data ?? []} />
+        <ValueChart points={history.data ?? []} error={historyError} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
         <AllocationChart data={overview.data!.by_asset_class} />
-        <PositionsTable rows={positions.data ?? []} />
+        <PositionsTable rows={positions.data ?? []} error={positionsError} />
       </div>
     </div>
   );

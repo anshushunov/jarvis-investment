@@ -7,7 +7,20 @@ const TEXT: Record<string, string> = {
   missing_at_broker: "есть в журнале, но нет у брокера",
 };
 
-export function ReconciliationBanner({ rows }: { rows: ReconciliationRow[] }) {
+export function ReconciliationBanner({ rows, error }: { rows: ReconciliationRow[]; error: string | null }) {
+  // Сбой проверки — это не то же самое, что «расхождений нет»: молчание здесь
+  // читалось бы владельцем как «всё сошлось», хотя сверка просто не выполнена.
+  if (error) {
+    return (
+      <div className="card" style={{ borderColor: "rgba(242,116,154,0.45)", background: "rgba(242,116,154,0.08)" }}>
+        <div style={{ color: "var(--red)", fontWeight: 600 }}>Не удалось проверить расхождения с брокером</div>
+        <div style={{ fontSize: 13, color: "var(--tx-2)", marginTop: 6 }}>
+          {error}. Это не значит, что расхождений нет — сверка сейчас недоступна.
+        </div>
+      </div>
+    );
+  }
+
   if (rows.length === 0) return null;
 
   return (
@@ -15,9 +28,13 @@ export function ReconciliationBanner({ rows }: { rows: ReconciliationRow[] }) {
       <div style={{ color: "var(--amber)", fontWeight: 600, marginBottom: 8 }}>
         Расхождения с данными брокера: {rows.length}
       </div>
-      {rows.map((row) => (
-        <div key={row.isin} style={{ fontSize: 13, color: "var(--tx-2)", padding: "3px 0" }}>
-          {row.isin}: {TEXT[row.status] ?? row.status} — в журнале {formatQuantity(row.ledger_quantity)},
+      {rows.map((row, index) => (
+        // Сверка считается по каждому счёту отдельно: один и тот же ISIN может
+        // дать две строки на двух разных счетах — ключ обязан учитывать счёт,
+        // а строка обязана показывать, о каком счёте речь (тот же класс бага,
+        // что был найден и исправлен в таблице позиций).
+        <div key={`${row.account}-${row.isin}-${index}`} style={{ fontSize: 13, color: "var(--tx-2)", padding: "3px 0" }}>
+          {row.account} · {row.isin}: {TEXT[row.status] ?? row.status} — в журнале {formatQuantity(row.ledger_quantity)},
           у брокера {formatQuantity(row.broker_quantity)}
         </div>
       ))}
