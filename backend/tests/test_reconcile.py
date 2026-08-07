@@ -103,3 +103,32 @@ def test_tiny_difference_below_threshold_is_ignored(session):
     ])
 
     assert result == []
+
+
+def test_reconcile_does_not_touch_other_accounts_findings(session):
+    account1, instrument = setup(session)
+    account2 = Account(broker="tbank", kind="brokerage", external_id="acc-2",
+                       name="ИИС", currency="RUB")
+    session.add(account2)
+    session.flush()
+
+    add_position(session, account1, instrument, "35")
+    add_position(session, account2, instrument, "99")
+
+    result2 = reconcile_account(session, account2, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("50"))
+    ])
+    assert len(result2) == 1
+
+    result1 = reconcile_account(session, account1, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("40"))
+    ])
+
+    assert len(result1) == 1
+    assert result1[0].ledger_quantity == Decimal("35.00000000")
+    assert result1[0].broker_quantity == Decimal("40.00000000")
+
+    account2_findings = session.query(Reconciliation).filter_by(account_id=account2.id).all()
+    assert len(account2_findings) == 1
+    assert account2_findings[0].ledger_quantity == Decimal("99.00000000")
+    assert account2_findings[0].broker_quantity == Decimal("50.00000000")
