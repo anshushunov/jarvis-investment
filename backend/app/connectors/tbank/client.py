@@ -11,6 +11,12 @@ USERS_SERVICE = "tinkoff.public.invest.api.contract.v1.UsersService"
 OPERATIONS_SERVICE = "tinkoff.public.invest.api.contract.v1.OperationsService"
 INSTRUMENTS_SERVICE = "tinkoff.public.invest.api.contract.v1.InstrumentsService"
 
+OPERATIONS_PAGE_LIMIT = 1000
+# Чисто защита от зацикливания, если API когда-нибудь вернёт hasNext=true и
+# непустой cursor бесконечно: 500 страниц по 1000 операций — 500 000 операций,
+# заведомо больше истории любого реального счёта.
+MAX_OPERATIONS_PAGES = 500
+
 # T-Bank (бывший Tinkoff) выпускает сертификат *.tinkoff.ru через цепочку
 # Минцифры (Russian Trusted Root CA), которой нет в стандартном наборе
 # доверенных корней (certifi/Mozilla). Без явного добавления этой цепочки
@@ -55,8 +61,30 @@ class TBankClient:
         return self._post(USERS_SERVICE, "GetAccounts", {}).get("accounts", [])
 
     def get_operations(self, account_id: str, from_iso: str, to_iso: str) -> list[dict]:
-        body = {"accountId": account_id, "from": from_iso, "to": to_iso}
-        return self._post(OPERATIONS_SERVICE, "GetOperations", body).get("operations", [])
+        """Все операции за период. OperationsService/GetOperations (без курсора)
+        молча обрезает ответ первой страницей (на практике — 1000 записей) без
+        какого-либо признака обрезки в ответе; для полной истории счёта нужен
+        GetOperationsByCursor, который вычитывается здесь до конца (hasNext=false)."""
+        items: list[dict] = []
+        cursor = ""
+        for _ in range(MAX_OPERATIONS_PAGES):
+            body: dict[str, Any] = {
+                "accountId": account_id,
+                "from": from_iso,
+                "to": to_iso,
+                "limit": OPERATIONS_PAGE_LIMIT,
+            }
+            if cursor:
+                body["cursor"] = cursor
+            page = self._post(OPERATIONS_SERVICE, "GetOperationsByCursor", body)
+            items.extend(page.get("items", []))
+            cursor = page.get("nextCursor") or ""
+            if not page.get("hasNext") or not cursor:
+                return items
+        raise RuntimeError(
+            f"GetOperationsByCursor не завершился за {MAX_OPERATIONS_PAGES} страниц "
+            "— похоже на зацикливание курсора, а не на реальный объём данных"
+        )
 
     def get_portfolio(self, account_id: str) -> list[dict]:
         return self._post(OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account_id}).get("positions", [])

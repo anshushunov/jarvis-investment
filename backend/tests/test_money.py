@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.money import money, quantity, quotation_to_decimal
+from app.money import money, quantity, quotation_to_decimal, quotation_to_quantity
 
 
 def test_money_rounds_to_four_places():
@@ -57,3 +57,17 @@ def test_money_rejects_negative_inf():
 def test_quantity_rejects_nan():
     with pytest.raises(ValueError):
         quantity("nan")
+
+
+def test_quotation_to_quantity_keeps_precision_finer_than_money():
+    # money()+quantity() округлило бы это до 10.1235 ещё на денежном шаге;
+    # quotation_to_quantity обязана сохранить все 8 знаков количества.
+    assert quotation_to_quantity(10, 123456789) == Decimal("10.12345679")
+
+
+def test_quotation_to_quantity_handles_negative_values():
+    assert quotation_to_quantity(-3, -12345678) == Decimal("-3.01234568")
+
+
+def test_quotation_to_quantity_zero():
+    assert quotation_to_quantity(0, 0) == Decimal("0.00000000")

@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 from app.connectors.base import BrokerAccount, BrokerPosition
 from app.connectors.tbank.client import TBankClient
 from app.connectors.tbank.mapper import map_operation
+from app.connectors.tbank.quotation import to_quantity
 from app.ledger.schemas import RawOperation
-from app.money import quantity, quotation_to_decimal
 
 ACCOUNT_KIND = {
     "ACCOUNT_TYPE_TINKOFF": "brokerage",
@@ -57,20 +57,18 @@ class TBankConnector:
             figi = item.get("figi")
             if not figi:
                 continue
+            qty = to_quantity(item.get("quantity"))
+            if qty is None:
+                # Отсутствующий или битый объект количества — пропускаем именно
+                # эту позицию, а не роняем весь вызов: остальные позиции счёта
+                # валидны и должны дойти до журнала.
+                continue
             instrument = self._client.get_instrument_by_figi(figi)
             isin = instrument.get("isin") if instrument else None
             if not isin:
                 continue
             ticker = item.get("ticker") or (instrument.get("ticker") if instrument else None)
-            positions.append(
-                BrokerPosition(
-                    isin=isin,
-                    ticker=ticker,
-                    quantity=quantity(
-                        quotation_to_decimal(int(item["quantity"]["units"]), int(item["quantity"]["nano"]))
-                    ),
-                )
-            )
+            positions.append(BrokerPosition(isin=isin, ticker=ticker, quantity=qty))
         return positions
 
     def _instrument_index(self, operations: list[dict]) -> dict[str, tuple[str | None, str | None]]:

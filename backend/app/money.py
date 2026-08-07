@@ -29,3 +29,12 @@ def quantity(value: str | int | Decimal) -> Decimal:
 
 def quotation_to_decimal(units: int, nano: int) -> Decimal:
     return money(Decimal(units) + Decimal(nano) / NANO)
+
+
+def quotation_to_quantity(units: int, nano: int) -> Decimal:
+    """Как quotation_to_decimal, но сохраняет полную точность количества (8
+    знаков вместо денежных 4). quotation_to_decimal здесь не подходит: если
+    сначала округлить до 4 знаков через money(), а потом расширить до 8 через
+    quantity(), то `units=10, nano=123456789` превратится в 10.1235 вместо
+    10.12345679 — точность будет потеряна необратимо ещё на первом шаге."""
+    return quantity(Decimal(units) + Decimal(nano) / NANO)

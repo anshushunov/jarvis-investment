@@ -1,9 +1,10 @@
 from datetime import datetime
 from decimal import Decimal
 
+from app.connectors.tbank.quotation import to_money
 from app.ledger.schemas import RawOperation
 from app.models import OperationType
-from app.money import money, quantity, quotation_to_decimal
+from app.money import money, quantity
 
 # T-Invest API добавляет типы операций со временем; незнакомый тип уходит в
 # OperationType.OTHER (см. test_unknown_type_maps_to_other_and_keeps_payload),
@@ -29,22 +30,14 @@ TYPE_MAP = {
 EXECUTED = "OPERATION_STATE_EXECUTED"
 
 
-def _quotation(value: dict | None) -> Decimal:
-    """Денежная величина REST-шлюза: {"currency": ..., "units": "142", "nano": 500000000}.
-    units приходит строкой, nano — числом; quotation_to_decimal требует оба int."""
-    if not value:
-        return money("0")
-    return quotation_to_decimal(int(value["units"]), int(value["nano"]))
-
-
 def map_operation(operation: dict, isin: str | None, ticker: str | None) -> RawOperation | None:
-    """Переводит операцию OperationsService/GetOperations (REST-шлюз T-Invest API,
-    JSON-словарь) в RawOperation. Неисполненные операции (state != EXECUTED)
-    пропускаются — они не должны попадать в журнал."""
+    """Переводит операцию OperationsService/GetOperationsByCursor (REST-шлюз
+    T-Invest API, JSON-словарь) в RawOperation. Неисполненные операции
+    (state != EXECUTED) пропускаются — они не должны попадать в журнал."""
     if operation.get("state") != EXECUTED:
         return None
 
-    raw_type = operation["operationType"]
+    raw_type = operation["type"]
     op_type = TYPE_MAP.get(raw_type, OperationType.OTHER)
 
     payment = operation.get("payment")
@@ -57,8 +50,8 @@ def map_operation(operation: dict, isin: str | None, ticker: str | None) -> RawO
         isin=isin,
         ticker=ticker,
         quantity=quantity(Decimal(operation.get("quantity") or "0")),
-        price=_quotation(operation.get("price")),
-        amount=_quotation(payment),
+        price=to_money(operation.get("price")),
+        amount=to_money(payment),
         currency=currency.upper(),
         # Комиссия не вычитается из fee сделки: T-Invest API отдаёт брокерскую
         # комиссию отдельной операцией OPERATION_TYPE_BROKER_FEE, и учитывать

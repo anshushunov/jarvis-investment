@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -39,43 +40,42 @@ def test_fetch_accounts_maps_iis_and_default_kind():
 
 @respx.mock
 def test_fetch_operations_resolves_instrument_and_skips_unexecuted():
-    respx.post(f"{OPERATIONS}/GetOperations").mock(
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
         return_value=httpx.Response(200, json={
-            "operations": [
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
                 {
                     "id": "500000001",
-                    "operationType": "OPERATION_TYPE_BUY",
+                    "type": "OPERATION_TYPE_BUY",
                     "state": "OPERATION_STATE_EXECUTED",
                     "date": "2026-03-12T10:30:00Z",
                     "figi": "BBG004730N88",
                     "quantity": "10",
                     "price": {"currency": "rub", "units": "91", "nano": 0},
                     "payment": {"currency": "rub", "units": "-910", "nano": 0},
-                    "currency": "rub",
                 },
                 {
                     "id": "500000002",
-                    "operationType": "OPERATION_TYPE_BUY",
+                    "type": "OPERATION_TYPE_BUY",
                     "state": "OPERATION_STATE_CANCELED",
                     "date": "2026-03-12T11:00:00Z",
                     "figi": "BBG004730N88",
                     "quantity": "5",
                     "price": {"currency": "rub", "units": "91", "nano": 0},
                     "payment": {"currency": "rub", "units": "-455", "nano": 0},
-                    "currency": "rub",
                 },
                 {
                     "id": "500000003",
-                    "operationType": "OPERATION_TYPE_INPUT",
+                    "type": "OPERATION_TYPE_INPUT",
                     "state": "OPERATION_STATE_EXECUTED",
                     "date": "2026-03-01T00:00:00Z",
                     "figi": "",
                     "quantity": "0",
                     "price": {"currency": "rub", "units": "0", "nano": 0},
                     "payment": {"currency": "rub", "units": "100000", "nano": 0},
-                    "currency": "rub",
                 },
-            ]
+            ],
         })
     )
     respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
@@ -133,4 +133,64 @@ def test_fetch_positions_skips_entries_without_isin():
 
     assert positions == [
         BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+    ]
+
+
+@respx.mock
+def test_fetch_positions_keeps_full_precision_for_fractional_quantity():
+    # units=10, nano=123456789: если бы количество сначала округлялось до
+    # денежных 4 знаков (money()), а потом расширялось до 8 (quantity()),
+    # получилось бы 10.1235 вместо 10.12345679 — регрессия, которую эта
+    # проверка и ловит.
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "BBG004730N88",
+                    "quantity": {"units": "10", "nano": 123456789},
+                    "ticker": "SBER",
+                },
+            ],
+        })
+    )
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
+        })
+    )
+
+    positions = TBankConnector(TOKEN).fetch_positions("1000000001")
+
+    assert positions == [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.12345679"))
+    ]
+
+
+@respx.mock
+def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {"figi": "BBG004730N88", "quantity": None, "ticker": "SBER"},
+                {"figi": "BBG0047315Y7", "quantity": {"units": "5", "nano": 0}, "ticker": "GAZP"},
+            ],
+        })
+    )
+
+    def instrument_responder(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["id"] == "BBG0047315Y7":
+            return httpx.Response(200, json={
+                "instrument": {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"}
+            })
+        return httpx.Response(200, json={
+            "instrument": {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}
+        })
+
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(side_effect=instrument_responder)
+
+    positions = TBankConnector(TOKEN).fetch_positions("1000000001")
+
+    assert positions == [
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
     ]

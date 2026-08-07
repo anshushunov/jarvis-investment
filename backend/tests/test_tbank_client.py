@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -51,23 +53,27 @@ def test_get_accounts_returns_empty_list_when_no_accounts_key():
     assert TBankClient(TOKEN).get_accounts() == []
 
 
+def _operation_item(op_id: str, cursor: str) -> dict:
+    return {
+        "id": op_id,
+        "cursor": cursor,
+        "type": "OPERATION_TYPE_BUY",
+        "state": "OPERATION_STATE_EXECUTED",
+        "date": "2026-03-12T10:30:00Z",
+        "figi": "BBG004730N88",
+        "quantity": "10",
+        "price": {"currency": "rub", "units": "91", "nano": 0},
+        "payment": {"currency": "rub", "units": "-910", "nano": 0},
+    }
+
+
 @respx.mock
-def test_get_operations_sends_account_and_period_and_parses_list():
-    route = respx.post(f"{OPERATIONS}/GetOperations").mock(
+def test_get_operations_sends_account_and_period_and_parses_single_page():
+    route = respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
         return_value=httpx.Response(200, json={
-            "operations": [
-                {
-                    "id": "500000001",
-                    "operationType": "OPERATION_TYPE_BUY",
-                    "state": "OPERATION_STATE_EXECUTED",
-                    "date": "2026-03-12T10:30:00Z",
-                    "figi": "BBG004730N88",
-                    "quantity": "10",
-                    "price": {"currency": "rub", "units": "91", "nano": 0},
-                    "payment": {"currency": "rub", "units": "-910", "nano": 0},
-                    "currency": "rub",
-                }
-            ]
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [_operation_item("500000001", "cursor-1")],
         })
     )
 
@@ -75,12 +81,45 @@ def test_get_operations_sends_account_and_period_and_parses_list():
         "1000000001", "2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z"
     )
 
-    sent_body = respx.calls.last.request.content
+    sent_body = route.calls.last.request.content
     assert b'"accountId":"1000000001"' in sent_body
     assert b'"from":"2026-01-01T00:00:00Z"' in sent_body
     assert b'"to":"2026-04-01T00:00:00Z"' in sent_body
+    assert b'"cursor"' not in sent_body  # первая страница курсор не передаёт
     assert len(operations) == 1
     assert operations[0]["id"] == "500000001"
+
+
+@respx.mock
+def test_get_operations_follows_cursor_across_pages_without_loss_or_duplicates():
+    # OperationsService/GetOperations (без курсора) молча режет ответ первой
+    # страницей — вот почему get_operations обязана дочитать все страницы
+    # GetOperationsByCursor, склеив их без потерь и без дублей.
+    page_one = {
+        "hasNext": True,
+        "nextCursor": "cursor-2",
+        "items": [_operation_item("500000001", "cursor-1")],
+    }
+    page_two = {
+        "hasNext": False,
+        "nextCursor": "",
+        "items": [_operation_item("500000002", "cursor-2")],
+    }
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("cursor"):
+            assert body["cursor"] == "cursor-2"
+            return httpx.Response(200, json=page_two)
+        return httpx.Response(200, json=page_one)
+
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(side_effect=responder)
+
+    operations = TBankClient(TOKEN).get_operations(
+        "1000000001", "2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z"
+    )
+
+    assert [op["id"] for op in operations] == ["500000001", "500000002"]
 
 
 @respx.mock
