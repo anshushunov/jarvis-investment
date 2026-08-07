@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,36 @@ from app.ledger.service import append_operations
 from app.models import Account, SyncRun
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_account
+
+# Глубина истории для самой первой синхронизации брокера — когда успешных
+# прогонов ещё не было и опереться не на что.
+DEFAULT_HISTORY_DAYS = 365 * 5
+
+# Запас времени, на который отступаем назад от начала последнего успешного
+# прогона при повторной синхронизации. Нужен, потому что брокер может
+# доложить операцию задним числом (например, расчёты по сделке пришли на
+# день позже); дедупликация в журнале делает такое перекрытие безопасным.
+SYNC_OVERLAP_DAYS = 3
+
+
+def resolve_since(session: Session, broker: str) -> datetime:
+    """Точка отсчёта для следующей синхронизации этого брокера.
+
+    Если по брокеру уже был хотя бы один успешный прогон — берём момент его
+    начала с запасом SYNC_OVERLAP_DAYS назад, а не глубокую историю заново:
+    при десятках тысяч операций и синхронизации по расписанию вычитывать всю
+    историю каждый раз слишком дорого. Если успешных прогонов ещё не было —
+    берём DEFAULT_HISTORY_DAYS вглубь."""
+    last_started_at = session.execute(
+        select(func.max(SyncRun.started_at)).where(
+            SyncRun.broker == broker, SyncRun.status == "success"
+        )
+    ).scalar_one()
+
+    if last_started_at is None:
+        return datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+
+    return last_started_at - timedelta(days=SYNC_OVERLAP_DAYS)
 
 
 def _get_or_create_account(session: Session, broker: str, broker_account) -> Account:

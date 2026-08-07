@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.connectors.base import BrokerAccount, BrokerPosition
 from app.ledger.schemas import RawOperation
 from app.models import Account, OperationType, Position, SyncRun
-from app.sync.service import sync_broker
+from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS, resolve_since, sync_broker
 
 SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -182,3 +182,51 @@ def test_db_level_failure_after_operations_written_keeps_run_and_session_consist
     # SAVEPOINT не должен утащить за собой обработку остальных счетов.
     assert ok_run.status == "success"
     assert session.query(Account).filter_by(external_id="acc-2").count() == 1
+
+
+def test_resolve_since_uses_deep_history_when_no_successful_run(session):
+    since = resolve_since(session, "tbank")
+    expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    assert abs((since - expected).total_seconds()) < 5
+
+
+def test_resolve_since_ignores_failed_runs_without_success(session):
+    session.add(SyncRun(broker="tbank", status="failed",
+                        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    session.flush()
+
+    since = resolve_since(session, "tbank")
+    expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    assert abs((since - expected).total_seconds()) < 5
+
+
+def test_resolve_since_uses_window_from_last_successful_run(session):
+    last_started = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    session.add(SyncRun(broker="tbank", status="success", started_at=last_started))
+    session.flush()
+
+    since = resolve_since(session, "tbank")
+    assert since == last_started - timedelta(days=SYNC_OVERLAP_DAYS)
+
+
+def test_resolve_since_picks_latest_successful_run_not_first(session):
+    session.add_all([
+        SyncRun(broker="tbank", status="success",
+                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        SyncRun(broker="tbank", status="success",
+                started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+    ])
+    session.flush()
+
+    since = resolve_since(session, "tbank")
+    assert since == datetime(2026, 3, 1, tzinfo=timezone.utc) - timedelta(days=SYNC_OVERLAP_DAYS)
+
+
+def test_resolve_since_is_scoped_per_broker(session):
+    session.add(SyncRun(broker="other-broker", status="success",
+                        started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)))
+    session.flush()
+
+    since = resolve_since(session, "tbank")
+    expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    assert abs((since - expected).total_seconds()) < 5
