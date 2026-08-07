@@ -7,6 +7,9 @@ from app.ledger.schemas import RawOperation
 
 def _norm(value: Decimal) -> str:
     normalized = value.normalize()
+    # Нормализуем знак нуля: -0 и +0 оба должны быть "0"
+    if normalized == 0:
+        return "0"
     return f"{normalized:f}"
 
 

@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
 from app.models import OperationType
@@ -60,3 +62,29 @@ def test_same_moment_utc_and_plus3_give_same_key():
     assert natural_key("tbank", "acc-1", make_op(executed_at=utc_time)) == natural_key(
         "tbank", "acc-1", make_op(executed_at=plus3_time)
     )
+
+
+def test_naive_datetime_is_rejected():
+    """Наивный datetime без часового пояса отвергается."""
+    naive_dt = datetime(2026, 3, 12, 10, 30)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        make_op(executed_at=naive_dt)
+
+
+def test_negative_zero_and_positive_zero_give_same_key():
+    """Decimal(-0.00) и Decimal(0.00) в сумме дают одинаковый ключ."""
+    assert natural_key("tbank", "acc-1", make_op(amount=Decimal("-0.00"))) == natural_key(
+        "tbank", "acc-1", make_op(amount=Decimal("0.00"))
+    )
+
+
+def test_float_in_quantity_is_rejected():
+    """float в quantity отвергается."""
+    with pytest.raises(TypeError, match="float недопустим"):
+        make_op(quantity=0.1)
+
+
+def test_bool_in_price_is_rejected():
+    """bool в price отвергается."""
+    with pytest.raises(TypeError, match="bool недопустим"):
+        make_op(price=True)
