@@ -91,13 +91,21 @@ def test_mismatch_is_counted(session):
 def test_connector_failure_is_recorded_not_raised(session):
     runs = sync_broker(session, FakeConnector(operations=[buy()], fail_on_positions=True), SINCE)
     assert runs[0].status == "failed"
+    assert runs[0].error.startswith("Ошибка брокера")
     assert "недоступен" in runs[0].error
 
 
 def test_failed_sync_keeps_already_written_operations(session):
-    sync_broker(session, FakeConnector(operations=[buy()], fail_on_positions=True), SINCE)
+    runs = sync_broker(session, FakeConnector(operations=[buy()], fail_on_positions=True), SINCE)
     from app.models import Transaction
     assert session.query(Transaction).count() == 1
+
+    # Отказ случился уже после успешной записи операции в журнал (на получении
+    # позиций) — запись прогона обязана отражать это реальное число вставленных,
+    # а не врать нулём просто потому, что путь оборвался до строчки с присвоением.
+    assert runs[0].status == "failed"
+    assert runs[0].inserted == 1
+    assert runs[0].skipped == 0
 
 
 def test_run_records_are_persisted(session):
@@ -114,7 +122,7 @@ def test_db_level_failure_on_one_account_does_not_break_others(session):
 
     assert len(runs) == 2
     assert runs[0].status == "failed"
-    assert runs[0].error
+    assert runs[0].error.startswith("Ошибка базы данных")
     assert runs[1].status == "success"
 
     accounts = session.query(Account).all()

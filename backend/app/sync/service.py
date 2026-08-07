@@ -48,29 +48,37 @@ def sync_broker(session: Session, connector: BrokerConnector, since: datetime) -
 
             operations = connector.fetch_operations(account.external_id, since)
             result = append_operations(session, account, connector.source, operations)
+            # Присваиваем сразу, а не одной группой в конце: если сбой случится на
+            # следующих шагах (пересборка позиций, получение снимка брокера, сверка),
+            # запись прогона обязана отражать реально произошедшее, а не нули только
+            # потому, что путь оборвался раньше финальных присвоений.
+            run.inserted = result.inserted
+            run.skipped = result.skipped
+
             rebuild_positions(session, account)
 
             broker_positions = connector.fetch_positions(account.external_id)
             findings = reconcile_account(session, account, broker_positions)
-
-            run.inserted = result.inserted
-            run.skipped = result.skipped
             run.mismatches = len(findings)
+
             run.status = "success"
         except DBAPIError as error:
             # Настоящая ошибка PostgreSQL (например, битые данные счёта) переводит
             # транзакцию в aborted-состояние — откатываем SAVEPOINT именно этого счёта,
             # а не всю транзакцию, чтобы сессия осталась пригодна для следующего счёта.
+            # Откат SAVEPOINT стирает и уже присвоенные выше числа вместе с самими
+            # данными — это согласовано: то, что физически исчезло из БД, не должно
+            # фигурировать в отчёте как вставленное.
             savepoint.rollback()
             run.status = "failed"
-            run.error = str(error)
+            run.error = f"Ошибка базы данных при обработке счёта: {error}"
         except Exception as error:  # noqa: BLE001 — отказ источника (сеть, брокер) не должен ронять синхронизацию
             # Это не ошибка PostgreSQL — транзакция не повреждена, поэтому уже
             # записанные на этом шаге данные (например, добавленные операции) сохраняются,
             # а не откатываются вместе с отказавшим последним шагом.
             savepoint.commit()
             run.status = "failed"
-            run.error = str(error)
+            run.error = f"Ошибка брокера при синхронизации счёта: {error}"
         else:
             savepoint.commit()
 
