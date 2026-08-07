@@ -62,3 +62,16 @@ def test_http_error_raises():
     )
     with pytest.raises(httpx.HTTPStatusError):
         MoexClient(BASE).last_price("SBER")
+
+
+@respx.mock
+def test_last_price_uses_currency_engine_for_currency_market():
+    respx.get(f"{BASE}/engines/currency/markets/selt/securities/USD000UTSTOM.json").mock(
+        return_value=httpx.Response(200, json={
+            "marketdata": {
+                "columns": ["SECID", "LAST"],
+                "data": [["USD000UTSTOM", 92.5]],
+            }
+        })
+    )
+    assert MoexClient(BASE).last_price("USD000UTSTOM", market="selt", engine="currency") == Decimal("92.5000")

@@ -22,9 +22,9 @@ class MoexClient:
         response.raise_for_status()
         return response.json()
 
-    def last_price(self, secid: str, market: str = "shares") -> Decimal | None:
+    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
         payload = self._get(
-            f"/engines/stock/markets/{market}/securities/{secid}.json",
+            f"/engines/{engine}/markets/{market}/securities/{secid}.json",
             params={"iss.meta": "off", "iss.only": "marketdata"},
         )
         for row in _rows(payload["marketdata"]):
@@ -33,10 +33,10 @@ class MoexClient:
         return None
 
     def close_history(
-        self, secid: str, start: date, end: date, market: str = "shares"
+        self, secid: str, start: date, end: date, market: str = "shares", engine: str = "stock"
     ) -> list[tuple[date, Decimal]]:
         payload = self._get(
-            f"/history/engines/stock/markets/{market}/securities/{secid}.json",
+            f"/history/engines/{engine}/markets/{market}/securities/{secid}.json",
             params={
                 "iss.meta": "off",
                 "iss.only": "history",

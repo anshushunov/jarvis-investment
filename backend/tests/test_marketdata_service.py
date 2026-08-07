@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from decimal import Decimal
 
@@ -11,9 +12,11 @@ class FakeMoex:
     def __init__(self, prices: dict[str, Decimal | None]) -> None:
         self.prices = prices
         self.calls: list[str] = []
+        self.calls_with_market: list[tuple[str, str, str]] = []
 
-    def last_price(self, secid: str, market: str = "shares") -> Decimal | None:
+    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
         self.calls.append(secid)
+        self.calls_with_market.append((secid, engine, market))
         return self.prices.get(secid)
 
 
@@ -84,7 +87,7 @@ class FlakyMoex:
         self.broken = broken
         self.calls: list[str] = []
 
-    def last_price(self, secid: str, market: str = "shares") -> Decimal | None:
+    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
         self.calls.append(secid)
         if secid in self.broken:
             raise httpx.HTTPStatusError("boom", request=None, response=None)
@@ -105,3 +108,40 @@ def test_one_instrument_failure_does_not_abort_the_whole_run(session, caplog):
     assert len(rows) == 1
     assert rows[0].close == Decimal("314.2800")
     assert any("GAZP" in record.getMessage() for record in caplog.records)
+
+
+def test_currency_instrument_is_requested_on_currency_engine(session):
+    instrument = Instrument(isin="RU000CURR001", ticker="USD000UTSTOM", secid="USD000UTSTOM",
+                            kind="currency", currency="RUB")
+    session.add(instrument)
+    session.flush()
+    client = FakeMoex({"USD000UTSTOM": Decimal("92.5")})
+
+    updated = refresh_last_prices(session, client, date(2026, 3, 12))
+
+    assert updated == 1
+    assert client.calls_with_market == [("USD000UTSTOM", "currency", "selt")]
+
+
+class BrokenBodyMoex:
+    """ISS вернул тело, которое нельзя разобрать как JSON."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
+        self.calls.append(secid)
+        json.loads("not-json")
+        return None
+
+
+def test_broken_iss_response_body_is_skipped_without_error(session, caplog):
+    add_instrument(session, "SBER")
+    client = BrokenBodyMoex()
+
+    with caplog.at_level("WARNING"):
+        updated = refresh_last_prices(session, client, date(2026, 3, 12))
+
+    assert updated == 0
+    assert client.calls == ["SBER"]
+    assert any("SBER" in record.getMessage() for record in caplog.records)

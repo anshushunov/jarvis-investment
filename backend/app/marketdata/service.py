@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date
 from decimal import Decimal
@@ -7,24 +8,30 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.marketdata.moex import MoexClient
 from app.models import Instrument, Price
 
 logger = logging.getLogger(__name__)
 
-MARKET_BY_KIND = {"share": "shares", "etf": "shares", "bond": "bonds", "currency": "selt"}
+ENGINE_MARKET_BY_KIND = {
+    "share": ("stock", "shares"),
+    "etf": ("stock", "shares"),
+    "bond": ("stock", "bonds"),
+    "currency": ("currency", "selt"),
+}
 
 
-def refresh_last_prices(session: Session, client, on_date: date) -> int:
+def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> int:
     instruments = session.execute(
         select(Instrument).where(Instrument.secid.is_not(None))
     ).scalars().all()
 
     updated = 0
     for instrument in instruments:
-        market = MARKET_BY_KIND.get(instrument.kind, "shares")
+        engine, market = ENGINE_MARKET_BY_KIND.get(instrument.kind, ("stock", "shares"))
         try:
-            price = client.last_price(instrument.secid, market=market)
-        except (httpx.HTTPError, KeyError):
+            price = client.last_price(instrument.secid, market=market, engine=engine)
+        except (httpx.HTTPError, KeyError, json.JSONDecodeError):
             logger.warning(
                 "Не удалось получить цену для инструмента %s (secid=%s)",
                 instrument.id, instrument.secid, exc_info=True,
