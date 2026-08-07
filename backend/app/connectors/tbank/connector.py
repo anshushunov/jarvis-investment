@@ -25,6 +25,17 @@ class TBankConnector:
 
     def __init__(self, token: str) -> None:
         self._client = TBankClient(token)
+        # Индекс FIGI → инструмент из списочных методов — построен лениво (при
+        # первом обращении, которому реально есть что резолвить) и
+        # переиспользуется всеми последующими fetch_operations/fetch_positions
+        # на этом экземпляре коннектора, по всем счетам одного прогона
+        # синхронизации. Оркестрация создаёт коннектор один раз на прогон, так
+        # что за весь прогон список инструментов запрашивается ровно один раз,
+        # а не по разу на каждый счёт и на каждый вид вызова. Справочник не
+        # меняется за минуты одного прогона, так что такой кэш безопасен; это
+        # не кэш в БД и не глобальный кэш на процесс — он живёт и умирает
+        # вместе с этим объектом.
+        self._bulk_instruments: dict[str, dict] | None = None
 
     def fetch_accounts(self) -> list[BrokerAccount]:
         return [
@@ -75,24 +86,33 @@ class TBankConnector:
             positions.append(BrokerPosition(isin=isin, ticker=ticker, quantity=qty))
         return positions
 
+    def _bulk_instrument_index(self) -> dict[str, dict]:
+        """Полный список инструментов по видам (INSTRUMENT_LIST_KINDS),
+        построенный за фиксированное число запросов вне зависимости от того,
+        сколько уникальных FIGI встретилось. Строится один раз при первом
+        обращении и кэшируется в self._bulk_instruments на весь срок жизни
+        коннектора — см. комментарий в __init__."""
+        if self._bulk_instruments is None:
+            index: dict[str, dict] = {}
+            for kind in INSTRUMENT_LIST_KINDS:
+                for instrument in self._client.list_instruments(kind):
+                    figi = instrument.get("figi")
+                    if figi:
+                        index[figi] = instrument
+            self._bulk_instruments = index
+        return self._bulk_instruments
+
     def _resolve_instruments(self, figis: set[str]) -> dict[str, tuple[str | None, str | None]]:
-        """Строит индекс FIGI → (isin, ticker) для запрошенных FIGI. Сначала
-        строится и живёт только в пределах этого вызова полный список
-        инструментов по видам (INSTRUMENT_LIST_KINDS — несколько запросов вне
-        зависимости от того, сколько уникальных FIGI встретилось), и только то,
-        чего в нём не нашлось, разрешается поштучно через GetInstrumentBy —
-        запасной путь, а не основной механизм. Раньше был один GetInstrumentBy
-        на каждый уникальный FIGI: за годы истории счёта их набирались сотни,
-        и это упиралось в ограничение частоты запросов T-Invest API."""
+        """Строит индекс FIGI → (isin, ticker) для запрошенных FIGI из
+        закэшированного на уровне коннектора списочного индекса; то, чего в
+        нём не нашлось, разрешается поштучно через GetInstrumentBy — запасной
+        путь, а не основной механизм. Раньше был один GetInstrumentBy на
+        каждый уникальный FIGI: за годы истории счёта их набирались сотни, и
+        это упиралось в ограничение частоты запросов T-Invest API."""
         if not figis:
             return {}
 
-        bulk_index: dict[str, dict] = {}
-        for kind in INSTRUMENT_LIST_KINDS:
-            for instrument in self._client.list_instruments(kind):
-                bulk_figi = instrument.get("figi")
-                if bulk_figi:
-                    bulk_index[bulk_figi] = instrument
+        bulk_index = self._bulk_instrument_index()
 
         index: dict[str, tuple[str | None, str | None]] = {}
         for figi in figis:

@@ -43,18 +43,29 @@ TOO_MANY_REQUESTS = 429
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
-    """Сколько ждать по заголовку Retry-After, если сервер его прислал.
-    Понимает только форму "число секунд" (delta-seconds из RFC 7231) — форму
-    HTTP-date не разбираем: у T-Invest API это JSON-шлюз, а не CDN/кеш, и
-    delta-seconds для лимита запросов ожидаема; если формат не распознан,
-    вызывающий код просто использует собственный экспоненциальный шаг."""
+    """Сколько ждать по заголовку Retry-After, если сервер его прислал и
+    прислал вменяемое значение. Понимает только форму "число секунд"
+    (delta-seconds из RFC 7231) — форму HTTP-date не разбираем: у T-Invest API
+    это JSON-шлюз, а не CDN/кеш, и delta-seconds для лимита запросов ожидаема.
+
+    Нечисловое или отрицательное значение трактуем как отсутствие заголовка —
+    сервер не может законно просить ждать отрицательное время, а слепая
+    передача такого значения в time.sleep() уронит клиент с ValueError вместо
+    ожидаемого "попытки исчерпаны, ошибка наружу". Верхний предел
+    (MAX_RETRY_DELAY_SECONDS) применяется здесь же, а не только к
+    экспоненциальному шагу: без него абсурдно большое значение из заголовка
+    заставит клиент спать часами или днями, молча блокируя синхронизацию, а
+    не поднимая ошибку."""
     value = response.headers.get("Retry-After")
-    if not value:
+    if value is None:
         return None
     try:
-        return float(value)
+        seconds = float(value)
     except ValueError:
         return None
+    if seconds < 0:
+        return None
+    return min(seconds, MAX_RETRY_DELAY_SECONDS)
 
 
 # T-Bank (бывший Tinkoff) выпускает сертификат *.tinkoff.ru через цепочку
@@ -103,7 +114,11 @@ class TBankClient:
         while True:
             response = httpx.post(url, json=body, headers=headers, timeout=self.timeout, verify=self._ssl_context)
             if response.status_code == TOO_MANY_REQUESTS and attempt < MAX_RETRY_ATTEMPTS:
-                wait_seconds = _retry_after_seconds(response) or delay
+                retry_after = _retry_after_seconds(response)
+                # Ноль — законное "повторяй немедленно"; сравниваем с None
+                # явно, чтобы его не подменило собственным экспоненциальным
+                # шагом проверкой на истинность (0.0 ложно как bool).
+                wait_seconds = retry_after if retry_after is not None else delay
                 self._sleep(wait_seconds)
                 delay = min(delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY_SECONDS)
                 attempt += 1

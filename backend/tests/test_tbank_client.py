@@ -7,6 +7,7 @@ import respx
 from app.connectors.tbank.client import (
     INITIAL_RETRY_DELAY_SECONDS,
     MAX_RETRY_ATTEMPTS,
+    MAX_RETRY_DELAY_SECONDS,
     TBankClient,
 )
 
@@ -246,6 +247,61 @@ def test_post_waits_according_to_retry_after_header():
     TBankClient(TOKEN, sleep=sleep).get_accounts()
 
     assert sleep.calls == [3.0]
+
+
+@respx.mock
+def test_post_caps_absurdly_large_retry_after_header_at_max_delay():
+    # Без верхнего предела клиент честно заснул бы на "сотни лет" — сервер не
+    # должен иметь возможность заблокировать суточную синхронизацию значением
+    # заголовка. Предел — тот же MAX_RETRY_DELAY_SECONDS, что и у
+    # экспоненциального шага.
+    respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "999999999"}),
+            httpx.Response(200, json={"accounts": []}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert sleep.calls == [MAX_RETRY_DELAY_SECONDS]
+
+
+@respx.mock
+def test_post_ignores_negative_retry_after_header():
+    # Отрицательное значение — не бывает законным Retry-After; наивная
+    # передача его в time.sleep() уронила бы клиент с ValueError вместо
+    # ожидаемого поведения "повторить с собственной паузой".
+    respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "-5"}),
+            httpx.Response(200, json={"accounts": []}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    accounts = TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert accounts == []
+    assert sleep.calls == [INITIAL_RETRY_DELAY_SECONDS]
+
+
+@respx.mock
+def test_post_respects_zero_retry_after_header():
+    # 0 — законное "повторяй немедленно"; проверка на истинность (0.0 or x)
+    # молча подменила бы его на экспоненциальный шаг.
+    respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0"}),
+            httpx.Response(200, json={"accounts": []}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert sleep.calls == [0.0]
 
 
 @respx.mock

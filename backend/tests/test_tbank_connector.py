@@ -271,3 +271,111 @@ def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
     assert positions == [
         BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
     ]
+
+
+@respx.mock
+def test_bulk_instrument_index_is_built_once_and_reused_across_operations_and_positions():
+    # Оркестрация создаёт TBankConnector один раз на весь прогон синхронизации
+    # (несколько счетов, и операции, и позиции по каждому) — списочные методы
+    # не должны запрашиваться заново на каждый такой вызов.
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000001",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T10:30:00Z",
+                    "figi": "BBG004730N88",
+                    "quantity": "10",
+                    "price": {"currency": "rub", "units": "91", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-910", "nano": 0},
+                },
+            ],
+        })
+    )
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {"figi": "BBG0047315Y7", "quantity": {"units": "1", "nano": 0}, "ticker": "GAZP"},
+            ],
+        })
+    )
+    routes = _mock_instrument_lists(
+        Shares=[
+            {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"},
+            {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"},
+        ],
+    )
+    instrument_by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={"instrument": {}})
+    )
+
+    connector = TBankConnector(TOKEN)
+    # Разные счета одного прогона на одном и том же экземпляре коннектора —
+    # ровно так, как это будет вызывать оркестрация из задачи 16.
+    operations = connector.fetch_operations("1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    positions = connector.fetch_positions("1000000002")
+
+    assert len(operations) == 1
+    assert operations[0].isin == "RU0009029540"
+    assert positions == [
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("1.00000000"))
+    ]
+
+    for kind, route in routes.items():
+        assert route.call_count == 1, f"{kind} должен был запроситься один раз за оба вызова, а не по разу на каждый"
+    assert instrument_by_figi.call_count == 0
+
+
+@respx.mock
+def test_fallback_to_get_instrument_by_still_works_after_index_is_cached():
+    # Первый вызов строит и кэширует списочный индекс; второй вызов не должен
+    # снова дёргать списочные методы, но обязан по-прежнему уметь резолвить
+    # через поштучный запасной путь то, чего в закэшированном индексе нет.
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000001",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T10:30:00Z",
+                    "figi": "BBG004730N88",
+                    "quantity": "10",
+                    "price": {"currency": "rub", "units": "91", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-910", "nano": 0},
+                },
+            ],
+        })
+    )
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {"figi": "TCS00A0EXOTIC", "quantity": {"units": "1", "nano": 0}, "ticker": ""},
+            ],
+        })
+    )
+    routes = _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
+    )
+    instrument_by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC"}
+        })
+    )
+
+    connector = TBankConnector(TOKEN)
+    connector.fetch_operations("1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    positions = connector.fetch_positions("1000000002")
+
+    assert positions == [
+        BrokerPosition(isin="RU000AEXOTIC", ticker="EXOTIC", quantity=Decimal("1.00000000"))
+    ]
+    for route in routes.values():
+        assert route.call_count == 1  # индекс не перестраивался на второй вызов
+    assert instrument_by_figi.call_count == 1  # но запасной путь всё равно сработал
