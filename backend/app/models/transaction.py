@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, func
+from sqlalchemy import DDL, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, event, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,3 +45,29 @@ class Transaction(Base):
     source: Mapped[str] = mapped_column(String(32))
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# Журнал операций — append-only: UPDATE и DELETE запрещены триггером БД, исправления
+# вносятся корректирующими операциями. Этот же SQL продублирован буквально в
+# alembic/versions/0001_initial.py — там он владеет схемой в проде. Дубль здесь нужен
+# потому, что тестовая схема собирается через Base.metadata.create_all и миграцию не
+# видит. Меняешь один текст — обязательно правь оба.
+_CREATE_APPEND_ONLY_FUNCTION_DDL = DDL(
+    """
+    CREATE FUNCTION transaction_append_only() RETURNS trigger AS $$
+    BEGIN
+        RAISE EXCEPTION 'Журнал операций неизменяем: UPDATE и DELETE запрещены, исправления вносятся корректирующими операциями';
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+)
+_CREATE_APPEND_ONLY_TRIGGER_DDL = DDL(
+    """
+    CREATE TRIGGER transaction_append_only_trigger
+    BEFORE UPDATE OR DELETE ON transaction
+    FOR EACH ROW EXECUTE FUNCTION transaction_append_only();
+    """
+)
+
+event.listen(Transaction.__table__, "after_create", _CREATE_APPEND_ONLY_FUNCTION_DDL)
+event.listen(Transaction.__table__, "after_create", _CREATE_APPEND_ONLY_TRIGGER_DDL)
