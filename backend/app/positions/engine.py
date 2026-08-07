@@ -63,17 +63,41 @@ def _average(lots: list[OpenLot]) -> Decimal:
 
 
 def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
-    lots: dict[int, list[OpenLot]] = defaultdict(list)
+    """Fold a ledger of transactions into positions and realized sales using FIFO accounting.
+
+    Processes transactions in chronological order. When timestamps match, buy (INCREASING)
+    operations are processed before sells (DECREASING) to prevent accounting reversals within
+    a single timestamp.
+
+    Amounts are signed from the account perspective: purchases negative, sales and dividends
+    positive. Fees are deducted separately and not included in amount.
+    """
+    lots: dict[int, list[OpenLot]] = {}
+    bought_instruments: set[int] = set()  # Track instruments that were ever bought
     realized: list[RealizedSale] = []
     cash: dict[str, Decimal] = defaultdict(lambda: money("0"))
 
-    for entry in sorted(entries, key=lambda e: e.executed_at):
+    # Sort by timestamp, then by operation type (INCREASING before DECREASING)
+    def sort_key(entry):
+        # Lower value for INCREASING (processed first), higher for others
+        priority = 0 if entry.op_type in INCREASING else 1
+        return (entry.executed_at, priority)
+
+    for entry in sorted(entries, key=sort_key):
         cash[currency] = money(cash[currency] + entry.amount - entry.fee)
 
         if entry.instrument_id is None:
             continue
 
         if entry.op_type in INCREASING:
+            # Don't create a lot if quantity is zero
+            if entry.quantity == 0:
+                continue
+
+            if entry.instrument_id not in lots:
+                lots[entry.instrument_id] = []
+
+            bought_instruments.add(entry.instrument_id)
             lots[entry.instrument_id].append(
                 OpenLot(
                     instrument_id=entry.instrument_id,
@@ -83,6 +107,10 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
                 )
             )
         elif entry.op_type in DECREASING:
+            # Only process if we have lots for this instrument
+            if entry.instrument_id not in lots:
+                continue
+
             remaining = q(entry.quantity)
             unit_proceeds = money(entry.price)
             open_lots = lots[entry.instrument_id]
@@ -108,10 +136,10 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     positions = {
         instrument_id: PositionState(
             instrument_id=instrument_id,
-            quantity=q(sum((lot.quantity_left for lot in open_lots), Decimal("0"))),
-            average_price=_average(open_lots),
-            lots=open_lots,
+            quantity=q(sum((lot.quantity_left for lot in lots.get(instrument_id, [])), Decimal("0"))),
+            average_price=_average(lots.get(instrument_id, [])),
+            lots=lots.get(instrument_id, []),
         )
-        for instrument_id, open_lots in lots.items()
+        for instrument_id in bought_instruments
     }
     return FoldResult(positions=positions, realized=realized, cash=dict(cash))

@@ -114,3 +114,57 @@ def test_operations_are_sorted_by_time_regardless_of_input_order():
     ]
     result = fold(unsorted_entries)
     assert result.realized[0].cost == D("1000.0000")
+
+
+def test_sale_spanning_multiple_lots():
+    result = fold([
+        entry(OperationType.BUY, 1, qty="10", price="100", amount="-1000"),
+        entry(OperationType.BUY, 2, qty="20", price="200", amount="-4000"),
+        entry(OperationType.SELL, 3, qty="15", price="300", amount="4500"),
+    ])
+    position = result.positions[1]
+    assert position.quantity == D("15")
+    assert position.average_price == D("200.0000")
+
+    assert len(result.realized) == 2
+    assert result.realized[0].quantity == D("10")
+    assert result.realized[0].cost == D("1000.0000")
+    assert result.realized[0].proceeds == D("3000.0000")
+    assert result.realized[0].opened_at == at(1)
+
+    assert result.realized[1].quantity == D("5")
+    assert result.realized[1].cost == D("1000.0000")
+    assert result.realized[1].proceeds == D("1500.0000")
+    assert result.realized[1].opened_at == at(2)
+
+
+def test_sale_of_unknown_instrument_creates_no_position():
+    result = fold([
+        entry(OperationType.SELL, 1, qty="10", price="300", amount="3000", instrument_id=99),
+    ])
+    assert 99 not in result.positions
+    assert result.realized == []
+    assert result.cash["RUB"] == D("3000.0000")
+
+
+def test_zero_quantity_buy_does_not_create_lot():
+    result = fold([
+        entry(OperationType.BUY, 1, qty="0", price="100", amount="-0"),
+        entry(OperationType.BUY, 2, qty="10", price="200", amount="-2000"),
+    ])
+    assert result.positions[1].quantity == D("10")
+    assert len(result.positions[1].lots) == 1
+    assert result.positions[1].average_price == D("200.0000")
+
+
+def test_buy_and_sell_same_time_buy_first():
+    entries = [
+        entry(OperationType.SELL, 1, qty="10", price="300", amount="3000"),
+        entry(OperationType.BUY, 1, qty="10", price="100", amount="-1000"),
+    ]
+    result = fold(entries)
+    # After sorting, BUY should be processed first despite being later in input
+    # This allows the SELL to match the newly bought shares
+    assert result.positions[1].quantity == D("0")
+    assert len(result.realized) == 1
+    assert result.realized[0].cost == D("1000.0000")
