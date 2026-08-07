@@ -29,6 +29,7 @@ def test_transaction_persists_decimal_precision(session):
         external_id="op-777",
         source="tbank",
         payload={"raw": "value"},
+        dedup_key="dedup-op-777",
     )
     session.add(tx)
     session.commit()
@@ -45,19 +46,19 @@ def test_external_id_unique_per_source(session):
     session.add(account)
     session.flush()
 
-    def make(external_id: str) -> Transaction:
+    def make(external_id: str, dedup_key: str) -> Transaction:
         return Transaction(
             account_id=account.id, instrument_id=None, op_type=OperationType.DEPOSIT,
             executed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             quantity=Decimal("0"), price=Decimal("0"), amount=Decimal("1000.0000"),
             currency="RUB", fee=Decimal("0"), external_id=external_id,
-            source="tbank", payload={},
+            source="tbank", payload={}, dedup_key=dedup_key,
         )
 
-    session.add(make("dup-1"))
+    session.add(make("dup-1", "dedup-dup-1"))
     session.commit()
 
-    session.add(make("dup-1"))
+    session.add(make("dup-1", "dedup-dup-1-b"))
     with pytest.raises(IntegrityError):
         session.commit()
     session.rollback()
@@ -69,7 +70,7 @@ def _make_transaction(account_id: int, external_id: str) -> Transaction:
         executed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         quantity=Decimal("0"), price=Decimal("0"), amount=Decimal("1000.0000"),
         currency="RUB", fee=Decimal("0"), external_id=external_id,
-        source="tbank", payload={},
+        source="tbank", payload={}, dedup_key=f"dedup-{external_id}",
     )
 
 

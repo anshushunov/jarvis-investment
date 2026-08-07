@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from sqlalchemy import DDL, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, event, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -28,6 +28,7 @@ class Transaction(Base):
     __tablename__ = "transaction"
     __table_args__ = (
         UniqueConstraint("source", "external_id", name="uq_transaction_source_external"),
+        UniqueConstraint("dedup_key", name="uq_transaction_dedup_key"),
         Index("ix_transaction_account_executed", "account_id", "executed_at"),
     )
 
@@ -43,8 +44,11 @@ class Transaction(Base):
     fee: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0"))
     external_id: Mapped[str | None] = mapped_column(String(128))
     source: Mapped[str] = mapped_column(String(32))
+    dedup_key: Mapped[str] = mapped_column(String(64), index=True)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    instrument = relationship("Instrument", lazy="joined")
 
 
 # Журнал операций — append-only: UPDATE и DELETE запрещены триггером БД, исправления
