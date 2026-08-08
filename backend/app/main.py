@@ -1,9 +1,21 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes_portfolio, routes_sync
+from app.scheduler import build_scheduler
 
-app = FastAPI(title="Джарвис", docs_url="/api/docs")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    scheduler = build_scheduler()
+    scheduler.start()
+    yield
+    scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="Джарвис", docs_url="/api/docs", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

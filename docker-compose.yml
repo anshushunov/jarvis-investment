@@ -17,9 +17,17 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://jarvis:jarvis@db:5432/jarvis
       TBANK_TOKEN: ${TBANK_TOKEN}
+    command: >
+      sh -c "uv run alembic upgrade head &&
+             uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports: ["8001:8000"]
     depends_on:
       db: {condition: service_healthy}
+
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: [backend]
 
 volumes:
   pgdata:

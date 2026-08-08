@@ -14,6 +14,7 @@ dependencies = [
     # tinkoff-investments (task 9): пакет удалён с PyPI, upstream архивирован.
     # Заменён собственным REST-клиентом поверх httpx (app/connectors/tbank).
     "certifi>=2026.7.22",
+    "apscheduler>=3.11",
 ]
 
 [dependency-groups]
