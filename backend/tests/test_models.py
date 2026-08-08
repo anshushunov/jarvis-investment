@@ -143,3 +143,18 @@ def test_transaction_delete_is_rejected(session):
         session.execute(text('DELETE FROM "transaction" WHERE id = :id'), {"id": tx.id})
         session.commit()
     session.rollback()
+
+
+def test_dedup_key_has_exactly_one_index(session):
+    """На dedup_key стояли сразу два индекса: отдельный ix_transaction_dedup_key
+    и тот, что PostgreSQL создаёт под уникальное ограничение
+    uq_transaction_dedup_key. Возможности поиска у них одинаковые, а платится
+    за оба записью на каждой вставке в журнал."""
+    indexes = session.execute(text(
+        """
+        SELECT indexname FROM pg_indexes
+        WHERE tablename = 'transaction' AND indexdef LIKE '%(dedup_key)%'
+        """
+    )).scalars().all()
+
+    assert indexes == ["uq_transaction_dedup_key"]

@@ -1,5 +1,4 @@
 import logging
-from datetime import date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,26 +10,31 @@ from app.marketdata.moex import MoexClient
 from app.marketdata.service import refresh_last_prices
 from app.snapshots.service import take_snapshot
 from app.sync.service import sync_broker
+from app.timeutils import MOSCOW_TZ, moscow_today
 
 logger = logging.getLogger(__name__)
 
 # Расписание задано по московскому времени (торговая сессия MOEX и вечернее
 # закрытие торгов ориентированы на неё), а не по времени контейнера — тот
 # живёт в UTC. Без явного пояса "19:30" превратилось бы в 22:30 по Москве.
-MOSCOW = "Europe/Moscow"
+# Календарная дата, под которой пишутся котировки и снимок, берётся из того же
+# пояса (moscow_today), а не по поясу процесса: раньше связь между расписанием
+# и датой держалась только на том, что задачи не попадают в окно 00:00-03:00 MSK.
+MOSCOW = str(MOSCOW_TZ)
 
 
 def job_refresh_prices() -> None:
     with SessionLocal() as session:
-        updated = refresh_last_prices(session, MoexClient(), date.today())
+        updated = refresh_last_prices(session, MoexClient(), moscow_today())
         session.commit()
         logger.info("Обновлено котировок: %s", updated)
 
 
 def job_daily_snapshot() -> None:
     with SessionLocal() as session:
-        refresh_last_prices(session, MoexClient(), date.today())
-        snapshot = take_snapshot(session, date.today())
+        today = moscow_today()
+        refresh_last_prices(session, MoexClient(), today)
+        snapshot = take_snapshot(session, today)
         session.commit()
         logger.info("Снимок за %s: %s", snapshot.on_date, snapshot.total_value)
 

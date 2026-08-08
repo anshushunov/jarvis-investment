@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import httpx
 
-from app.marketdata.service import latest_prices, refresh_last_prices
+from app.marketdata.service import LatestPrice, latest_prices, refresh_last_prices
 from app.models import Instrument, Price
 
 
@@ -65,7 +65,11 @@ def test_latest_prices_takes_most_recent_date(session):
     ])
     session.flush()
 
-    assert latest_prices(session) == {instrument.id: Decimal("314.2800")}
+    # Цена и её дата приходят одним проходом: аналитике нужны обе, и раньше
+    # она ради даты делала второй такой же оконный запрос.
+    assert latest_prices(session) == {
+        instrument.id: LatestPrice(close=Decimal("314.2800"), on_date=date(2026, 3, 12))
+    }
 
 
 def test_instrument_without_secid_is_not_requested(session):

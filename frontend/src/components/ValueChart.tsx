@@ -2,7 +2,11 @@ import ReactECharts from "echarts-for-react";
 import { formatDate } from "../api/format";
 import type { HistoryPoint } from "../api/client";
 
-export function ValueChart({ points, error }: { points: HistoryPoint[]; error: string | null }) {
+export function ValueChart({ points, error, loading }: {
+  points: HistoryPoint[];
+  error: string | null;
+  loading: boolean;
+}) {
   // Сбой запроса — не то же самое, что «снимков ещё не накопилось»:
   // заглушка про накопление снимков при реальном сбое сети была бы враньём.
   if (error) {
@@ -10,6 +14,14 @@ export function ValueChart({ points, error }: { points: HistoryPoint[]; error: s
       <div className="card" style={{ color: "var(--red)", fontSize: 13 }}>
         Не удалось загрузить историю стоимости: {error}
       </div>
+    );
+  }
+
+  // То же и для идущего запроса: пока история не пришла, «снимков ещё нет» —
+  // неправда, а не осторожная формулировка.
+  if (loading) {
+    return (
+      <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>Загрузка истории…</div>
     );
   }
 

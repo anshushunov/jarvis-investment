@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from app.analytics.service import portfolio_overview, position_rows
 from app.api.schemas import HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
 from app.db import get_session
 from app.models import Account, DailySnapshot, Reconciliation
+from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -60,7 +61,10 @@ def get_positions(session: Session = Depends(get_session)) -> list[PositionOut]:
 
 @router.get("/portfolio/history", response_model=list[HistoryPointOut])
 def get_history(days: int = 90, session: Session = Depends(get_session)) -> list[HistoryPointOut]:
-    since = date.today() - timedelta(days=days)
+    # Дата берётся в московском поясе явно: снимки пишутся под московской
+    # календарной датой (см. app/timeutils.py), и окно истории обязано
+    # отсчитываться от той же, а не от даты по поясу контейнера.
+    since = moscow_today() - timedelta(days=days)
     rows = session.execute(
         select(DailySnapshot).where(DailySnapshot.on_date >= since).order_by(DailySnapshot.on_date)
     ).scalars().all()

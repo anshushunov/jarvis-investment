@@ -28,6 +28,18 @@ describe("formatMoney", () => {
     expect(formatMoney("500.0000", "SGD")).toBe("500 SGD");
     expect(currencySign("sgd")).toBe("SGD");
   });
+
+  it("округляет копейки, а не усекает их", () => {
+    expect(formatMoney("142.5060", BASE_CURRENCY)).toBe("142,51 ₽");
+    expect(formatMoney("142.5040", BASE_CURRENCY)).toBe("142,50 ₽");
+    expect(formatMoney("-142.5060", BASE_CURRENCY)).toBe("−142,51 ₽");
+  });
+
+  it("переносит переполнение копеек в рубли", () => {
+    expect(formatMoney("142.9990", BASE_CURRENCY)).toBe("143 ₽");
+    expect(formatMoney("999.9990", BASE_CURRENCY)).toBe("1 000 ₽");
+    expect(formatMoney("9.9990", BASE_CURRENCY)).toBe("10 ₽");
+  });
 });
 
 describe("formatPercent", () => {

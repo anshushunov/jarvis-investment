@@ -50,7 +50,11 @@ class Transaction(Base):
     fee: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0"))
     external_id: Mapped[str | None] = mapped_column(String(128))
     source: Mapped[str] = mapped_column(String(32))
-    dedup_key: Mapped[str] = mapped_column(String(64), index=True)
+    # Без index=True: уникальное ограничение uq_transaction_dedup_key выше уже
+    # создаёт индекс по этой колонке, и отдельный index=True давал второй
+    # индекс на ту же колонку — лишняя запись на каждой вставке ради ровно тех
+    # же возможностей поиска.
+    dedup_key: Mapped[str] = mapped_column(String(64))
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -58,16 +59,34 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
     return updated
 
 
-def latest_prices(session: Session) -> dict[int, Decimal]:
+@dataclass(frozen=True)
+class LatestPrice:
+    """Последняя известная котировка инструмента вместе с её датой.
+
+    Цена и дата отдаются вместе, одним проходом по таблице цен. Раньше
+    аналитика заводила собственный оконный запрос дат, дословно повторяющий
+    этот, — два одинаковых прохода по всей таблице цен на каждый показ
+    дашборда.
+    """
+
+    close: Decimal
+    on_date: date
+
+
+def latest_prices(session: Session) -> dict[int, LatestPrice]:
     ranked = select(
         Price.instrument_id,
         Price.close,
+        Price.on_date,
         func.row_number().over(
             partition_by=Price.instrument_id, order_by=Price.on_date.desc()
         ).label("rn"),
     ).subquery()
 
     rows = session.execute(
-        select(ranked.c.instrument_id, ranked.c.close).where(ranked.c.rn == 1)
+        select(ranked.c.instrument_id, ranked.c.close, ranked.c.on_date).where(ranked.c.rn == 1)
     ).all()
-    return {instrument_id: close for instrument_id, close in rows}
+    return {
+        instrument_id: LatestPrice(close=close, on_date=on_date)
+        for instrument_id, close, on_date in rows
+    }

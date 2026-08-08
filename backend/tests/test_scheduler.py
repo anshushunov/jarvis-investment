@@ -1,4 +1,7 @@
+from datetime import date, datetime, timezone
+
 from app.scheduler import build_scheduler
+from app.timeutils import MOSCOW_TZ, moscow_now, moscow_today
 
 
 def test_scheduler_registers_expected_jobs():
@@ -23,3 +26,15 @@ def test_jobs_use_moscow_timezone():
     for job_id in ("refresh_prices", "daily_snapshot", "sync_tbank"):
         trigger = scheduler.get_job(job_id).trigger
         assert str(trigger.timezone) == "Europe/Moscow"
+
+
+def test_calendar_date_is_taken_in_moscow_not_in_container_timezone():
+    """Расписание объявлено в московском поясе, а календарная дата бралась по
+    поясу процесса (в контейнере — UTC). С 21:00 UTC это уже следующие сутки по
+    Москве; сейчас в это окно ни одна задача не попадает, но связь была
+    неявной и держалась только на расписании."""
+    utc_evening = datetime(2026, 3, 11, 22, 30, tzinfo=timezone.utc)
+    assert utc_evening.date() == date(2026, 3, 11)
+    assert utc_evening.astimezone(MOSCOW_TZ).date() == date(2026, 3, 12)
+
+    assert moscow_today() == moscow_now().date()

@@ -2,7 +2,11 @@ import { formatMoney, formatQuantity } from "../api/format";
 import { ChangeValue } from "./MoneyValue";
 import type { PositionRow } from "../api/client";
 
-export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: string | null }) {
+export function PositionsTable({ rows, error, loading }: {
+  rows: PositionRow[];
+  error: string | null;
+  loading: boolean;
+}) {
   // Сбой запроса — не то же самое, что «позиций пока нет»: приглашение
   // «запустите синхронизацию» при реальном сбое сети было бы враньём.
   if (error) {
@@ -10,6 +14,14 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
       <div className="card" style={{ color: "var(--red)", fontSize: 13 }}>
         Не удалось загрузить позиции: {error}
       </div>
+    );
+  }
+
+  // Идущий запрос — тоже не «позиций пока нет». Сводка отвечает быстрее, и без
+  // этой ветки заглушка успевала мелькнуть на долю секунды.
+  if (loading) {
+    return (
+      <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>Загрузка позиций…</div>
     );
   }
 

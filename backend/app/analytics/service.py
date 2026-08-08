@@ -2,12 +2,12 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.instruments import kinds
 from app.marketdata.service import latest_prices
-from app.models import Account, Instrument, Position, Price
+from app.models import Account, Instrument, Position
 from app.money import money
 
 # Ключи — доменные виды инструментов (app/instruments/kinds.py).
@@ -91,21 +91,6 @@ def _rows(session: Session):
     ).all()
 
 
-def _latest_price_dates(session: Session) -> dict[int, date]:
-    ranked = select(
-        Price.instrument_id,
-        Price.on_date,
-        func.row_number().over(
-            partition_by=Price.instrument_id, order_by=Price.on_date.desc()
-        ).label("rn"),
-    ).subquery()
-
-    rows = session.execute(
-        select(ranked.c.instrument_id, ranked.c.on_date).where(ranked.c.rn == 1)
-    ).all()
-    return {instrument_id: on_date for instrument_id, on_date in rows}
-
-
 def _currency_of(instrument: Instrument) -> str:
     return (instrument.currency or BASE_CURRENCY).upper()
 
@@ -115,7 +100,8 @@ def position_rows(session: Session) -> list[PositionRow]:
     result: list[PositionRow] = []
 
     for position, instrument, account in _rows(session):
-        last_price = prices.get(instrument.id)
+        latest = prices.get(instrument.id)
+        last_price = latest.close if latest is not None else None
         cost = money(position.quantity * position.average_price)
 
         if last_price is None:
@@ -149,8 +135,9 @@ def position_rows(session: Session) -> list[PositionRow]:
 
 
 def portfolio_overview(session: Session) -> Overview:
+    # Один проход по таблице цен на весь показ дашборда: цена и её дата
+    # приходят вместе (см. LatestPrice в app/marketdata/service.py).
     prices = latest_prices(session)
-    price_dates = _latest_price_dates(session)
     by_class: dict[str, Decimal] = {}
     by_account_id: dict[int, Decimal] = {}
     by_currency: dict[str, Decimal] = {}
@@ -161,20 +148,19 @@ def portfolio_overview(session: Session) -> Overview:
 
     for position, instrument, account in _rows(session):
         positions_total += 1
-        last_price = prices.get(instrument.id)
-        if last_price is None:
+        latest = prices.get(instrument.id)
+        if latest is None:
             # Неоценённая позиция не попадает ни в итог, ни в разбивки — но
             # молча выпасть из ответа она не должна: её считает positions_total,
             # и дашборд обязан показать, что оценены не все.
             continue
         valued_positions += 1
-        value = money(position.quantity * last_price)
+        value = money(position.quantity * latest.close)
 
         # Дата актуальности — по всем оценённым позициям, независимо от валюты:
         # она про свежесть котировок, а не про состав рублёвого итога.
-        price_date = price_dates.get(instrument.id)
-        if price_date is not None and (as_of is None or price_date > as_of):
-            as_of = price_date
+        if as_of is None or latest.on_date > as_of:
+            as_of = latest.on_date
 
         currency = _currency_of(instrument)
         by_currency[currency] = money(by_currency.get(currency, money("0")) + value)

@@ -30,6 +30,12 @@ export function PortfolioPage() {
   const historyError = history.isError ? (history.error as Error).message : null;
   const reconciliationsError = reconciliations.isError ? (reconciliations.error as Error).message : null;
 
+  // Пока запрос ещё идёт, у него нет данных — и без этого признака компонент
+  // показывал своё пустое состояние («позиций пока нет», «график появится,
+  // когда накопится два снимка»). Сводка грузится быстрее остальных запросов,
+  // так что на долю секунды после её ответа заглушка успевала мелькнуть: тот
+  // же класс лжи пустым состоянием, что уже чинили для ошибок запроса.
+
   return (
     <div style={{ maxWidth: 1180, margin: "0 auto", padding: "32px 24px", display: "grid", gap: 14 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
@@ -49,12 +55,12 @@ export function PortfolioPage() {
           syncResult={sync.data ?? null}
           syncErrorMessage={sync.isError ? (sync.error as Error).message : null}
         />
-        <ValueChart points={history.data ?? []} error={historyError} />
+        <ValueChart points={history.data ?? []} error={historyError} loading={history.isPending} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
         <AllocationChart data={overview.data!.by_asset_class} />
-        <PositionsTable rows={positions.data ?? []} error={positionsError} />
+        <PositionsTable rows={positions.data ?? []} error={positionsError} loading={positions.isPending} />
       </div>
     </div>
   );

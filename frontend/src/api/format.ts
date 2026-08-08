@@ -38,12 +38,41 @@ function group(value: string): string {
 
 // Валюта — обязательный параметр, а не рубль по умолчанию: четверть портфеля
 // номинирована в USD, HKD и CNY, и молчаливый рубль в подписи был враньём.
+// Округление до копеек строковыми операциями: значение приходит с бэкенда
+// строкой ради точности, и Number по дороге тут не появляется. Усечение
+// (просто взять первые два знака) занижало бы каждую сумму — «142,999»
+// показывалось как «142,99».
+function roundToKopecks(digits: string, fraction: string): [string, string] {
+  const kopecks = fraction.slice(0, 2).padEnd(2, "0");
+  if ((fraction[2] ?? "0") < "5") return [digits, kopecks];
+
+  const carried = (Number.parseInt(kopecks, 10) + 1).toString().padStart(2, "0");
+  if (carried !== "100") return [digits, carried];
+
+  // Копейки переполнились в рубль: прибавляем единицу к целой части — тоже
+  // строкой, чтобы не потерять точность на больших суммах.
+  return [bumpInteger(digits), "00"];
+}
+
+function bumpInteger(digits: string): string {
+  const result = digits.split("");
+  let index = result.length - 1;
+  while (index >= 0) {
+    if (result[index] !== "9") {
+      result[index] = String(Number(result[index]) + 1);
+      return result.join("");
+    }
+    result[index] = "0";
+    index -= 1;
+  }
+  return `1${result.join("")}`;
+}
+
 export function formatMoney(raw: string | null | undefined, currency: string): string {
   if (raw === null || raw === undefined) return "—";
-  const [whole, fraction = ""] = raw.split(".");
-  const negative = whole.startsWith("-");
-  const digits = negative ? whole.slice(1) : whole;
-  const kopecks = fraction.slice(0, 2);
+  const [rawWhole, fraction = ""] = raw.split(".");
+  const negative = rawWhole.startsWith("-");
+  const [digits, kopecks] = roundToKopecks(negative ? rawWhole.slice(1) : rawWhole, fraction);
   const showKopecks = digits.length <= 4 && kopecks !== "00";
   const body = group(digits) + (showKopecks ? `,${kopecks}` : "");
   return `${negative ? "−" : ""}${body}${NBSP}${currencySign(currency)}`;
