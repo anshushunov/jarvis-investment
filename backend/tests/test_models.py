@@ -68,7 +68,7 @@ def test_external_id_can_repeat_across_different_accounts(session):
     """T-Invest переиспользует один и тот же external id для двух разных записей на
     разных счетах одного владельца — например, обе стороны перевода между своими
     счетами делят общий идентификатор (живое подтверждение и разбор данных —
-    fix-ledger-unique-report.md). uq_transaction_source_external должен быть
+    docs/decisions/2026-08-08-ledger-external-id-per-account.md). uq_transaction_source_external должен быть
     ограничен рамками счёта (account_id, source, external_id), а не source целиком,
     иначе такая пара ложно считается дублем."""
     account_a = Account(broker="tbank", kind="brokerage", external_id="acc-a",

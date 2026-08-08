@@ -187,7 +187,7 @@ def test_append_operations_skips_external_id_conflict_without_losing_rest_of_bat
     повторной синхронизации, SYNC_OVERLAP_DAYS) — то есть с разными dedup_key. Такая пара
     не ловится проверкой по dedup_key, а падает только на uq_transaction_source_external.
     До этой правки append_operations не перехватывал это ограничение — конфликт всплывал
-    наружу как DBAPIError и ронял batch целиком (см. fix-ledger-unique-report.md), хотя по
+    наружу как DBAPIError и ронял batch целиком (см. docs/decisions/2026-08-08-ledger-external-id-per-account.md), хотя по
     смыслу задачи это тоже дубль, который нужно пропустить, а не потерять остальные
     легитимные операции того же батча.
 

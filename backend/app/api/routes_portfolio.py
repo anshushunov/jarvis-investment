@@ -76,7 +76,7 @@ def get_reconciliations(session: Session = Depends(get_session)) -> list[Reconci
             ledger_quantity=row.ledger_quantity, broker_quantity=row.broker_quantity,
             # Сверка считается по каждому счёту отдельно — один и тот же ISIN
             # может дать две строки на двух разных счетах, неразличимые без
-            # подписи счёта (см. отчёт задачи 15, раунд правок 1).
+            # подписи счёта (проверено на живых данных владельца).
             account=account_label_by_id(session, row.account_id),
         )
         for row in rows

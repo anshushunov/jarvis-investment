@@ -30,7 +30,7 @@ class Transaction(Base):
         # Область действия — счёт, а не весь источник: T-Invest переиспользует один и
         # тот же internal id для двух РАЗНЫХ записей на РАЗНЫХ счетах одного владельца
         # (обе стороны перевода между своими счетами делят один "id" — живое
-        # подтверждение см. fix-ledger-unique-report.md). Ограничение только на
+        # подтверждение см. docs/decisions/2026-08-08-ledger-external-id-per-account.md). Ограничение только на
         # (source, external_id) без account_id ложно принимало такую пару за дубль и
         # роняло весь батч синхронизации второго счёта.
         UniqueConstraint("account_id", "source", "external_id", name="uq_transaction_source_external"),
