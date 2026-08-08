@@ -122,6 +122,25 @@ def test_reconciliations_endpoint_distinguishes_accounts_with_same_isin(client, 
     assert labels == {"Счёт (acc-a)", "Счёт (acc-b)"}
 
 
+def test_account_label_is_the_same_everywhere_on_the_screen(client, session):
+    """Один и тот же счёт подписан одинаково и в разбивке по счетам, и в
+    баннере расхождений: обе подписи строит одна функция на проект. Раньше их
+    было две, и на одном экране счёт назывался по-разному."""
+    account, instrument = seed(session)
+    session.add(Reconciliation(
+        account_id=account.id, instrument_id=instrument.id, isin="RU0009029540",
+        ledger_quantity=Decimal("10"), broker_quantity=Decimal("12"),
+        status="quantity_mismatch",
+    ))
+    session.flush()
+
+    overview = client.get("/api/portfolio/overview").json()
+    reconciliations = client.get("/api/reconciliations").json()
+
+    assert list(overview["by_account"]) == ["Брокерский (acc-1)"]
+    assert reconciliations[0]["account"] == "Брокерский (acc-1)"
+
+
 def test_empty_portfolio_returns_zeroes(client, session):
     payload = client.get("/api/portfolio/overview").json()
     assert payload["total_value"] == "0.0000"

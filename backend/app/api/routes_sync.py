@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.account_labels import account_label
+from app.accounts.labels import account_label_by_id
 from app.api.schemas import SyncRunOut
 from app.config import get_settings
 from app.connectors.base import BrokerConnector
@@ -32,10 +32,10 @@ def sync_tbank(
         SyncRunOut(
             # SAVEPOINT откатывает и сам счёт, если сбой случился ещё на его
             # заведении, так что восстановить, о каком именно счёте шла речь,
-            # уже нечем (account_label вернёт UNKNOWN_ACCOUNT_LABEL) — текст
-            # ошибки прогона (run.error) остаётся единственным источником
+            # уже нечем (account_label_by_id вернёт UNKNOWN_ACCOUNT_LABEL) —
+            # текст ошибки прогона (run.error) остаётся единственным источником
             # подробностей в этом случае.
-            account=account_label(session, run.account_id), broker=run.broker, status=run.status,
+            account=account_label_by_id(session, run.account_id), broker=run.broker, status=run.status,
             inserted=run.inserted, skipped=run.skipped, mismatches=run.mismatches, error=run.error,
         )
         for run in runs

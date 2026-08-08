@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.accounts.labels import account_label, account_label_by_id
 from app.analytics.service import portfolio_overview, position_rows
-from app.api.account_labels import account_label
 from app.api.schemas import HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
 from app.db import get_session
-from app.models import DailySnapshot, Reconciliation
+from app.models import Account, DailySnapshot, Reconciliation
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -16,11 +16,23 @@ router = APIRouter(prefix="/api", tags=["portfolio"])
 @router.get("/portfolio/overview", response_model=OverviewOut)
 def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
     overview = portfolio_overview(session)
+    # Аналитика ключует разбивку по счетам их идентификаторами; подпись
+    # строится здесь, при чтении, единственной на проект функцией — той же,
+    # что подписывает счета в расхождениях и в результатах синхронизации.
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_(overview.by_account))
+        ).scalars()
+    }
     return OverviewOut(
         total_value=overview.total_value,
         positions_value=overview.positions_value,
         by_asset_class=overview.by_asset_class,
-        by_account=overview.by_account,
+        by_account={
+            account_label(accounts[account_id]): value
+            for account_id, value in overview.by_account.items()
+        },
         by_currency=overview.by_currency,
         as_of=overview.as_of,
         valued_positions=overview.valued_positions,
@@ -52,7 +64,7 @@ def get_reconciliations(session: Session = Depends(get_session)) -> list[Reconci
             # Сверка считается по каждому счёту отдельно — один и тот же ISIN
             # может дать две строки на двух разных счетах, неразличимые без
             # подписи счёта (см. отчёт задачи 15, раунд правок 1).
-            account=account_label(session, row.account_id),
+            account=account_label_by_id(session, row.account_id),
         )
         for row in rows
     ]

@@ -56,7 +56,12 @@ class Overview:
     positions_value: Decimal
     # Разбивки считаются по той же рублёвой части, чтобы сходиться с итогом.
     by_asset_class: dict[str, Decimal]
-    by_account: dict[str, Decimal]
+    # Ключ — идентификатор счёта, а не подпись: подпись строится при чтении
+    # (app/accounts/labels.py), одной функцией на весь проект. Раньше здесь
+    # была подпись, и она же уезжала ключом в постоянное хранилище — появление
+    # второго счёта с тем же именем меняло ключ, и исторические снимки
+    # переставали склеиваться по счёту.
+    by_account: dict[int, Decimal]
     # Итог по каждой валюте, включая рублёвую (by_currency[BASE_CURRENCY] ==
     # total_value). Складывать эти суммы между собой нельзя — это разные деньги.
     by_currency: dict[str, Decimal]
@@ -138,31 +143,12 @@ def position_rows(session: Session) -> list[PositionRow]:
     return result
 
 
-def _account_labels(accounts_by_id: dict[int, Account]) -> dict[int, str]:
-    """Строит подпись для каждого счёта: имя, если оно уникально среди
-    участвующих счетов, иначе имя с добавлением внешнего идентификатора —
-    имя одно на несколько счетов не редкость (например, коннектор
-    Т-Банка подставляет заглушку «Счёт», если брокер имени не дал), а
-    уникален только `(broker, external_id)`."""
-    name_counts: dict[str, int] = {}
-    for account in accounts_by_id.values():
-        name_counts[account.name] = name_counts.get(account.name, 0) + 1
-
-    return {
-        account_id: account.name
-        if name_counts[account.name] == 1
-        else f"{account.name} ({account.external_id})"
-        for account_id, account in accounts_by_id.items()
-    }
-
-
 def portfolio_overview(session: Session) -> Overview:
     prices = latest_prices(session)
     price_dates = _latest_price_dates(session)
     by_class: dict[str, Decimal] = {}
     by_account_id: dict[int, Decimal] = {}
     by_currency: dict[str, Decimal] = {}
-    accounts_by_id: dict[int, Account] = {}
     total = money("0")
     as_of: date | None = None
     positions_total = 0
@@ -198,16 +184,12 @@ def portfolio_overview(session: Session) -> Overview:
         by_class[klass] = money(by_class.get(klass, money("0")) + value)
 
         by_account_id[account.id] = money(by_account_id.get(account.id, money("0")) + value)
-        accounts_by_id[account.id] = account
-
-    labels = _account_labels(accounts_by_id)
-    by_account = {labels[account_id]: value for account_id, value in sorted(by_account_id.items())}
 
     return Overview(
         total_value=total,
         positions_value=total,
         by_asset_class=by_class,
-        by_account=by_account,
+        by_account=dict(sorted(by_account_id.items())),
         by_currency=dict(sorted(by_currency.items())),
         # Самая поздняя дата котировки, а не самая ранняя: вопрос, на который
         # она отвечает, — «когда последний раз обновлялись цены». Честность

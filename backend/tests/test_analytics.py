@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from app.analytics.service import portfolio_overview, position_rows
 from app.models import Account, DailySnapshot, Instrument, Position, Price
-from app.snapshots.service import take_snapshot
+from app.snapshots.service import snapshot_by_account, take_snapshot
 
 
 def seed(session):
@@ -145,13 +145,54 @@ def test_overview_as_of_empty_when_no_prices(session):
 
 
 def test_snapshot_roundtrip_keeps_decimal(session):
-    seed(session)
+    account = seed(session)
     take_snapshot(session, date(2026, 3, 12))
     session.expire_all()
     stored = session.query(DailySnapshot).filter(DailySnapshot.on_date == date(2026, 3, 12)).one()
     assert stored.by_asset_class["equity"] == "2300.0000"
     assert Decimal(stored.by_asset_class["equity"]) == Decimal("2300.0000")
-    assert Decimal(stored.by_account["Брокерский"]) == Decimal("7350.0000")
+    assert Decimal(stored.by_account[str(account.id)]) == Decimal("7350.0000")
+
+
+def test_snapshot_keys_accounts_by_stable_identifier(session):
+    """Подпись не годится ключом постоянного хранилища: она меняется вместе с
+    именем счёта и вместе с составом выборки, и исторические снимки перестают
+    склеиваться по счёту."""
+    account = seed(session)
+    take_snapshot(session, date(2026, 3, 12))
+    session.expire_all()
+
+    stored = session.query(DailySnapshot).filter(DailySnapshot.on_date == date(2026, 3, 12)).one()
+    assert list(stored.by_account) == [str(account.id)]
+
+    # Счёт переименовали — ключ снимка обязан остаться прежним.
+    account.name = "Совсем другое имя"
+    session.flush()
+    take_snapshot(session, date(2026, 3, 13))
+    session.expire_all()
+    renamed = session.query(DailySnapshot).filter(DailySnapshot.on_date == date(2026, 3, 13)).one()
+    assert list(renamed.by_account) == [str(account.id)]
+
+
+def test_snapshot_by_account_is_labelled_at_read_time(session):
+    account = seed(session)
+    snapshot = take_snapshot(session, date(2026, 3, 12))
+
+    assert snapshot_by_account(session, snapshot) == {
+        "Брокерский (acc-1)": Decimal("7350.0000")
+    }
+
+
+def test_snapshot_of_old_format_is_still_readable(session):
+    """В базе уже есть снимки, снятые до правки: ключом там лежит готовая
+    подпись. Переписывать историю ради формата ключа незачем — такие ключи
+    отдаются как есть, лишь бы сумма не потерялась."""
+    legacy = DailySnapshot(on_date=date(2026, 2, 1), total_value=Decimal("100"),
+                           by_asset_class={}, by_account={"Инвестиционный": "100.0000"})
+    session.add(legacy)
+    session.flush()
+
+    assert snapshot_by_account(session, legacy) == {"Инвестиционный": Decimal("100.0000")}
 
 
 def test_position_with_zero_price_shows_full_loss(session):
@@ -194,8 +235,9 @@ def test_by_account_keeps_distinct_names_as_own_rows(session):
     session.flush()
 
     overview = portfolio_overview(session)
-    assert overview.by_account["ИИС"] == Decimal("150.0000")
-    assert overview.by_account["Брокерский Сбер"] == Decimal("300.0000")
+    # Разбивка ключуется идентификаторами счетов; подпись строится при чтении.
+    assert overview.by_account[first.id] == Decimal("150.0000")
+    assert overview.by_account[second.id] == Decimal("300.0000")
 
 
 def _seed_foreign(session, account):
@@ -259,7 +301,10 @@ def test_position_row_carries_its_own_currency(session):
     assert rows["AAPL"].market_value == Decimal("2000.0000")
 
 
-def test_by_account_disambiguates_same_name_accounts(session):
+def test_by_account_keeps_same_name_accounts_apart(session):
+    """Два счёта с одинаковым именем — не редкость (коннектор Т-Банка
+    подставляет заглушку «Счёт»). Ключ разбивки их различает по построению:
+    это идентификатор счёта, а не имя."""
     first = Account(broker="tbank", kind="brokerage", external_id="acc-x",
                     name="Счёт", currency="RUB")
     second = Account(broker="tbank", kind="iis", external_id="acc-y",
@@ -280,6 +325,6 @@ def test_by_account_disambiguates_same_name_accounts(session):
 
     overview = portfolio_overview(session)
     assert len(overview.by_account) == 2
-    assert overview.by_account["Счёт (acc-x)"] == Decimal("150.0000")
-    assert overview.by_account["Счёт (acc-y)"] == Decimal("300.0000")
+    assert overview.by_account[first.id] == Decimal("150.0000")
+    assert overview.by_account[second.id] == Decimal("300.0000")
     assert sum(overview.by_account.values()) == overview.positions_value
