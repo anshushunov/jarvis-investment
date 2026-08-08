@@ -21,6 +21,7 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
         positions_value=overview.positions_value,
         by_asset_class=overview.by_asset_class,
         by_account=overview.by_account,
+        by_currency=overview.by_currency,
         as_of=overview.as_of,
         valued_positions=overview.valued_positions,
         positions_total=overview.positions_total,

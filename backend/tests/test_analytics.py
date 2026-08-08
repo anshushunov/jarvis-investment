@@ -198,6 +198,67 @@ def test_by_account_keeps_distinct_names_as_own_rows(session):
     assert overview.by_account["Брокерский Сбер"] == Decimal("300.0000")
 
 
+def _seed_foreign(session, account):
+    """Позиция, номинированная не в рублях, — на живых данных таких четверть."""
+    foreign = Instrument(isin="US0378331005", ticker="AAPL", secid="AAPL",
+                         kind="share", currency="USD", issuer="Apple")
+    session.add(foreign)
+    session.flush()
+    session.add(Position(account_id=account.id, instrument_id=foreign.id,
+                         quantity=Decimal("10"), average_price=Decimal("150")))
+    session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
+                       close=Decimal("200"), source="moex"))
+    session.flush()
+    return foreign
+
+
+def test_foreign_currency_is_kept_out_of_the_ruble_total(session):
+    """Умножение количества на цену без учёта валюты и подпись рублём молча
+    завышали капитал. Рублёвый итог считается только по рублёвой части."""
+    account = seed(session)
+    _seed_foreign(session, account)
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("7350.0000")
+    assert overview.by_currency["RUB"] == Decimal("7350.0000")
+    assert overview.by_currency["USD"] == Decimal("2000.0000")
+
+
+def test_breakdowns_add_up_to_the_ruble_total(session):
+    """Разбивки считаются по той же рублёвой части, что и итог, — иначе они
+    с ним не сходятся."""
+    account = seed(session)
+    _seed_foreign(session, account)
+
+    overview = portfolio_overview(session)
+
+    assert sum(overview.by_asset_class.values()) == overview.total_value
+    assert sum(overview.by_account.values()) == overview.total_value
+
+
+def test_foreign_position_is_still_counted_as_valued(session):
+    """Позиция в валюте оценена (котировка есть) — она не «неоценённая», она
+    просто вне рублёвого итога. Путать эти две вещи нельзя."""
+    account = seed(session)
+    _seed_foreign(session, account)
+
+    overview = portfolio_overview(session)
+    assert overview.positions_total == 4
+    assert overview.valued_positions == 4
+
+
+def test_position_row_carries_its_own_currency(session):
+    account = seed(session)
+    _seed_foreign(session, account)
+
+    rows = {row.ticker: row for row in position_rows(session)}
+    assert rows["AAPL"].currency == "USD"
+    assert rows["SBER"].currency == "RUB"
+    # Стоимость строки — в её собственной валюте, без всякого пересчёта.
+    assert rows["AAPL"].market_value == Decimal("2000.0000")
+
+
 def test_by_account_disambiguates_same_name_accounts(session):
     first = Account(broker="tbank", kind="brokerage", external_id="acc-x",
                     name="Счёт", currency="RUB")

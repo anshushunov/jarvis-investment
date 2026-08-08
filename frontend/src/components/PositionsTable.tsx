@@ -28,6 +28,7 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
         <thead>
           <tr style={{ color: "var(--tx-2)", textAlign: "right" }}>
             <th style={{ textAlign: "left", paddingBottom: 8 }}>Бумага</th>
+            <th style={{ textAlign: "left" }}>Валюта</th>
             <th>Количество</th>
             <th>Средняя</th>
             <th>Текущая</th>
@@ -46,12 +47,16 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
                 <div>{row.ticker ?? "—"}</div>
                 <div style={{ color: "var(--tx-2)", fontSize: 11.5 }}>{row.name}</div>
               </td>
+              {/* Валюта строки видна отдельной колонкой: суммы ниже подписаны
+                  ею, а не рублём, и без явной колонки одинаковые числа в
+                  разных валютах выглядели бы сопоставимыми. */}
+              <td style={{ textAlign: "left", color: "var(--tx-2)" }}>{row.currency}</td>
               <td>{formatQuantity(row.quantity)}</td>
-              <td>{formatMoney(row.average_price)}</td>
+              <td>{formatMoney(row.average_price, row.currency)}</td>
               {/* Нет котировки — прочерк (formatMoney на null), а не «0 ₽»:
                   неизвестная стоимость и нулевая стоимость это разные вещи. */}
-              <td>{formatMoney(row.last_price)}</td>
-              <td>{formatMoney(row.market_value)}</td>
+              <td>{formatMoney(row.last_price, row.currency)}</td>
+              <td>{formatMoney(row.market_value, row.currency)}</td>
               <td><ChangeValue percent={row.profit_percent} /></td>
             </tr>
           ))}

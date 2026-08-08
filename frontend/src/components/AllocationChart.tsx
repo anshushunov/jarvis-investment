@@ -1,5 +1,5 @@
 import ReactECharts from "echarts-for-react";
-import { formatMoney } from "../api/format";
+import { BASE_CURRENCY, formatMoney } from "../api/format";
 
 const LABELS: Record<string, string> = {
   equity: "Акции",
@@ -50,7 +50,9 @@ export function AllocationChart({ data }: { data: Record<string, string> }) {
 
   return (
     <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>Структура портфеля</div>
+      <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>
+        Структура портфеля · рублёвая часть
+      </div>
       <ReactECharts
         style={{ height: 260 }}
         option={{
@@ -59,8 +61,10 @@ export function AllocationChart({ data }: { data: Record<string, string> }) {
             // Подсказка идёт владельцу на экран, а не в геометрию графика —
             // сумма форматируется через formatMoney из исходной строки
             // (params.data.raw), а не пересчётом уже сконвертированного числа.
+            // Разбивка считается по рублёвой части портфеля — валюта здесь
+            // всегда базовая (см. BASE_CURRENCY в аналитике бэкенда).
             formatter: (params: { marker: string; name: string; data: { raw: string } }) =>
-              `${params.marker}${params.name}: ${formatMoney(params.data.raw)}`,
+              `${params.marker}${params.name}: ${formatMoney(params.data.raw, BASE_CURRENCY)}`,
           },
           legend: { bottom: 0, textStyle: { color: "#9aa5c4" } },
           series: [{

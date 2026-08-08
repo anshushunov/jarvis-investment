@@ -1,21 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { formatDate, formatMoney, formatPercent, formatQuantity } from "./format";
+import { BASE_CURRENCY, currencySign, formatDate, formatMoney, formatPercent, formatQuantity } from "./format";
 
 describe("formatMoney", () => {
   it("группирует разряды неразрывными пробелами и добавляет рубль", () => {
-    expect(formatMoney("4812300.0000")).toBe("4 812 300 ₽");
+    expect(formatMoney("4812300.0000", BASE_CURRENCY)).toBe("4 812 300 ₽");
   });
 
   it("сохраняет копейки для мелких сумм", () => {
-    expect(formatMoney("142.5000")).toBe("142,50 ₽");
+    expect(formatMoney("142.5000", BASE_CURRENCY)).toBe("142,50 ₽");
   });
 
   it("не теряет точность на больших числах", () => {
-    expect(formatMoney("123456789.1200")).toBe("123 456 789 ₽");
+    expect(formatMoney("123456789.1200", BASE_CURRENCY)).toBe("123 456 789 ₽");
   });
 
   it("показывает прочерк вместо отсутствующего значения", () => {
-    expect(formatMoney(null)).toBe("—");
+    expect(formatMoney(null, BASE_CURRENCY)).toBe("—");
+  });
+
+  it("подписывает сумму её собственной валютой, а не рублём", () => {
+    expect(formatMoney("142.5000", "USD")).toBe("142,50 $");
+    expect(formatMoney("1200.0000", "HKD")).toBe("1 200 HK$");
+    expect(formatMoney("980.0000", "CNY")).toBe("980 ¥");
+  });
+
+  it("незнакомую валюту подписывает её кодом, а не подменяет рублём", () => {
+    expect(formatMoney("500.0000", "SGD")).toBe("500 SGD");
+    expect(currencySign("sgd")).toBe("SGD");
   });
 });
 

@@ -19,6 +19,14 @@ CLASS_BY_KIND = {
     kinds.FUTURES: "derivatives",
 }
 
+# Базовая валюта портфеля. Совокупный капитал и все разбивки считаются только
+# по рублёвой части: суммировать позиции в USD, HKD и CNY с рублёвыми без
+# пересчёта по курсам — значит молча завышать капитал. Полноценный пересчёт по
+# курсам — отдельная задача следующей фазы; до неё валюты, отличные от базовой,
+# показываются собственными итогами (Overview.by_currency), а не вливаются в
+# рублёвый.
+BASE_CURRENCY = "RUB"
+
 
 @dataclass(frozen=True)
 class PositionRow:
@@ -26,6 +34,10 @@ class PositionRow:
     ticker: str | None
     name: str
     broker: str
+    # Валюта, в которой номинирована бумага: и средняя, и текущая цена, и
+    # стоимость позиции — в ней, а не в рублях. Без неё интерфейс дописывал
+    # знак рубля к суммам в USD, HKD и CNY.
+    currency: str
     quantity: Decimal
     average_price: Decimal
     # None — «оценки нет», и это не то же самое, что ноль: у бумаги без
@@ -39,10 +51,15 @@ class PositionRow:
 
 @dataclass(frozen=True)
 class Overview:
+    # Только рублёвая часть — см. BASE_CURRENCY.
     total_value: Decimal
     positions_value: Decimal
+    # Разбивки считаются по той же рублёвой части, чтобы сходиться с итогом.
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
+    # Итог по каждой валюте, включая рублёвую (by_currency[BASE_CURRENCY] ==
+    # total_value). Складывать эти суммы между собой нельзя — это разные деньги.
+    by_currency: dict[str, Decimal]
     as_of: date | None
     # Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
     # Без этой пары главная цифра дашборда может быть посчитана по четверти
@@ -80,6 +97,10 @@ def _latest_price_dates(session: Session) -> dict[int, date]:
     return {instrument_id: on_date for instrument_id, on_date in rows}
 
 
+def _currency_of(instrument: Instrument) -> str:
+    return (instrument.currency or BASE_CURRENCY).upper()
+
+
 def position_rows(session: Session) -> list[PositionRow]:
     prices = latest_prices(session)
     result: list[PositionRow] = []
@@ -105,6 +126,7 @@ def position_rows(session: Session) -> list[PositionRow]:
                 ticker=instrument.ticker,
                 name=instrument.issuer or instrument.ticker or instrument.isin or "—",
                 broker=account.broker,
+                currency=_currency_of(instrument),
                 quantity=position.quantity,
                 average_price=position.average_price,
                 last_price=last_price,
@@ -139,6 +161,7 @@ def portfolio_overview(session: Session) -> Overview:
     price_dates = _latest_price_dates(session)
     by_class: dict[str, Decimal] = {}
     by_account_id: dict[int, Decimal] = {}
+    by_currency: dict[str, Decimal] = {}
     accounts_by_id: dict[int, Account] = {}
     total = money("0")
     as_of: date | None = None
@@ -155,6 +178,20 @@ def portfolio_overview(session: Session) -> Overview:
             continue
         valued_positions += 1
         value = money(position.quantity * last_price)
+
+        # Дата актуальности — по всем оценённым позициям, независимо от валюты:
+        # она про свежесть котировок, а не про состав рублёвого итога.
+        price_date = price_dates.get(instrument.id)
+        if price_date is not None and (as_of is None or price_date > as_of):
+            as_of = price_date
+
+        currency = _currency_of(instrument)
+        by_currency[currency] = money(by_currency.get(currency, money("0")) + value)
+        if currency != BASE_CURRENCY:
+            # В рублёвый итог и рублёвые разбивки не идёт: без пересчёта по
+            # курсу это было бы сложением разных денег под знаком рубля.
+            continue
+
         total = money(total + value)
 
         klass = asset_class_of(instrument)
@@ -162,10 +199,6 @@ def portfolio_overview(session: Session) -> Overview:
 
         by_account_id[account.id] = money(by_account_id.get(account.id, money("0")) + value)
         accounts_by_id[account.id] = account
-
-        price_date = price_dates.get(instrument.id)
-        if price_date is not None and (as_of is None or price_date > as_of):
-            as_of = price_date
 
     labels = _account_labels(accounts_by_id)
     by_account = {labels[account_id]: value for account_id, value in sorted(by_account_id.items())}
@@ -175,6 +208,7 @@ def portfolio_overview(session: Session) -> Overview:
         positions_value=total,
         by_asset_class=by_class,
         by_account=by_account,
+        by_currency=dict(sorted(by_currency.items())),
         # Самая поздняя дата котировки, а не самая ранняя: вопрос, на который
         # она отвечает, — «когда последний раз обновлялись цены». Честность
         # главной цифры обеспечивается признаком покрытия рядом

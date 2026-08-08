@@ -5,10 +5,12 @@ from pydantic import BaseModel, field_serializer
 
 
 class OverviewOut(BaseModel):
+    # Рублёвая часть портфеля; позиции в других валютах — в by_currency.
     total_value: Decimal
     positions_value: Decimal
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
+    by_currency: dict[str, Decimal]
     as_of: date | None
     # Покрытие оценкой — числа, а не деньги: сериализуются как есть.
     valued_positions: int
@@ -18,7 +20,7 @@ class OverviewOut(BaseModel):
     def serialize_amount(self, value: Decimal) -> str:
         return f"{value:.4f}"
 
-    @field_serializer("by_asset_class", "by_account")
+    @field_serializer("by_asset_class", "by_account", "by_currency")
     def serialize_mapping(self, value: dict[str, Decimal]) -> dict[str, str]:
         return {key: f"{amount:.4f}" for key, amount in value.items()}
 
@@ -28,6 +30,8 @@ class PositionOut(BaseModel):
     ticker: str | None
     name: str
     broker: str
+    # Валюта строки: суммы подписываются ею, а не рублём по умолчанию.
+    currency: str
     quantity: Decimal
     average_price: Decimal
     # None = «оценки нет» и отдаётся наружу как null, чтобы на экране это

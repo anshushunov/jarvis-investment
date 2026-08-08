@@ -1,7 +1,13 @@
 import { formatMoney, formatPercent } from "../api/format";
 
-export function MoneyValue({ amount, className = "" }: { amount: string | null; className?: string }) {
-  return <span className={className}>{formatMoney(amount)}</span>;
+export function MoneyValue({ amount, currency, className = "" }: {
+  amount: string | null;
+  // Валюта обязательна: подписывать рублём то, что номинировано в USD или
+  // HKD, — враньё, которое с экрана никак не отличить от правды.
+  currency: string;
+  className?: string;
+}) {
+  return <span className={className}>{formatMoney(amount, currency)}</span>;
 }
 
 export function ChangeValue({ percent }: { percent: string | null }) {

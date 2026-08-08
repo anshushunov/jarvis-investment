@@ -1,3 +1,4 @@
+import { BASE_CURRENCY, formatMoney } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -5,6 +6,30 @@ const STATUS_LABEL: Record<string, string> = {
   success: "синхронизирован",
   failed: "ошибка синхронизации",
 };
+
+function foreignTotals(byCurrency: Record<string, string>): [string, string][] {
+  return Object.entries(byCurrency).filter(([currency]) => currency !== BASE_CURRENCY);
+}
+
+// Позиции в валютах, отличных от рубля, в совокупный капитал не входят:
+// пересчёта по курсам пока нет, а складывать разные деньги под знаком рубля
+// нельзя. Показываем их отдельным итогом по каждой валюте.
+function ForeignCurrencyTotals({ byCurrency }: { byCurrency: Record<string, string> }) {
+  const foreign = foreignTotals(byCurrency);
+  if (foreign.length === 0) return null;
+
+  return (
+    <div style={{ margin: "10px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
+      Вне рублёвого итога (пересчёта по курсам пока нет):{" "}
+      {foreign.map(([currency, amount], index) => (
+        <span key={currency}>
+          {index > 0 && ", "}
+          <span style={{ color: "var(--tx-1, inherit)" }}>{formatMoney(amount, currency)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 // Совокупный капитал считается только по позициям, для которых есть котировка.
 // Пока оценены не все, сама цифра об этом не говорит ничего — предупреждение
@@ -16,7 +41,7 @@ function CoverageNotice({ overview }: { overview: Overview }) {
   return (
     <div
       style={{
-        margin: "8px 0 14px", padding: "7px 10px", borderRadius: 8,
+        margin: "10px 0 0", padding: "7px 10px", borderRadius: 8,
         background: "rgba(232,176,75,0.14)", color: "var(--amber)", fontSize: 13,
       }}
     >
@@ -35,15 +60,19 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
 }) {
   return (
     <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>Совокупный капитал</div>
-      <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
-        <MoneyValue amount={overview.total_value} />
+      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>
+        Совокупный капитал{foreignTotals(overview.by_currency).length > 0 ? " · рублёвая часть" : ""}
       </div>
+      <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
+        <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />
+      </div>
+      <ForeignCurrencyTotals byCurrency={overview.by_currency} />
       <CoverageNotice overview={overview} />
       <button
         onClick={onSync}
         disabled={syncing}
         style={{
+          marginTop: 14,
           border: "1px solid var(--line)", borderRadius: 9, padding: "7px 14px",
           background: "rgba(123,156,255,0.14)", color: "var(--blue)", cursor: "pointer",
         }}

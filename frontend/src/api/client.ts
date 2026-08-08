@@ -2,10 +2,15 @@
 const BASE = "http://localhost:8001/api";
 
 export interface Overview {
+  // Рублёвая часть портфеля: позиции в других валютах сюда не входят, пока нет
+  // пересчёта по курсам. Их итоги — в by_currency.
   total_value: string;
   positions_value: string;
   by_asset_class: Record<string, string>;
   by_account: Record<string, string>;
+  // Итог по каждой валюте, включая рубль. Складывать между собой нельзя —
+  // это разные деньги.
+  by_currency: Record<string, string>;
   // Дата актуальности оценки; пусто, если котировок ещё нет.
   as_of: string | null;
   // Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
@@ -20,6 +25,8 @@ export interface PositionRow {
   ticker: string | null;
   name: string;
   broker: string;
+  // Валюта, в которой номинирована бумага: все суммы строки — в ней.
+  currency: string;
   quantity: string;
   average_price: string;
   // null = оценки нет (нет котировки). Это не ноль: у бумаги без котировки

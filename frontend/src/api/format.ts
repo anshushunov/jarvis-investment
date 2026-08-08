@@ -6,11 +6,39 @@
 
 const NBSP = " ";
 
+// Базовая валюта портфеля: в ней считается совокупный капитал и все разбивки
+// (см. BASE_CURRENCY в backend/app/analytics/service.py). Позиции в других
+// валютах в этот итог не входят и показываются собственными итогами.
+export const BASE_CURRENCY = "RUB";
+
+// Знак валюты для тех, что реально встречаются в портфеле. Незнакомый код
+// подписывается собой же ("SGD"), а не подменяется рублём: подписать доллары
+// рублём хуже, чем показать код валюты.
+const CURRENCY_SIGN: Record<string, string> = {
+  RUB: "₽",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  CNY: "¥",
+  HKD: "HK$",
+  CHF: "CHF",
+  KZT: "₸",
+  TRY: "₺",
+  AMD: "֏",
+  BYN: "Br",
+};
+
+export function currencySign(currency: string): string {
+  return CURRENCY_SIGN[currency.toUpperCase()] ?? currency.toUpperCase();
+}
+
 function group(value: string): string {
   return value.replace(/\B(?=(\d{3})+(?!\d))/g, NBSP);
 }
 
-export function formatMoney(raw: string | null | undefined): string {
+// Валюта — обязательный параметр, а не рубль по умолчанию: четверть портфеля
+// номинирована в USD, HKD и CNY, и молчаливый рубль в подписи был враньём.
+export function formatMoney(raw: string | null | undefined, currency: string): string {
   if (raw === null || raw === undefined) return "—";
   const [whole, fraction = ""] = raw.split(".");
   const negative = whole.startsWith("-");
@@ -18,7 +46,7 @@ export function formatMoney(raw: string | null | undefined): string {
   const kopecks = fraction.slice(0, 2);
   const showKopecks = digits.length <= 4 && kopecks !== "00";
   const body = group(digits) + (showKopecks ? `,${kopecks}` : "");
-  return `${negative ? "−" : ""}${body}${NBSP}₽`;
+  return `${negative ? "−" : ""}${body}${NBSP}${currencySign(currency)}`;
 }
 
 export function formatPercent(raw: string | null | undefined): string {
