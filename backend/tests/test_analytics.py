@@ -57,7 +57,7 @@ def test_position_row_computes_profit(session):
     assert rows["SBER"].profit_percent == Decimal("50.0000")
 
 
-def test_position_without_price_has_zero_market_value(session):
+def test_position_without_price_has_no_market_value_not_zero(session):
     account = seed(session)
     nameless = Instrument(isin="RU000NOPRICE", ticker="NONE", secid=None,
                           kind="share", currency="RUB")
@@ -69,7 +69,38 @@ def test_position_without_price_has_zero_market_value(session):
 
     rows = {row.ticker: row for row in position_rows(session)}
     assert rows["NONE"].last_price is None
-    assert rows["NONE"].market_value == Decimal("0.0000")
+    # Не ноль: «0 ₽» читается как «бумага ничего не стоит», а тут просто нет
+    # котировки. Настоящий ноль остаётся возможен — см. тест ниже про дефолт.
+    assert rows["NONE"].market_value is None
+    assert rows["NONE"].profit is None
+    assert rows["NONE"].profit_percent is None
+
+
+def test_overview_reports_valuation_coverage(session):
+    """Главная цифра дашборда считается только по оценённым позициям. Сколько
+    их из скольких — обязано доехать до ответа, иначе неоценённые молча
+    выпадают из совокупного капитала и с экрана этого не заметить."""
+    account = seed(session)
+    unpriced = Instrument(isin="RU000NOPRICE", ticker="NONE", secid=None,
+                          kind="share", currency="RUB")
+    session.add(unpriced)
+    session.flush()
+    session.add(Position(account_id=account.id, instrument_id=unpriced.id,
+                         quantity=Decimal("1"), average_price=Decimal("50")))
+    session.flush()
+
+    overview = portfolio_overview(session)
+    assert overview.positions_total == 4
+    assert overview.valued_positions == 3
+    # Итог по-прежнему только по оценённым — меняется не он, а то, что рядом
+    # с ним теперь видно покрытие.
+    assert overview.positions_value == Decimal("7350.0000")
+
+
+def test_overview_coverage_is_full_when_every_position_is_priced(session):
+    seed(session)
+    overview = portfolio_overview(session)
+    assert overview.valued_positions == overview.positions_total == 3
 
 
 def test_snapshot_stores_total_and_breakdown(session):

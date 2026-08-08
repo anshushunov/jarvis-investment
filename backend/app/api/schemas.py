@@ -10,6 +10,9 @@ class OverviewOut(BaseModel):
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
     as_of: date | None
+    # Покрытие оценкой — числа, а не деньги: сериализуются как есть.
+    valued_positions: int
+    positions_total: int
 
     @field_serializer("total_value", "positions_value")
     def serialize_amount(self, value: Decimal) -> str:
@@ -27,10 +30,12 @@ class PositionOut(BaseModel):
     broker: str
     quantity: Decimal
     average_price: Decimal
+    # None = «оценки нет» и отдаётся наружу как null, чтобы на экране это
+    # отличалось от настоящего нуля (см. PositionRow в app/analytics/service.py).
     last_price: Decimal | None
-    market_value: Decimal
-    profit: Decimal
-    profit_percent: Decimal
+    market_value: Decimal | None
+    profit: Decimal | None
+    profit_percent: Decimal | None
 
     @field_serializer("quantity")
     def serialize_quantity(self, value: Decimal) -> str:

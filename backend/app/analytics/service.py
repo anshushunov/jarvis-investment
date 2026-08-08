@@ -28,10 +28,13 @@ class PositionRow:
     broker: str
     quantity: Decimal
     average_price: Decimal
+    # None — «оценки нет», и это не то же самое, что ноль: у бумаги без
+    # котировки стоимость неизвестна, а не равна нулю. Ноль остаётся законным
+    # значением для бумаги, которая действительно ничего не стоит (дефолт).
     last_price: Decimal | None
-    market_value: Decimal
-    profit: Decimal
-    profit_percent: Decimal
+    market_value: Decimal | None
+    profit: Decimal | None
+    profit_percent: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,11 @@ class Overview:
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
     as_of: date | None
+    # Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
+    # Без этой пары главная цифра дашборда может быть посчитана по четверти
+    # портфеля и выглядеть при этом совершенно уверенно — с экрана не заметить.
+    valued_positions: int
+    positions_total: int
 
 
 def asset_class_of(instrument: Instrument) -> str:
@@ -81,9 +89,11 @@ def position_rows(session: Session) -> list[PositionRow]:
         cost = money(position.quantity * position.average_price)
 
         if last_price is None:
-            market_value = money("0")
-            profit = money("0")
-            percent = money("0")
+            # Не ноль: «0 ₽» и «0,0%» в таблице читаются как «бумага ничего не
+            # стоит», хотя на деле котировки просто нет.
+            market_value = None
+            profit = None
+            percent = None
         else:
             market_value = money(position.quantity * last_price)
             profit = money(market_value - cost)
@@ -132,11 +142,18 @@ def portfolio_overview(session: Session) -> Overview:
     accounts_by_id: dict[int, Account] = {}
     total = money("0")
     as_of: date | None = None
+    positions_total = 0
+    valued_positions = 0
 
     for position, instrument, account in _rows(session):
+        positions_total += 1
         last_price = prices.get(instrument.id)
         if last_price is None:
+            # Неоценённая позиция не попадает ни в итог, ни в разбивки — но
+            # молча выпасть из ответа она не должна: её считает positions_total,
+            # и дашборд обязан показать, что оценены не все.
             continue
+        valued_positions += 1
         value = money(position.quantity * last_price)
         total = money(total + value)
 
@@ -158,5 +175,11 @@ def portfolio_overview(session: Session) -> Overview:
         positions_value=total,
         by_asset_class=by_class,
         by_account=by_account,
+        # Самая поздняя дата котировки, а не самая ранняя: вопрос, на который
+        # она отвечает, — «когда последний раз обновлялись цены». Честность
+        # главной цифры обеспечивается признаком покрытия рядом
+        # (valued_positions/positions_total), а не сдвигом даты назад.
         as_of=as_of,
+        valued_positions=valued_positions,
+        positions_total=positions_total,
     )

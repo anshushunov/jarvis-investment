@@ -48,6 +48,8 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
               </td>
               <td>{formatQuantity(row.quantity)}</td>
               <td>{formatMoney(row.average_price)}</td>
+              {/* Нет котировки — прочерк (formatMoney на null), а не «0 ₽»:
+                  неизвестная стоимость и нулевая стоимость это разные вещи. */}
               <td>{formatMoney(row.last_price)}</td>
               <td>{formatMoney(row.market_value)}</td>
               <td><ChangeValue percent={row.profit_percent} /></td>

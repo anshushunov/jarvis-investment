@@ -8,6 +8,11 @@ export interface Overview {
   by_account: Record<string, string>;
   // Дата актуальности оценки; пусто, если котировок ещё нет.
   as_of: string | null;
+  // Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
+  // Совокупный капитал посчитан только по оценённым — если оценены не все,
+  // это обязано быть видно рядом с самой цифрой.
+  valued_positions: number;
+  positions_total: number;
 }
 
 export interface PositionRow {
@@ -17,10 +22,12 @@ export interface PositionRow {
   broker: string;
   quantity: string;
   average_price: string;
+  // null = оценки нет (нет котировки). Это не ноль: у бумаги без котировки
+  // стоимость неизвестна, а не равна нулю.
   last_price: string | null;
-  market_value: string;
-  profit: string;
-  profit_percent: string;
+  market_value: string | null;
+  profit: string | null;
+  profit_percent: string | null;
 }
 
 export interface HistoryPoint {

@@ -6,6 +6,26 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "ошибка синхронизации",
 };
 
+// Совокупный капитал считается только по позициям, для которых есть котировка.
+// Пока оценены не все, сама цифра об этом не говорит ничего — предупреждение
+// должно стоять вплотную к ней и читаться, а не теряться мелким шрифтом.
+function CoverageNotice({ overview }: { overview: Overview }) {
+  const { valued_positions: valued, positions_total: total } = overview;
+  if (total === 0 || valued === total) return null;
+
+  return (
+    <div
+      style={{
+        margin: "8px 0 14px", padding: "7px 10px", borderRadius: 8,
+        background: "rgba(232,176,75,0.14)", color: "var(--amber)", fontSize: 13,
+      }}
+    >
+      Часть портфеля не оценена: цены есть только для {valued} позиций из {total}.
+      Остальные в эту сумму не входят.
+    </div>
+  );
+}
+
 export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMessage }: {
   overview: Overview;
   onSync: () => void;
@@ -16,9 +36,10 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
   return (
     <div className="card">
       <div style={{ color: "var(--tx-2)", fontSize: 12 }}>Совокупный капитал</div>
-      <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 14px" }}>
+      <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
         <MoneyValue amount={overview.total_value} />
       </div>
+      <CoverageNotice overview={overview} />
       <button
         onClick={onSync}
         disabled={syncing}
