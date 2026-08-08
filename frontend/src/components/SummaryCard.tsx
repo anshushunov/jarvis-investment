@@ -1,4 +1,4 @@
-import { BASE_CURRENCY, formatMoney } from "../api/format";
+import { BASE_CURRENCY, formatMoney, hasForeignCurrency } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -61,7 +61,8 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
   return (
     <div className="card">
       <div style={{ color: "var(--tx-2)", fontSize: 12 }}>
-        Совокупный капитал{foreignTotals(overview.by_currency).length > 0 ? " · рублёвая часть" : ""}
+        Совокупный капитал
+        {hasForeignCurrency(overview.position_currencies) ? " · рублёвая часть" : ""}
       </div>
       <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
         <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />

@@ -79,4 +79,11 @@ def map_operation(operation: dict, instrument: BrokerInstrument | None) -> RawOp
 def _instrument_payload(instrument: BrokerInstrument | None) -> dict:
     if instrument is None:
         return {}
-    return {"instrument_kind": instrument.kind, "instrument_name": instrument.name}
+    return {
+        "instrument_kind": instrument.kind,
+        "instrument_name": instrument.name,
+        # Валюта инструмента из справочника — не то же самое, что currency
+        # самой операции выше: та относится к платежу (комиссия по валютной
+        # бумаге приходит в рублях), эта — к бумаге.
+        "instrument_currency": instrument.currency,
+    }

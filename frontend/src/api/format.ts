@@ -32,6 +32,14 @@ export function currencySign(currency: string): string {
   return CURRENCY_SIGN[currency.toUpperCase()] ?? currency.toUpperCase();
 }
 
+// Единственное правило на весь интерфейс: оговорка «рублёвая часть» ставится
+// тогда и только тогда, когда в портфеле есть позиции не в базовой валюте —
+// оценённые или нет. Раньше карточка сводки и кольцевая диаграмма решали это
+// по-разному, и на одном экране оговорка то была, то нет.
+export function hasForeignCurrency(positionCurrencies: string[]): boolean {
+  return positionCurrencies.some((currency) => currency !== BASE_CURRENCY);
+}
+
 function group(value: string): string {
   return value.replace(/\B(?=(\d{3})+(?!\d))/g, NBSP);
 }

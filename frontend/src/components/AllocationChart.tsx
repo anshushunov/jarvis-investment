@@ -1,5 +1,5 @@
 import ReactECharts from "echarts-for-react";
-import { BASE_CURRENCY, formatMoney } from "../api/format";
+import { BASE_CURRENCY, formatMoney, hasForeignCurrency } from "../api/format";
 
 const LABELS: Record<string, string> = {
   equity: "Акции",
@@ -29,7 +29,12 @@ const COLORS: Record<string, string> = {
   other: "#e66767",
 };
 
-export function AllocationChart({ data }: { data: Record<string, string> }) {
+export function AllocationChart({ data, positionCurrencies }: {
+  data: Record<string, string>;
+  // Для оговорки «рублёвая часть» — тем же правилом, что и в карточке сводки
+  // (hasForeignCurrency), а не собственным.
+  positionCurrencies: string[];
+}) {
   const entries = Object.entries(data).map(([key, value]) => ({
     name: LABELS[key] ?? key,
     // value — только геометрия сектора, число здесь разрешено (écharts не
@@ -51,7 +56,8 @@ export function AllocationChart({ data }: { data: Record<string, string> }) {
   return (
     <div className="card">
       <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>
-        Структура портфеля · рублёвая часть
+        Структура портфеля
+        {hasForeignCurrency(positionCurrencies) ? " · рублёвая часть" : ""}
       </div>
       <ReactECharts
         style={{ height: 260 }}

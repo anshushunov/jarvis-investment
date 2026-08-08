@@ -42,13 +42,16 @@ def _rfc3339(value: datetime) -> str:
 
 def _to_broker_instrument(raw: dict, kind: str) -> BrokerInstrument:
     """Общий разбор объекта справочника: и списочные методы, и GetInstrumentBy
-    отдают одинаково названные поля (isin, ticker, name) — различается только
-    то, откуда берётся вид."""
+    отдают одинаково названные поля (isin, ticker, name, currency) — различается
+    только то, откуда берётся вид. Валюта у T-Invest в нижнем регистре ("usd"),
+    в домене хранится в верхнем."""
+    currency = raw.get("currency") or None
     return BrokerInstrument(
         isin=raw.get("isin") or None,
         ticker=raw.get("ticker") or None,
         kind=kind,
         name=raw.get("name") or None,
+        currency=currency.upper() if currency else None,
     )
 
 

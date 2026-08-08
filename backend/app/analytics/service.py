@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.instruments import kinds
 from app.marketdata.service import latest_prices
 from app.models import Account, Instrument, Position
-from app.money import money
+from app.money import BASE_CURRENCY, money
 
 # Ключи — доменные виды инструментов (app/instruments/kinds.py).
 CLASS_BY_KIND = {
@@ -18,15 +18,6 @@ CLASS_BY_KIND = {
     kinds.METAL: "gold",
     kinds.FUTURES: "derivatives",
 }
-
-# Базовая валюта портфеля. Совокупный капитал и все разбивки считаются только
-# по рублёвой части: суммировать позиции в USD, HKD и CNY с рублёвыми без
-# пересчёта по курсам — значит молча завышать капитал. Полноценный пересчёт по
-# курсам — отдельная задача следующей фазы; до неё валюты, отличные от базовой,
-# показываются собственными итогами (Overview.by_currency), а не вливаются в
-# рублёвый.
-BASE_CURRENCY = "RUB"
-
 
 @dataclass(frozen=True)
 class PositionRow:
@@ -68,7 +59,13 @@ class Overview:
     by_account: dict[int, Decimal]
     # Итог по каждой валюте, включая рублёвую (by_currency[BASE_CURRENCY] ==
     # total_value). Складывать эти суммы между собой нельзя — это разные деньги.
+    # Сюда попадают только оценённые позиции.
     by_currency: dict[str, Decimal]
+    # Валюты всех позиций портфеля — независимо от того, удалось ли их оценить.
+    # Отвечает на вопрос «портфель вообще только рублёвый?», на который
+    # by_currency ответить не может: валютная позиция без котировки в него не
+    # попадает, но итог от этого рублёвой частью быть не перестаёт.
+    position_currencies: list[str]
     as_of: date | None
     # Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
     # Без этой пары главная цифра дашборда может быть посчитана по четверти
@@ -141,6 +138,7 @@ def portfolio_overview(session: Session) -> Overview:
     by_class: dict[str, Decimal] = {}
     by_account_id: dict[int, Decimal] = {}
     by_currency: dict[str, Decimal] = {}
+    position_currencies: set[str] = set()
     total = money("0")
     as_of: date | None = None
     positions_total = 0
@@ -148,6 +146,8 @@ def portfolio_overview(session: Session) -> Overview:
 
     for position, instrument, account in _rows(session):
         positions_total += 1
+        position_currencies.add(_currency_of(instrument))
+
         latest = prices.get(instrument.id)
         if latest is None:
             # Неоценённая позиция не попадает ни в итог, ни в разбивки — но
@@ -182,6 +182,7 @@ def portfolio_overview(session: Session) -> Overview:
         by_asset_class=by_class,
         by_account=dict(sorted(by_account_id.items())),
         by_currency=dict(sorted(by_currency.items())),
+        position_currencies=sorted(position_currencies),
         # Самая поздняя дата котировки, а не самая ранняя: вопрос, на который
         # она отвечает, — «когда последний раз обновлялись цены». Честность
         # главной цифры обеспечивается признаком покрытия рядом

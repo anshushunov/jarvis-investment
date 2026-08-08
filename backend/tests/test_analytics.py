@@ -240,8 +240,13 @@ def test_by_account_keeps_distinct_names_as_own_rows(session):
     assert overview.by_account[second.id] == Decimal("300.0000")
 
 
-def _seed_foreign(session, account):
-    """Позиция, номинированная не в рублях, — на живых данных таких четверть."""
+def _seed_foreign(session, account, source="manual"):
+    """Позиция, номинированная не в рублях, — на живых данных таких четверть.
+
+    Котировка по умолчанию не из MOEX: рублёвые котировки MOEX для валютной
+    бумаги при оценке не используются (см. latest_prices), а здесь проверяется
+    именно разделение валют в итогах — то, как поведёт себя валютная позиция,
+    когда курсовой источник цен появится."""
     foreign = Instrument(isin="US0378331005", ticker="AAPL", secid="AAPL",
                          kind="share", currency="USD", issuer="Apple")
     session.add(foreign)
@@ -249,9 +254,36 @@ def _seed_foreign(session, account):
     session.add(Position(account_id=account.id, instrument_id=foreign.id,
                          quantity=Decimal("10"), average_price=Decimal("150")))
     session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
-                       close=Decimal("200"), source="moex"))
+                       close=Decimal("200"), source=source))
     session.flush()
     return foreign
+
+
+def test_ruble_moex_quote_does_not_value_a_foreign_position(session):
+    """MOEX отдаёт цену в рублях. Показать её под знаком доллара и вычесть
+    позицию из рублёвого итога — хуже, чем честно сказать «не оценена»."""
+    account = seed(session)
+    _seed_foreign(session, account, source="moex")
+
+    overview = portfolio_overview(session)
+
+    assert overview.positions_total == 4
+    assert overview.valued_positions == 3
+    assert sorted(overview.by_currency) == ["RUB"]
+    # Но валюта позиции всё равно известна — оговорка «рублёвая часть» нужна.
+    assert overview.position_currencies == ["RUB", "USD"]
+
+
+def test_position_currencies_include_unvalued_positions(session):
+    """by_currency отвечает на вопрос «сколько денег в каждой валюте» и
+    неоценённую позицию не видит; position_currencies отвечает на вопрос
+    «портфель вообще только рублёвый» и обязан её учитывать."""
+    account = seed(session)
+    _seed_foreign(session, account, source="moex")
+
+    overview = portfolio_overview(session)
+    assert "USD" not in overview.by_currency
+    assert "USD" in overview.position_currencies
 
 
 def test_foreign_currency_is_kept_out_of_the_ruble_total(session):

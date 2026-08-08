@@ -11,6 +11,9 @@ class OverviewOut(BaseModel):
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
     by_currency: dict[str, Decimal]
+    # Валюты позиций портфеля, включая неоценённые: по ним интерфейс решает,
+    # нужна ли оговорка «рублёвая часть».
+    position_currencies: list[str]
     as_of: date | None
     # Покрытие оценкой — числа, а не деньги: сериализуются как есть.
     valued_positions: int

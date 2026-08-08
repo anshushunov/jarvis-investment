@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { BASE_CURRENCY, currencySign, formatDate, formatMoney, formatPercent, formatQuantity } from "./format";
+import {
+  BASE_CURRENCY,
+  currencySign,
+  formatDate,
+  formatMoney,
+  formatPercent,
+  formatQuantity,
+  hasForeignCurrency,
+} from "./format";
 
 describe("formatMoney", () => {
   it("группирует разряды неразрывными пробелами и добавляет рубль", () => {
@@ -39,6 +47,19 @@ describe("formatMoney", () => {
     expect(formatMoney("142.9990", BASE_CURRENCY)).toBe("143 ₽");
     expect(formatMoney("999.9990", BASE_CURRENCY)).toBe("1 000 ₽");
     expect(formatMoney("9.9990", BASE_CURRENCY)).toBe("10 ₽");
+  });
+});
+
+describe("hasForeignCurrency", () => {
+  it("не ставит оговорку для чисто рублёвого портфеля", () => {
+    expect(hasForeignCurrency([BASE_CURRENCY])).toBe(false);
+    expect(hasForeignCurrency([])).toBe(false);
+  });
+
+  it("ставит оговорку, даже если валютная позиция не оценена", () => {
+    // Ровно этот случай и есть основной: рублёвые котировки MOEX для валютной
+    // бумаги не используются, так что в by_currency её нет — а оговорка нужна.
+    expect(hasForeignCurrency([BASE_CURRENCY, "HKD"])).toBe(true);
   });
 });
 

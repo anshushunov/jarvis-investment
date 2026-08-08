@@ -127,6 +127,50 @@ def test_currency_instrument_is_requested_on_currency_engine(session):
     assert client.calls_with_market == [("USD000UTSTOM", "currency", "selt")]
 
 
+def test_non_ruble_instrument_is_not_requested_from_moex(session):
+    """MOEX ISS отдаёт котировки в рублях. Для гонконгской бумаги такая цена —
+    не оценка: рублёвое число под знаком HK$ выглядит правдой, но ею не
+    является, а пересчёта по курсам в этой фазе нет."""
+    session.add(Instrument(isin="KYG875721634", ticker="700", secid="700",
+                           kind="share", currency="HKD"))
+    session.flush()
+    client = FakeMoex({"700": Decimal("300")})
+
+    assert refresh_last_prices(session, client, date(2026, 3, 12)) == 0
+    assert client.calls == []
+
+
+def test_ruble_price_of_a_non_ruble_instrument_is_not_used_for_valuation(session):
+    """Фильтр стоит не только на загрузке: в базе могли остаться котировки,
+    записанные до того, как валюта инструмента была исправлена по справочнику
+    брокера."""
+    stale = Instrument(isin="KYG875721634", ticker="700", secid="700",
+                       kind="share", currency="HKD")
+    session.add(stale)
+    session.flush()
+    session.add(Price(instrument_id=stale.id, on_date=date(2026, 3, 12),
+                      close=Decimal("300"), source="moex"))
+    session.flush()
+
+    assert latest_prices(session) == {}
+
+
+def test_price_from_another_source_is_kept_for_a_non_ruble_instrument(session):
+    """Правило про рубли — про котировки MOEX, а не про валютные инструменты
+    вообще: курсовой источник, когда он появится, под него не подпадает."""
+    foreign = Instrument(isin="KYG875721634", ticker="700", secid="700",
+                         kind="share", currency="HKD")
+    session.add(foreign)
+    session.flush()
+    session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
+                      close=Decimal("300"), source="manual"))
+    session.flush()
+
+    assert latest_prices(session) == {
+        foreign.id: LatestPrice(close=Decimal("300.0000"), on_date=date(2026, 3, 12))
+    }
+
+
 class BrokenBodyMoex:
     """ISS вернул тело, которое нельзя разобрать как JSON."""
 

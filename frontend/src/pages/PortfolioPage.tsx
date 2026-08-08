@@ -59,7 +59,10 @@ export function PortfolioPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
-        <AllocationChart data={overview.data!.by_asset_class} />
+        <AllocationChart
+          data={overview.data!.by_asset_class}
+          positionCurrencies={overview.data!.position_currencies}
+        />
         <PositionsTable rows={positions.data ?? []} error={positionsError} loading={positions.isPending} />
       </div>
     </div>

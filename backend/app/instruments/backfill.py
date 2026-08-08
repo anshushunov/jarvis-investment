@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrument]) -> int:
-    """Дозаполняет вид и название всем инструментам, которые нашлись в
+    """Дозаполняет вид, название и валюту всем инструментам, которые нашлись в
     справочнике `reference` (ключ — ISIN). Возвращает число реально изменённых
     записей. Инструмент, которого в справочнике нет, не трогается вовсе."""
     changed = 0
@@ -42,7 +42,7 @@ def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrum
         found = reference.get(instrument.isin)
         if found is None:
             continue
-        if apply_reference(instrument, found.kind, found.name):
+        if apply_reference(instrument, found.kind, found.name, found.currency):
             changed += 1
 
     session.flush()

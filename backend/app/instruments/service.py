@@ -32,17 +32,32 @@ def resolve_instrument(session: Session, op: RawOperation) -> Instrument | None:
     return _insert_instrument(session, op)
 
 
-def apply_reference(instrument: Instrument, kind: str | None, name: str | None) -> bool:
+def apply_reference(
+    instrument: Instrument,
+    kind: str | None,
+    name: str | None,
+    currency: str | None = None,
+) -> bool:
     """Дозаполняет справочные сведения инструмента. Возвращает True, если
     что-то реально изменилось.
 
-    Справочник брокера здесь — источник истины: вид перезаписывается, а не
-    только заполняется на пустом месте. Иначе 149 уже записанных инструментов
-    навсегда останутся акциями — «пусто» в колонке `kind` не бывает, там лежит
-    неверное значение, а не NULL. Неизвестный вид (kinds.OTHER) при этом
-    ничего не затирает: поштучный запасной путь справочника может не знать
-    экзотический инструмент, и терять из-за этого уже установленный вид
-    незачем."""
+    Справочник брокера здесь — источник истины: вид и валюта перезаписываются,
+    а не только заполняются на пустом месте. Иначе уже записанные инструменты
+    навсегда останутся с тем, что попало в строку при её создании — «пусто» в
+    этих колонках не бывает, там лежит неверное значение, а не NULL.
+
+    Валюта особенно: при создании она берётся из платежа первой встреченной
+    операции, а платёж по валютной бумаге вполне может прийти в рублях
+    (комиссия, налог, дивиденд) — на живых данных так получилось у шести
+    инструментов, чьи сделки шли в USD и HKD. Пока валюта была почти
+    декоративной, это было терпимо; теперь она решает, попадёт ли позиция в
+    совокупный капитал.
+
+    Отсутствующие справочные сведения ничего не затирают: справочник может не
+    знать экзотический инструмент, и терять из-за этого уже установленное
+    значение незачем. Для вида то же самое делает и явный kinds.OTHER —
+    «вид неизвестен» не должен вытеснять известный.
+    """
     changed = False
 
     if kind and kind != kinds.OTHER and instrument.kind != kind:
@@ -53,16 +68,25 @@ def apply_reference(instrument: Instrument, kind: str | None, name: str | None) 
         instrument.issuer = name
         changed = True
 
+    if currency and instrument.currency != currency:
+        instrument.currency = currency
+        changed = True
+
     return changed
 
 
-def _reference_from(op: RawOperation) -> tuple[str | None, str | None]:
+def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | None]:
     """Справочные сведения, положенные коннектором в payload операции (см.
     app/connectors/tbank/mapper.py). Ключей может не быть вовсе — например, у
     операции, записанной в журнал до того, как коннектор научился их класть."""
     kind = op.payload.get("instrument_kind")
     name = op.payload.get("instrument_name")
-    return (str(kind) if kind else None, str(name) if name else None)
+    currency = op.payload.get("instrument_currency")
+    return (
+        str(kind) if kind else None,
+        str(name) if name else None,
+        str(currency).upper() if currency else None,
+    )
 
 
 def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
@@ -75,7 +99,7 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
     нарушение уникального индекса и переиспользует уже вставленную запись — без
     падения всей пачки операций.
     """
-    kind, name = _reference_from(op)
+    kind, name, currency = _reference_from(op)
     instrument = Instrument(
         isin=op.isin,
         ticker=op.ticker,
@@ -83,7 +107,10 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
         # Вида нет только если справочник брокера сам его не дал — записываем
         # честное "неизвестно", а не подразумеваемую акцию.
         kind=kind or kinds.OTHER,
-        currency=op.currency,
+        # Валюта самой бумаги, а валюта платежа (op.currency) — только запасное
+        # значение на случай, когда справочник ничего не дал: колонка NOT NULL,
+        # а платёж хоть какую-то валюту всегда несёт.
+        currency=currency or op.currency,
         issuer=name,
     )
     try:
@@ -98,6 +125,6 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
         winner = session.execute(
             select(Instrument).where(Instrument.isin == op.isin)
         ).scalar_one()
-        apply_reference(winner, kind, name)
+        apply_reference(winner, kind, name, currency)
         return winner
     return instrument

@@ -35,6 +35,7 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
             for account_id, value in overview.by_account.items()
         },
         by_currency=overview.by_currency,
+        position_currencies=overview.position_currencies,
         as_of=overview.as_of,
         valued_positions=overview.valued_positions,
         positions_total=overview.positions_total,
