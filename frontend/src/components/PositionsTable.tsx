@@ -28,6 +28,7 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
         <thead>
           <tr style={{ color: "var(--tx-2)", textAlign: "right" }}>
             <th style={{ textAlign: "left", paddingBottom: 8 }}>Бумага</th>
+            <th style={{ textAlign: "left" }}>Счёт</th>
             <th style={{ textAlign: "left" }}>Валюта</th>
             <th>Количество</th>
             <th>Средняя</th>
@@ -38,15 +39,18 @@ export function PositionsTable({ rows, error }: { rows: PositionRow[]; error: st
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            // isin+broker не гарантированно уникален: API не отдаёт признак счёта,
-            // а один инструмент может быть куплен на двух счетах одного брокера
-            // (проверено на реальных данных: см. отчёт задачи 15). Индекс — как
-            // добавка к ключу, а не сама навигация, порядок строк от бэкенда стабилен.
-            <tr key={`${row.isin}-${row.broker}-${index}`} style={{ borderTop: "1px solid var(--line)", textAlign: "right" }}>
+            // isin+счёт различает строки уже по смыслу (один инструмент на
+            // двух счетах — две разные позиции). Индекс остаётся добавкой к
+            // ключу на случай данных, где и это совпадёт; порядок строк от
+            // бэкенда стабилен.
+            <tr key={`${row.isin}-${row.account}-${index}`} style={{ borderTop: "1px solid var(--line)", textAlign: "right" }}>
               <td style={{ textAlign: "left", padding: "9px 0" }}>
                 <div>{row.ticker ?? "—"}</div>
                 <div style={{ color: "var(--tx-2)", fontSize: 11.5 }}>{row.name}</div>
               </td>
+              {/* Счёт: при пяти счетах одного брокера один тикер давал
+                  несколько визуально одинаковых строк. */}
+              <td style={{ textAlign: "left", color: "var(--tx-2)", fontSize: 12 }}>{row.account}</td>
               {/* Валюта строки видна отдельной колонкой: суммы ниже подписаны
                   ею, а не рублём, и без явной колонки одинаковые числа в
                   разных валютах выглядели бы сопоставимыми. */}

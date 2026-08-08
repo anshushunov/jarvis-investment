@@ -30,6 +30,9 @@ class PositionOut(BaseModel):
     ticker: str | None
     name: str
     broker: str
+    # Подпись счёта — той же единственной на проект функцией, что подписывает
+    # счета в расхождениях и в результатах синхронизации.
+    account: str
     # Валюта строки: суммы подписываются ею, а не рублём по умолчанию.
     currency: str
     quantity: Decimal

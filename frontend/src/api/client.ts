@@ -25,6 +25,9 @@ export interface PositionRow {
   ticker: string | null;
   name: string;
   broker: string;
+  // Подпись счёта: один и тот же тикер на нескольких счетах одного брокера
+  // даёт несколько строк, различить которые больше нечем.
+  account: string;
   // Валюта, в которой номинирована бумага: все суммы строки — в ней.
   currency: string;
   quantity: string;

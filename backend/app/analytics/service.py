@@ -34,6 +34,10 @@ class PositionRow:
     ticker: str | None
     name: str
     broker: str
+    # Счёт, на котором лежит позиция. Один и тот же тикер на пяти счетах
+    # одного брокера давал пять визуально одинаковых строк, различить которые
+    # было нечем. Идентификатор, а не подпись: подпись строится при чтении.
+    account_id: int
     # Валюта, в которой номинирована бумага: и средняя, и текущая цена, и
     # стоимость позиции — в ней, а не в рублях. Без неё интерфейс дописывал
     # знак рубля к суммам в USD, HKD и CNY.
@@ -131,6 +135,7 @@ def position_rows(session: Session) -> list[PositionRow]:
                 ticker=instrument.ticker,
                 name=instrument.issuer or instrument.ticker or instrument.isin or "—",
                 broker=account.broker,
+                account_id=account.id,
                 currency=_currency_of(instrument),
                 quantity=position.quantity,
                 average_price=position.average_price,

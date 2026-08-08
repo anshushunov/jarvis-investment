@@ -42,7 +42,20 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
 
 @router.get("/portfolio/positions", response_model=list[PositionOut])
 def get_positions(session: Session = Depends(get_session)) -> list[PositionOut]:
-    return [PositionOut(**row.__dict__) for row in position_rows(session)]
+    rows = position_rows(session)
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_({row.account_id for row in rows}))
+        ).scalars()
+    }
+    return [
+        PositionOut(
+            **{key: value for key, value in row.__dict__.items() if key != "account_id"},
+            account=account_label(accounts[row.account_id]),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/portfolio/history", response_model=list[HistoryPointOut])

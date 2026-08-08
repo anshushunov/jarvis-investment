@@ -58,6 +58,25 @@ def test_positions_endpoint_returns_row(client, session):
     assert len(rows) == 1
     assert rows[0]["ticker"] == "SBER"
     assert rows[0]["profit"] == "500.0000"
+    assert rows[0]["account"] == "Брокерский (acc-1)"
+    assert rows[0]["currency"] == "RUB"
+
+
+def test_positions_endpoint_distinguishes_same_ticker_on_different_accounts(client, session):
+    """Пять счетов одного брокера — и один тикер даёт пять строк, различить
+    которые было нечем: в ответе не было признака счёта вовсе."""
+    account, instrument = seed(session)
+    second = Account(broker="tbank", kind="iis", external_id="acc-2", name="Брокерский")
+    session.add(second)
+    session.flush()
+    session.add(Position(account_id=second.id, instrument_id=instrument.id,
+                         quantity=Decimal("4"), average_price=Decimal("120")))
+    session.flush()
+
+    rows = client.get("/api/portfolio/positions").json()
+
+    assert len(rows) == 2
+    assert {row["account"] for row in rows} == {"Брокерский (acc-1)", "Брокерский (acc-2)"}
 
 
 def test_history_returns_snapshots_in_date_order(client, session):
