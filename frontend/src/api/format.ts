@@ -76,13 +76,23 @@ function bumpInteger(digits: string): string {
   return `1${result.join("")}`;
 }
 
+// Копейки скрываются у сумм от пяти знаков — это про читаемость, а не про
+// точность: скрыть их не значит отбросить. «10 000,99» обязано показаться как
+// «10 001 ₽», а не «10 000 ₽» — иначе ровно от этого порога и выше каждая
+// сумма занижается, причём мелкие суммы рядом при этом округляются честно.
+const KOPECKS_VISIBLE_UP_TO_DIGITS = 4;
+const HALF_KOPECK = "50";
+
 export function formatMoney(raw: string | null | undefined, currency: string): string {
   if (raw === null || raw === undefined) return "—";
   const [rawWhole, fraction = ""] = raw.split(".");
   const negative = rawWhole.startsWith("-");
   const [digits, kopecks] = roundToKopecks(negative ? rawWhole.slice(1) : rawWhole, fraction);
-  const showKopecks = digits.length <= 4 && kopecks !== "00";
-  const body = group(digits) + (showKopecks ? `,${kopecks}` : "");
+
+  const showKopecks = digits.length <= KOPECKS_VISIBLE_UP_TO_DIGITS && kopecks !== "00";
+  const whole = showKopecks || kopecks < HALF_KOPECK ? digits : bumpInteger(digits);
+
+  const body = group(whole) + (showKopecks ? `,${kopecks}` : "");
   return `${negative ? "−" : ""}${body}${NBSP}${currencySign(currency)}`;
 }
 

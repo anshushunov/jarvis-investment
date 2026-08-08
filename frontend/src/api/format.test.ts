@@ -48,6 +48,16 @@ describe("formatMoney", () => {
     expect(formatMoney("999.9990", BASE_CURRENCY)).toBe("1 000 ₽");
     expect(formatMoney("9.9990", BASE_CURRENCY)).toBe("10 ₽");
   });
+
+  it("округляет рубли и у крупных сумм, где копейки не показываются", () => {
+    // Скрыть копейки ради читаемости — можно, отбросить их — нет: иначе от
+    // этого порога и выше каждая сумма занижается.
+    expect(formatMoney("10000.9900", BASE_CURRENCY)).toBe("10 001 ₽");
+    expect(formatMoney("10000.5000", BASE_CURRENCY)).toBe("10 001 ₽");
+    expect(formatMoney("10000.4900", BASE_CURRENCY)).toBe("10 000 ₽");
+    expect(formatMoney("99999.9900", BASE_CURRENCY)).toBe("100 000 ₽");
+    expect(formatMoney("-10000.9900", BASE_CURRENCY)).toBe("−10 001 ₽");
+  });
 });
 
 describe("hasForeignCurrency", () => {

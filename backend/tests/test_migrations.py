@@ -55,11 +55,18 @@ def migrations_engine():
     with admin.connect() as conn:
         conn.execute(text(f"DROP DATABASE IF EXISTS {MIGRATIONS_DB}"))
         conn.execute(text(f"CREATE DATABASE {MIGRATIONS_DB}"))
-    admin.dispose()
 
     engine = create_engine(MIGRATIONS_URL)
-    yield engine
-    engine.dispose()
+    try:
+        yield engine
+    finally:
+        # База удаляется за собой, а не остаётся висеть в кластере до
+        # следующего прогона. Пересоздание на входе остаётся: оно защищает от
+        # прерванного прогона, после которого teardown не отработал.
+        engine.dispose()
+        with admin.connect() as conn:
+            conn.execute(text(f"DROP DATABASE IF EXISTS {MIGRATIONS_DB}"))
+        admin.dispose()
 
 
 def test_full_chain_upgrades_matches_models_and_downgrades(migrations_engine):
