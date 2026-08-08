@@ -8,7 +8,7 @@ from app.db_errors import is_unique_violation
 from app.instruments.service import resolve_instrument
 from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
-from app.models import Account, Transaction
+from app.models import Account, Instrument, Transaction
 
 # UniqueConstraint("dedup_key", name="uq_transaction_dedup_key") в app/models/transaction.py.
 _DEDUP_KEY_UNIQUE_CONSTRAINT = "uq_transaction_dedup_key"
@@ -37,6 +37,32 @@ class AppendResult:
     skipped: int
 
 
+class _InstrumentCache:
+    """Разрешённые инструменты на время одного вызова append_operations.
+
+    Разрешение инструмента — это отдельный SELECT по ISIN, и оно шло внутри
+    цикла по всему батчу: на первой синхронизации счёта это тысячи обращений к
+    базе — при том что рядом ради экономии на вставке специально сделан
+    пакетный сброс. Уникальных ISIN в батче сотни, операций тысячи, так что кэш
+    на время вызова снимает это целиком.
+
+    Живёт ровно один вызов и не переживает его: инструменты меняются
+    (дозаполняются справочными сведениями при следующей синхронизации), и
+    держать их дольше — значит однажды отдать устаревшую запись.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._by_isin: dict[str, Instrument | None] = {}
+
+    def resolve(self, op: RawOperation) -> Instrument | None:
+        if op.isin is None:
+            return None
+        if op.isin not in self._by_isin:
+            self._by_isin[op.isin] = resolve_instrument(self._session, op)
+        return self._by_isin[op.isin]
+
+
 def _build_transaction(
     account: Account, source: str, op: RawOperation, key: str, instrument_id: int | None
 ) -> Transaction:
@@ -57,7 +83,14 @@ def _build_transaction(
     )
 
 
-def _insert_one(session: Session, account: Account, source: str, op: RawOperation, key: str) -> bool:
+def _insert_one(
+    session: Session,
+    account: Account,
+    source: str,
+    op: RawOperation,
+    key: str,
+    instruments: _InstrumentCache,
+) -> bool:
     """Вставляет одну операцию под собственным SAVEPOINT. Возвращает False, если это
     дубль — конфликт по dedup_key (гонка с параллельным вызовом append_operations по
     тому же счёту) или по (account_id, source, external_id) (тот же внешний
@@ -65,7 +98,7 @@ def _insert_one(session: Session, account: Account, source: str, op: RawOperatio
     обнаруженный только на вставке. Это медленный, но безопасный путь на единичную
     строку — append_operations прибегает к нему только тогда, когда быстрый пакетный
     flush всего батча уже столкнулся с конфликтом (см. append_operations)."""
-    instrument = resolve_instrument(session, op)
+    instrument = instruments.resolve(op)
     transaction = _build_transaction(account, source, op, key, instrument.id if instrument else None)
     try:
         with session.begin_nested():
@@ -127,9 +160,10 @@ def append_operations(
     # операций, синхронный вызов из POST /api/sync/tbank) это ощутимо, поэтому конфликт
     # по любому из двух уникальных ограничений журнала обрабатывается не построчным
     # SAVEPOINT сразу, а как редкое исключение из быстрого пути.
+    instruments = _InstrumentCache(session)
     transactions = []
     for op, key in to_insert:
-        instrument = resolve_instrument(session, op)
+        instrument = instruments.resolve(op)
         transactions.append(_build_transaction(account, source, op, key, instrument.id if instrument else None))
 
     try:
@@ -149,7 +183,9 @@ def append_operations(
         inserted = 0
         conflict_skipped = 0
         for op, key in to_insert:
-            if _insert_one(session, account, source, op, key):
+            # Тот же кэш, что и у быстрого пути: инструменты уже разрешены,
+            # переспрашивать базу по второму разу незачем.
+            if _insert_one(session, account, source, op, key, instruments):
                 inserted += 1
             else:
                 conflict_skipped += 1

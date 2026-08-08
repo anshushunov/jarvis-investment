@@ -1,13 +1,13 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 import app.ledger.service as ledger_service
 from app.instruments.service import _insert_instrument
 from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
-from app.ledger.service import _insert_one, append_operations
+from app.ledger.service import _InstrumentCache, _insert_one, append_operations
 from app.models import Account, Instrument, OperationType, Transaction
 
 
@@ -93,8 +93,8 @@ def test_dedup_conflict_at_insert_is_skipped_not_raised(session):
     op = buy_op(external_id=None)
     key = natural_key("tbank", account.external_id, op)
 
-    assert _insert_one(session, account, "tbank", op, key) is True
-    assert _insert_one(session, account, "tbank", op, key) is False
+    assert _insert_one(session, account, "tbank", op, key, _InstrumentCache(session)) is True
+    assert _insert_one(session, account, "tbank", op, key, _InstrumentCache(session)) is False
     assert count_tx(session) == 1
 
 
@@ -132,7 +132,7 @@ def test_append_operations_falls_back_to_row_by_row_on_bulk_conflict(session, mo
 
     existing_op = buy_op(external_id=None)
     existing_key = natural_key("tbank", account.external_id, existing_op)
-    assert _insert_one(session, account, "tbank", existing_op, existing_key) is True
+    assert _insert_one(session, account, "tbank", existing_op, existing_key, _InstrumentCache(session)) is True
 
     new_op = buy_op(external_id=None, executed_at=datetime(2026, 3, 13, 10, 30, tzinfo=timezone.utc))
 
@@ -143,6 +143,41 @@ def test_append_operations_falls_back_to_row_by_row_on_bulk_conflict(session, mo
     assert result.inserted == 1
     assert result.skipped == 1
     assert count_tx(session) == 2
+
+
+def _count_instrument_selects(session) -> list[int]:
+    """Считает SELECT'ы по таблице instrument, реально ушедшие в PostgreSQL."""
+    counter = [0]
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _on_execute(conn, cursor, statement, parameters, context, executemany):  # noqa: PLR0913
+        normalized = " ".join(statement.split()).lower()
+        if normalized.startswith("select") and "from instrument" in normalized:
+            counter[0] += 1
+
+    return counter
+
+
+def test_instrument_is_resolved_once_per_isin_not_once_per_operation(session):
+    """Разрешение инструмента — отдельный SELECT по ISIN, и оно шло внутри
+    цикла по всему батчу: на первой синхронизации счёта это тысячи обращений к
+    базе, при том что рядом ради экономии на вставке специально сделан пакетный
+    сброс. Уникальных ISIN сотни, операций тысячи."""
+    account = make_account(session)
+    operations = [
+        buy_op(external_id=f"op-{index}",
+               executed_at=datetime(2026, 3, 12, 10, index, tzinfo=timezone.utc))
+        for index in range(12)
+    ]
+
+    selects = _count_instrument_selects(session)
+    result = append_operations(session, account, "tbank", operations)
+
+    assert result.inserted == 12
+    # Один ISIN на весь батч — ровно один поиск инструмента, а не двенадцать.
+    # Вторая допустимая выборка — та, которой resolve_instrument перечитывает
+    # запись после гонки; в этом сценарии её нет.
+    assert selects[0] == 1
 
 
 def test_append_operations_skips_external_id_conflict_without_losing_rest_of_batch(session, monkeypatch):
@@ -164,7 +199,7 @@ def test_append_operations_skips_external_id_conflict_without_losing_rest_of_bat
 
     existing_op = buy_op(external_id="ext-shared")
     existing_key = natural_key("tbank", account.external_id, existing_op)
-    assert _insert_one(session, account, "tbank", existing_op, existing_key) is True
+    assert _insert_one(session, account, "tbank", existing_op, existing_key, _InstrumentCache(session)) is True
 
     # Тот же external_id, что и existing_op, но другое содержание (другой executed_at) —
     # значит другой dedup_key. Дубль по uq_transaction_source_external, а не по dedup_key.
