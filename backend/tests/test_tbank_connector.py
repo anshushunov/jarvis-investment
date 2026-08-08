@@ -119,6 +119,63 @@ def test_fetch_operations_resolves_instrument_via_bulk_list_and_skips_unexecuted
 
 
 @respx.mock
+def test_fetch_operations_carries_instrument_kind_from_the_list_it_was_found_in():
+    """Вид инструмента известен только по тому, каким списочным методом получен
+    ответ (в самих объектах Bond/Etf поля с видом нет) — и обязан доехать до
+    payload операции: домену больше неоткуда его узнать."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000010",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T10:30:00Z",
+                    "figi": "BBG00T22WKV5",
+                    "quantity": "5",
+                    "price": {"currency": "rub", "units": "1000", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-5000", "nano": 0},
+                },
+                {
+                    "id": "500000011",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T11:30:00Z",
+                    "figi": "BBG333333333",
+                    "quantity": "100",
+                    "price": {"currency": "rub", "units": "7", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-700", "nano": 0},
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Bonds=[{"figi": "BBG00T22WKV5", "ticker": "SU26238RMFS4",
+                "isin": "RU000A1038V6", "name": "ОФЗ 26238"}],
+        Etfs=[{"figi": "BBG333333333", "ticker": "TMOS",
+               "isin": "RU000A101X76", "name": "Тинькофф iMOEX"}],
+    )
+
+    operations = {
+        op.external_id: op
+        for op in TBankConnector(TOKEN).fetch_operations(
+            "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+        )
+    }
+
+    bond = operations["500000010"]
+    assert bond.isin == "RU000A1038V6"
+    assert bond.payload["instrument_kind"] == "bond"
+    assert bond.payload["instrument_name"] == "ОФЗ 26238"
+
+    etf = operations["500000011"]
+    assert etf.payload["instrument_kind"] == "etf"
+    assert etf.payload["instrument_name"] == "Тинькофф iMOEX"
+
+
+@respx.mock
 def test_fetch_operations_falls_back_to_get_instrument_by_when_not_in_bulk_lists():
     respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
         return_value=httpx.Response(200, json={
@@ -143,7 +200,8 @@ def test_fetch_operations_falls_back_to_get_instrument_by_when_not_in_bulk_lists
     _mock_instrument_lists()
     respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
         return_value=httpx.Response(200, json={
-            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC"}
+            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC",
+                           "instrumentType": "bond", "name": "Экзотика"}
         })
     )
 
@@ -154,6 +212,70 @@ def test_fetch_operations_falls_back_to_get_instrument_by_when_not_in_bulk_lists
     assert len(operations) == 1
     assert operations[0].isin == "RU000AEXOTIC"
     assert operations[0].ticker == "EXOTIC"
+    # У поштучного запасного пути вид приходит своим полем instrumentType —
+    # он тоже обязан доехать, а не потеряться.
+    assert operations[0].payload["instrument_kind"] == "bond"
+    assert operations[0].payload["instrument_name"] == "Экзотика"
+
+
+@respx.mock
+def test_unknown_instrument_type_becomes_other_not_share():
+    """Структурный продукт/опцион/индекс — вид, которому у нас нет
+    соответствия. Записать его акцией значит искать котировку не на том рынке и
+    показать не в том классе активов; честный ответ — «вид неизвестен»."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+        return_value=httpx.Response(200, json={
+            "hasNext": False,
+            "nextCursor": "",
+            "items": [
+                {
+                    "id": "500000012",
+                    "type": "OPERATION_TYPE_BUY",
+                    "state": "OPERATION_STATE_EXECUTED",
+                    "date": "2026-03-12T10:30:00Z",
+                    "figi": "TCS00A0SPROD",
+                    "quantity": "1",
+                    "price": {"currency": "rub", "units": "100", "nano": 0},
+                    "payment": {"currency": "rub", "units": "-100", "nano": 0},
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists()
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "TCS00A0SPROD", "ticker": "SP1", "isin": "RU000ASPROD1",
+                           "instrumentType": "sp", "name": "Структурная нота"}
+        })
+    )
+
+    operations = TBankConnector(TOKEN).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert operations[0].payload["instrument_kind"] == "other"
+
+
+@respx.mock
+def test_fetch_instrument_reference_is_keyed_by_isin_and_keeps_kind():
+    """Справочник для разового дозаполнения (app/instruments/backfill.py):
+    инструменты, купленные годы назад, в окно обычной синхронизации не попадают
+    никогда — привести их в порядок можно только по справочнику целиком."""
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER",
+                 "isin": "RU0009029540", "name": "Сбер Банк"}],
+        Bonds=[{"figi": "BBG00T22WKV5", "ticker": "SU26238RMFS4",
+                "isin": "RU000A1038V6", "name": "ОФЗ 26238"}],
+        # Без ISIN — в справочник по ISIN попасть не может.
+        Futures=[{"figi": "FUTSI0324000", "ticker": "SiH4", "name": "Si-3.24"}],
+    )
+
+    reference = TBankConnector(TOKEN).fetch_instrument_reference()
+
+    assert set(reference) == {"RU0009029540", "RU000A1038V6"}
+    assert reference["RU000A1038V6"].kind == "bond"
+    assert reference["RU000A1038V6"].name == "ОФЗ 26238"
+    assert reference["RU0009029540"].kind == "share"
 
 
 @respx.mock

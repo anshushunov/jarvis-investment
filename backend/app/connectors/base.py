@@ -20,6 +20,25 @@ class BrokerPosition:
     quantity: Decimal
 
 
+@dataclass(frozen=True)
+class BrokerInstrument:
+    """Сведения об инструменте из справочника брокера — ровно тот набор, что
+    домен умеет записать в таблицу instrument.
+
+    `kind` — уже доменный вид (share/bond/etf/currency/futures/other), а не
+    сырое имя из API брокера: перевод делает коннектор, потому что только он
+    знает, из какого именно вызова справочника пришёл ответ. Значения видов
+    общие для всего проекта — их понимают и ENGINE_MARKET_BY_KIND
+    (app/marketdata/service.py, выбор движка и рынка MOEX), и CLASS_BY_KIND
+    (app/analytics/service.py, разбивка по классам активов).
+    """
+
+    isin: str | None
+    ticker: str | None
+    kind: str
+    name: str | None = None
+
+
 class BrokerConnector(Protocol):
     source: str
 

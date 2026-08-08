@@ -8,16 +8,21 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.instruments import kinds
 from app.marketdata.moex import MoexClient
 from app.models import Instrument, Price
 
 logger = logging.getLogger(__name__)
 
+# Ключи — доменные виды инструментов (app/instruments/kinds.py); их же кладёт
+# коннектор при разрешении инструмента. Вид, которого здесь нет (kinds.OTHER,
+# kinds.METAL, kinds.FUTURES), уходит на рынок акций по умолчанию — котировки
+# там для него просто не найдётся, и это честнее, чем искать заведомо не там.
 ENGINE_MARKET_BY_KIND = {
-    "share": ("stock", "shares"),
-    "etf": ("stock", "shares"),
-    "bond": ("stock", "bonds"),
-    "currency": ("currency", "selt"),
+    kinds.SHARE: ("stock", "shares"),
+    kinds.ETF: ("stock", "shares"),
+    kinds.BOND: ("stock", "bonds"),
+    kinds.CURRENCY: ("currency", "selt"),
 }
 
 

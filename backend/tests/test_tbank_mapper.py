@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from app.connectors.base import BrokerInstrument
 from app.connectors.tbank.mapper import map_operation
 from app.models import OperationType
 
@@ -26,8 +27,12 @@ def op(**overrides) -> dict:
     return defaults
 
 
+SBER = BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share", name="Сбер Банк")
+OFZ = BrokerInstrument(isin="RU000A101234", ticker="OFZ", kind="bond", name="ОФЗ 26238")
+
+
 def test_buy_maps_to_buy_with_positive_quantity():
-    result = map_operation(op(), isin="RU0009029540", ticker="SBER")
+    result = map_operation(op(), SBER)
     assert result.op_type == OperationType.BUY
     assert result.quantity == Decimal("35")
     assert result.price == Decimal("142.5000")
@@ -39,7 +44,7 @@ def test_buy_maps_to_buy_with_positive_quantity():
 def test_sell_maps_to_sell():
     result = map_operation(
         op(type="OPERATION_TYPE_SELL", payment={"currency": "rub", "units": "4987", "nano": 500000000}),
-        isin="RU0009029540", ticker="SBER",
+        SBER,
     )
     assert result.op_type == OperationType.SELL
     assert result.amount == Decimal("4987.5000")
@@ -53,7 +58,7 @@ def test_dividend_has_no_quantity():
             price={"currency": "rub", "units": "0", "nano": 0},
             payment={"currency": "rub", "units": "340", "nano": 500000000},
         ),
-        isin="RU0009029540", ticker="SBER",
+        SBER,
     )
     assert result.op_type == OperationType.DIVIDEND
     assert result.quantity == Decimal("0")
@@ -63,7 +68,7 @@ def test_dividend_has_no_quantity():
 def test_coupon_maps_to_coupon():
     result = map_operation(
         op(type="OPERATION_TYPE_COUPON", payment={"currency": "rub", "units": "41", "nano": 320000000}),
-        isin="RU000A101234", ticker="OFZ",
+        OFZ,
     )
     assert result.op_type == OperationType.COUPON
 
@@ -71,7 +76,7 @@ def test_coupon_maps_to_coupon():
 def test_broker_fee_maps_to_fee():
     result = map_operation(
         op(type="OPERATION_TYPE_BROKER_FEE", payment={"currency": "rub", "units": "-1", "nano": -496300000}),
-        isin=None, ticker=None,
+        None,
     )
     assert result.op_type == OperationType.FEE
     assert result.isin is None
@@ -84,16 +89,32 @@ def test_input_maps_to_deposit():
             payment={"currency": "rub", "units": "100000", "nano": 0},
             figi="",
         ),
-        isin=None, ticker=None,
+        None,
     )
     assert result.op_type == OperationType.DEPOSIT
 
 
 def test_unknown_type_maps_to_other_and_keeps_payload():
-    result = map_operation(op(type="OPERATION_TYPE_SOMETHING_NEW"), isin=None, ticker=None)
+    result = map_operation(op(type="OPERATION_TYPE_SOMETHING_NEW"), None)
     assert result.op_type == OperationType.OTHER
     assert result.payload["operation_type"] == "OPERATION_TYPE_SOMETHING_NEW"
 
 
 def test_unexecuted_operation_is_skipped():
-    assert map_operation(op(state="OPERATION_STATE_CANCELED"), isin=None, ticker=None) is None
+    assert map_operation(op(state="OPERATION_STATE_CANCELED"), None) is None
+
+
+def test_payload_carries_instrument_kind_and_name():
+    """Вид и название — единственный канал от коннектора к доменному резолверу
+    инструментов: он видит на входе только RawOperation."""
+    result = map_operation(op(), OFZ)
+    assert result.payload["instrument_kind"] == "bond"
+    assert result.payload["instrument_name"] == "ОФЗ 26238"
+
+
+def test_payload_has_no_instrument_keys_for_cash_operation():
+    """Денежная операция без инструмента не должна класть в payload пустые
+    ключи — резолвер по ней всё равно ничего не создаст (isin=None)."""
+    result = map_operation(op(type="OPERATION_TYPE_INPUT", figi=""), None)
+    assert "instrument_kind" not in result.payload
+    assert "instrument_name" not in result.payload

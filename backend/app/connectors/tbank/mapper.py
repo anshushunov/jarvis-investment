@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
+from app.connectors.base import BrokerInstrument
 from app.connectors.tbank.quotation import to_money
 from app.ledger.schemas import RawOperation
 from app.models import OperationType
@@ -30,10 +31,15 @@ TYPE_MAP = {
 EXECUTED = "OPERATION_STATE_EXECUTED"
 
 
-def map_operation(operation: dict, isin: str | None, ticker: str | None) -> RawOperation | None:
+def map_operation(operation: dict, instrument: BrokerInstrument | None) -> RawOperation | None:
     """Переводит операцию OperationsService/GetOperationsByCursor (REST-шлюз
     T-Invest API, JSON-словарь) в RawOperation. Неисполненные операции
-    (state != EXECUTED) пропускаются — они не должны попадать в журнал."""
+    (state != EXECUTED) пропускаются — они не должны попадать в журнал.
+
+    `instrument` — то, что коннектор разрешил по FIGI операции (None для
+    денежных операций без инструмента). Кроме ISIN и тикера оттуда берутся вид
+    и название: домену больше неоткуда их узнать, а без вида инструмент
+    записывается акцией и ищется не на том рынке MOEX."""
     if operation.get("state") != EXECUTED:
         return None
 
@@ -47,8 +53,8 @@ def map_operation(operation: dict, isin: str | None, ticker: str | None) -> RawO
         external_id=str(operation["id"]),
         op_type=op_type,
         executed_at=datetime.fromisoformat(operation["date"]),
-        isin=isin,
-        ticker=ticker,
+        isin=instrument.isin if instrument else None,
+        ticker=instrument.ticker if instrument else None,
         quantity=quantity(Decimal(operation.get("quantity") or "0")),
         price=to_money(operation.get("price")),
         amount=to_money(payment),
@@ -57,5 +63,20 @@ def map_operation(operation: dict, isin: str | None, ticker: str | None) -> RawO
         # комиссию отдельной операцией OPERATION_TYPE_BROKER_FEE, и учитывать
         # её дважды нельзя.
         fee=money("0"),
-        payload={"operation_type": raw_type, "figi": operation.get("figi") or None},
+        payload={
+            "operation_type": raw_type,
+            "figi": operation.get("figi") or None,
+            # Справочные сведения об инструменте едут в payload — это
+            # единственный канал от коннектора к доменному резолверу
+            # инструментов (app/instruments/service.py), который на входе видит
+            # только RawOperation. Ключей нет вовсе, если инструмент не
+            # разрешён: резолвер тогда и не создаёт запись (isin=None).
+            **_instrument_payload(instrument),
+        },
     )
+
+
+def _instrument_payload(instrument: BrokerInstrument | None) -> dict:
+    if instrument is None:
+        return {}
+    return {"instrument_kind": instrument.kind, "instrument_name": instrument.name}

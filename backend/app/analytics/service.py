@@ -5,16 +5,18 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.instruments import kinds
 from app.marketdata.service import latest_prices
 from app.models import Account, Instrument, Position, Price
 from app.money import money
 
+# Ключи — доменные виды инструментов (app/instruments/kinds.py).
 CLASS_BY_KIND = {
-    "share": "equity",
-    "bond": "bonds",
-    "currency": "cash",
-    "metal": "gold",
-    "futures": "derivatives",
+    kinds.SHARE: "equity",
+    kinds.BOND: "bonds",
+    kinds.CURRENCY: "cash",
+    kinds.METAL: "gold",
+    kinds.FUTURES: "derivatives",
 }
 
 
@@ -42,7 +44,7 @@ class Overview:
 
 
 def asset_class_of(instrument: Instrument) -> str:
-    if instrument.kind == "etf":
+    if instrument.kind == kinds.ETF:
         return instrument.asset_class or "mixed"
     return CLASS_BY_KIND.get(instrument.kind, "other")
 
