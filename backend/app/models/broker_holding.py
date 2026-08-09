@@ -33,7 +33,13 @@ class BrokerHolding(Base):
     isin: Mapped[str] = mapped_column(String(12), index=True)
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     # Часть quantity, заблокированная брокером или биржей. Не добавка к нему.
-    blocked: Mapped[Decimal] = mapped_column(Numeric(20, 8), default=0)
-    as_of: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+    # Без дефолта: store_holdings — единственный писатель этой таблицы и
+    # всегда передаёт blocked явно (у BrokerPosition.blocked своё дефолтное
+    # значение Decimal("0")), голый питоновский 0 здесь никогда не сработал бы
+    # и только маскировал бы пропущенный аргумент в новом коде.
+    blocked: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    # Только время создания строки: снимок не обновляется на месте, он
+    # целиком заменяется в store_holdings через delete + insert, поэтому
+    # UPDATE по этой таблице не издаётся никогда и onupdate был бы мёртвым
+    # кодом.
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -65,6 +65,30 @@ def test_snapshot_replaces_previous_one(session):
     assert session.query(BrokerHolding).count() == 0
 
 
+def test_two_positions_with_same_isin_are_merged_not_duplicated(session):
+    """Разные FIGI брокера иногда разрешаются в один ISIN — та же бумага на
+    другой площадке или в другом режиме торгов. Живой случай: прогон падал на
+    UniqueViolation по (account_id, isin), потому что store_holdings пытался
+    вставить обе позиции отдельными строками. Проверка идёт через
+    store_holdings с настоящей сессией — падало именно на вставке, а не на
+    промежуточном списке позиций."""
+    account = add_account(session)
+    instrument = add_instrument(session, "RU0009029540")
+
+    written = store_holdings(session, account, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10"),
+                       blocked=Decimal("2")),
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("5"),
+                       blocked=Decimal("0")),
+    ])
+
+    assert written == 1
+    holding = session.query(BrokerHolding).one()
+    assert (holding.quantity, holding.blocked, holding.instrument_id) == (
+        Decimal("15.00000000"), Decimal("2.00000000"), instrument.id
+    )
+
+
 def test_blocked_by_instrument_skips_unlinked_and_zero(session):
     account = add_account(session)
     linked = add_instrument(session, "HK0000123577")
