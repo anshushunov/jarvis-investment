@@ -1,5 +1,6 @@
 from app.models.account import Account
 from app.models.base import Base
+from app.models.fx_rate import FxRate
 from app.models.instrument import Instrument
 from app.models.position import Position
 from app.models.price import Price
@@ -12,6 +13,7 @@ __all__ = [
     "Account",
     "Base",
     "DailySnapshot",
+    "FxRate",
     "Instrument",
     "OperationType",
     "Position",
