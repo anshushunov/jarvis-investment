@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerInstrument
-from app.instruments.service import apply_reference
+from app.instruments.service import apply_reference, secid_from_ticker
 from app.models import Instrument
 
 logger = logging.getLogger(__name__)
@@ -39,14 +39,31 @@ def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrum
     ).scalars().all()
 
     for instrument in instruments:
+        touched = _repair_secid(instrument)
+
         found = reference.get(instrument.isin)
-        if found is None:
-            continue
-        if apply_reference(instrument, found.kind, found.name, found.currency):
+        if found is not None:
+            touched |= apply_reference(instrument, found.kind, found.name, found.currency)
+
+        if touched:
             changed += 1
 
     session.flush()
     return changed
+
+
+def _repair_secid(instrument: Instrument) -> bool:
+    """Приводит биржевой идентификатор к тому виду, в котором его знает биржа.
+
+    Отдельно от справочника брокера и до него: инструменты, записанные до того,
+    как суффикс «@» начали отбрасывать, стоят с идентификатором, которого на
+    MOEX нет, и котировка им не находится. Тикера для починки достаточно —
+    справочник тут ничего не добавляет."""
+    expected = secid_from_ticker(instrument.ticker)
+    if expected is None or instrument.secid == expected:
+        return False
+    instrument.secid = expected
+    return True
 
 
 def main() -> None:

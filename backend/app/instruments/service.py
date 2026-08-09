@@ -89,6 +89,22 @@ def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | Non
     )
 
 
+def secid_from_ticker(ticker: str | None) -> str | None:
+    """Биржевой идентификатор инструмента из тикера брокера.
+
+    Т-Банк помечает часть фондов тикером с «@» на конце (TMOS@, TLCB@), а на
+    MOEX такого идентификатора нет — котировка не находится вовсе, и позиция
+    остаётся неоценённой. Проверено на живых данных: TMOS стоит 5.69 ₽ при
+    средней цене позиции 6.07, TLCB — 10.83 при 9.92, то есть речь об одной и
+    той же бумаге (ISIN совпадает).
+
+    Сам тикер не трогаем: позиция должна называться так же, как в приложении
+    брокера. Чинится только идентификатор, с которым мы идём на биржу."""
+    if not ticker:
+        return None
+    return ticker.rstrip("@") or None
+
+
 def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
     """Вставляет новый инструмент по ISIN операции `op`.
 
@@ -103,7 +119,7 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
     instrument = Instrument(
         isin=op.isin,
         ticker=op.ticker,
-        secid=op.ticker,
+        secid=secid_from_ticker(op.ticker),
         # Вида нет только если справочник брокера сам его не дал — записываем
         # честное "неизвестно", а не подразумеваемую акцию.
         kind=kind or kinds.OTHER,

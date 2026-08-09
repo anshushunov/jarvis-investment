@@ -10,9 +10,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.instruments import kinds
-from app.marketdata.moex import MoexClient
+from app.marketdata.moex import MoexClient, MoexQuote
 from app.models import Instrument, Price
-from app.money import BASE_CURRENCY
+from app.money import BASE_CURRENCY, money
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,33 @@ def _priced_in_base_currency(column) -> object:
     return func.upper(func.coalesce(column, BASE_CURRENCY)) == BASE_CURRENCY
 
 
+# Код рубля в номиналах MOEX. Облигация с номиналом в другой валюте (замещающая,
+# юаневая) котируется в процентах от этого номинала, а расчёты идут в рублях:
+# пересчитать её без курсов нельзя, а рублёвое число под видом оценки хуже
+# честного «цены нет».
+MOEX_RUBLE_FACE_UNIT = "SUR"
+
+
+def _price_in_money(instrument: Instrument, quote: MoexQuote) -> Decimal | None:
+    """Цена одной бумаги в валюте инструмента.
+
+    Акции и фонды MOEX котирует прямо в деньгах, облигации — в процентах от
+    номинала. Разница не косметическая: без пересчёта облигация с номиналом
+    1000 ₽ оценивалась в сотню рублей, и облигационная часть портфеля на
+    миллионы показывалась десятками тысяч.
+
+    Накопленный купонный доход в цену не входит: он платится сверх неё и по
+    смыслу ближе к начислению, чем к стоимости бумаги. Учитывать его — отдельная
+    задача вместе с доходностью к погашению."""
+    if quote.price is None:
+        return None
+    if instrument.kind != kinds.BOND:
+        return quote.price
+    if not quote.face_value or (quote.face_unit or MOEX_RUBLE_FACE_UNIT) != MOEX_RUBLE_FACE_UNIT:
+        return None
+    return money(quote.price / Decimal("100") * quote.face_value)
+
+
 def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> int:
     instruments = session.execute(
         select(Instrument).where(
@@ -53,7 +80,7 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
     for instrument in instruments:
         engine, market = ENGINE_MARKET_BY_KIND.get(instrument.kind, ("stock", "shares"))
         try:
-            price = client.last_price(instrument.secid, market=market, engine=engine)
+            quote = client.quote(instrument.secid, market=market, engine=engine)
         except (httpx.HTTPError, KeyError, json.JSONDecodeError):
             logger.warning(
                 "Не удалось получить цену для инструмента %s (secid=%s)",
@@ -61,6 +88,7 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
             )
             continue
 
+        price = _price_in_money(instrument, quote)
         if price is None:
             continue
 

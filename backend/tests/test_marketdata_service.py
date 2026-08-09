@@ -4,20 +4,34 @@ from decimal import Decimal
 
 import httpx
 
+from app.marketdata.moex import MoexQuote
 from app.marketdata.service import LatestPrice, latest_prices, refresh_last_prices
 from app.models import Instrument, Price
 
 
 class FakeMoex:
-    def __init__(self, prices: dict[str, Decimal | None]) -> None:
+    def __init__(
+        self,
+        prices: dict[str, Decimal | None],
+        face_values: dict[str, tuple[Decimal, str]] | None = None,
+    ) -> None:
         self.prices = prices
+        self.face_values = face_values or {}
         self.calls: list[str] = []
         self.calls_with_market: list[tuple[str, str, str]] = []
 
-    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
+    def quote(self, secid: str, market: str = "shares", engine: str = "stock") -> MoexQuote:
         self.calls.append(secid)
         self.calls_with_market.append((secid, engine, market))
-        return self.prices.get(secid)
+        face_value, face_unit = self.face_values.get(secid, (None, None))
+        return MoexQuote(price=self.prices.get(secid), face_value=face_value, face_unit=face_unit)
+
+
+def add_bond(session, secid: str) -> Instrument:
+    instrument = Instrument(isin=secid, ticker=secid, secid=secid, kind="bond", currency="RUB")
+    session.add(instrument)
+    session.flush()
+    return instrument
 
 
 def add_instrument(session, secid: str) -> Instrument:
@@ -37,6 +51,41 @@ def test_writes_price_for_each_instrument(session):
 
     assert updated == 2
     assert sorted(client.calls) == ["GAZP", "SBER"]
+
+
+def test_bond_price_is_converted_from_percent_of_face_value(session):
+    """MOEX котирует облигации в процентах от номинала, а позиция считается в
+    деньгах. Без пересчёта облигация с номиналом 1000 ₽ оценивалась в сотню
+    рублей — портфель облигаций на миллионы показывался десятками тысяч."""
+    add_bond(session, "RU000A10EJQ7")
+    client = FakeMoex(
+        {"RU000A10EJQ7": Decimal("100.19")},
+        face_values={"RU000A10EJQ7": (Decimal("1000"), "SUR")},
+    )
+
+    assert refresh_last_prices(session, client, date(2026, 3, 12)) == 1
+    assert session.query(Price).one().close == Decimal("1001.9000")
+
+
+def test_bond_with_foreign_face_value_is_left_unvalued(session):
+    """Замещающая облигация: номинал в долларах, котировка в процентах, расчёты
+    в рублях. Пересчитать её без курсов нельзя, а рублёвое число под видом
+    оценки хуже честного «цены нет»."""
+    add_bond(session, "RU000A107VV1")
+    client = FakeMoex(
+        {"RU000A107VV1": Decimal("99")},
+        face_values={"RU000A107VV1": (Decimal("1000"), "USD")},
+    )
+
+    assert refresh_last_prices(session, client, date(2026, 3, 12)) == 0
+    assert session.query(Price).count() == 0
+
+
+def test_bond_without_face_value_is_left_unvalued(session):
+    add_bond(session, "RU000NOFACE")
+    client = FakeMoex({"RU000NOFACE": Decimal("99")})
+
+    assert refresh_last_prices(session, client, date(2026, 3, 12)) == 0
 
 
 def test_missing_price_is_skipped_without_error(session):
@@ -91,11 +140,11 @@ class FlakyMoex:
         self.broken = broken
         self.calls: list[str] = []
 
-    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
+    def quote(self, secid: str, market: str = "shares", engine: str = "stock") -> MoexQuote:
         self.calls.append(secid)
         if secid in self.broken:
             raise httpx.HTTPStatusError("boom", request=None, response=None)
-        return self.prices.get(secid)
+        return MoexQuote(price=self.prices.get(secid))
 
 
 def test_one_instrument_failure_does_not_abort_the_whole_run(session, caplog):
@@ -177,10 +226,10 @@ class BrokenBodyMoex:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def last_price(self, secid: str, market: str = "shares", engine: str = "stock") -> Decimal | None:
+    def quote(self, secid: str, market: str = "shares", engine: str = "stock") -> MoexQuote:
         self.calls.append(secid)
         json.loads("not-json")
-        return None
+        return MoexQuote(price=None)
 
 
 def test_broken_iss_response_body_is_skipped_without_error(session, caplog):

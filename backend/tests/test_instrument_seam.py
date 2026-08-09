@@ -16,7 +16,7 @@ from app.connectors.base import BrokerInstrument
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
 from app.instruments.backfill import backfill_instruments
-from app.instruments.service import resolve_instrument
+from app.instruments.service import resolve_instrument, secid_from_ticker
 from app.ledger.schemas import RawOperation
 from app.marketdata.service import ENGINE_MARKET_BY_KIND
 from app.models import Instrument, OperationType
@@ -162,6 +162,33 @@ def test_payment_currency_is_used_only_when_reference_gives_nothing(session):
     assert instrument.kind == "other"
 
 
+def test_secid_drops_broker_suffix_from_ticker():
+    """Т-Банк помечает часть фондов тикером с «@» (TMOS@, TLCB@), а на MOEX
+    такого идентификатора нет — котировка не находится вовсе. Проверено на
+    живых данных: TMOS стоит 5.69 ₽ при средней цене позиции 6.07, TLCB — 10.83
+    при 9.92. Сам тикер остаётся как у брокера, чтобы позиция называлась так же,
+    как в его приложении; чинится только идентификатор для биржи."""
+    assert secid_from_ticker("TMOS@") == "TMOS"
+    assert secid_from_ticker("SBER") == "SBER"
+    assert secid_from_ticker(None) is None
+    assert secid_from_ticker("@") is None
+
+
+def test_new_instrument_gets_exchange_secid_without_suffix(session):
+    op = RawOperation(
+        external_id="op-1", op_type=OperationType.BUY,
+        executed_at=datetime(2026, 3, 12, tzinfo=timezone.utc),
+        isin="RU000A101X76", ticker="TMOS@", quantity=Decimal("1"),
+        price=Decimal("6"), amount=Decimal("-6"), currency="RUB",
+        fee=Decimal("0"), payload={},
+    )
+
+    instrument = resolve_instrument(session, op)
+
+    assert instrument.ticker == "TMOS@"
+    assert instrument.secid == "TMOS"
+
+
 def test_backfill_keeps_currency_when_reference_has_none(session):
     """Справочник может не знать инструмент или не отдать валюту — уже
     записанное значение при этом терять нельзя."""
@@ -211,6 +238,22 @@ def test_backfill_fixes_instruments_never_seen_in_the_sync_window(session):
     assert session.query(Instrument).filter_by(isin=BOND_ISIN).one().kind == "bond"
     # Чего нет в справочнике брокера — не трогаем вовсе.
     assert session.query(Instrument).filter_by(isin="RU000UNKNOWN").one().kind == "share"
+
+
+def test_backfill_repairs_exchange_secid_even_without_reference_entry(session):
+    """Инструменты, записанные до того, как «@» начали отбрасывать, стоят с
+    биржевым идентификатором, которого на MOEX нет. Чинить их обязано то же
+    разовое дозаполнение — и без справочника брокера: тикер уже записан, этого
+    достаточно."""
+    session.add(Instrument(isin=ETF_ISIN, ticker="TMOS@", secid="TMOS@",
+                           kind="etf", currency="RUB"))
+    session.flush()
+
+    assert backfill_instruments(session, {}) == 1
+
+    instrument = session.query(Instrument).filter_by(isin=ETF_ISIN).one()
+    assert instrument.secid == "TMOS"
+    assert instrument.ticker == "TMOS@"
 
 
 def test_backfill_is_idempotent(session):
