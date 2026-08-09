@@ -62,6 +62,14 @@ def latest_rates(session: Session, on_date: date) -> dict[str, Decimal]:
     return result
 
 
+def latest_rate_date(session: Session, on_date: date) -> date | None:
+    """Дата самых свежих курсов не позже указанной. Нужна интерфейсу: у
+    котировок и курсов разная частота обновления, и «данные на» у них разное."""
+    return session.execute(
+        select(func.max(FxRate.on_date)).where(FxRate.on_date <= on_date)
+    ).scalar_one_or_none()
+
+
 MOEX_SOURCE = "moex"
 
 # Металлы в денежных остатках Т-Банка приходят валютными кодами (`xau` — 10 это

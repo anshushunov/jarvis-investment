@@ -1,7 +1,13 @@
 from datetime import date
 from decimal import Decimal
 
-from app.marketdata.fx import latest_rates, refresh_fx_rates, refresh_metal_rates, to_base
+from app.marketdata.fx import (
+    latest_rate_date,
+    latest_rates,
+    refresh_fx_rates,
+    refresh_metal_rates,
+    to_base,
+)
 from app.marketdata.moex import MoexQuote
 from app.models import FxRate
 
@@ -59,6 +65,24 @@ def test_rouble_needs_no_stored_rate(session):
     """Единица для рубля подставляется всегда: без неё рублёвые суммы
     оставались бы непересчитанными ровно в тот день, когда ЦБ недоступен."""
     assert latest_rates(session, date(2026, 8, 10))["RUB"] == Decimal("1")
+
+
+def test_latest_rate_date_is_none_when_no_rates(session):
+    assert latest_rate_date(session, date(2026, 8, 10)) is None
+
+
+def test_latest_rate_date_is_the_freshest_on_or_before(session):
+    """Дата курсов — своя, отдельная от даты котировок: ЦБ публикует раз в
+    сутки, а по выходным не публикует вовсе, и «данные на» у курсов сдвинуто
+    назад относительно цен."""
+    session.add_all([
+        FxRate(currency="USD", on_date=date(2026, 8, 6), rate=Decimal("80"), source="cbr"),
+        FxRate(currency="HKD", on_date=date(2026, 8, 8), rate=Decimal("10"), source="cbr"),
+        FxRate(currency="USD", on_date=date(2026, 8, 12), rate=Decimal("85"), source="cbr"),
+    ])
+    session.flush()
+
+    assert latest_rate_date(session, date(2026, 8, 10)) == date(2026, 8, 8)
 
 
 def test_to_base_returns_none_for_unknown_currency(session):
