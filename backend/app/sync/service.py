@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerConnector
 from app.ledger.service import append_operations
+from app.marketdata.broker_prices import store_broker_prices
 from app.models import Account, SyncRun
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_account
+from app.timeutils import moscow_today
 
 # Глубина истории для самой первой синхронизации брокера — когда успешных
 # прогонов ещё не было и опереться не на что.
@@ -126,6 +128,11 @@ def sync_broker(
             run.skipped = result.skipped
 
             rebuild_positions(session, account)
+
+            # Цены брокера — запасной источник оценки для того, чего нет на
+            # MOEX. Пишутся под московской календарной датой, той же, под
+            # которой пишутся биржевые котировки и снимок стоимости.
+            store_broker_prices(session, connector.fetch_prices(account.external_id), moscow_today())
 
             broker_positions = connector.fetch_positions(account.external_id)
             findings = reconcile_account(session, account, broker_positions)

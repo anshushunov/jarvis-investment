@@ -26,6 +26,21 @@ class BrokerPosition:
 
 
 @dataclass(frozen=True)
+class BrokerPrice:
+    """Цена одной бумаги по данным брокера, в валюте бумаги.
+
+    Запасной источник оценки: у брокера есть цена на всё, что у него лежит,
+    включая бумаги, которых нет на MOEX. Независимой такая оценка не является —
+    брокер тот же, с чьим снимком мы сверяемся, — поэтому источник цены
+    хранится вместе с ней и виден на экране.
+    """
+
+    isin: str
+    price: Decimal
+    currency: str
+
+
+@dataclass(frozen=True)
 class BrokerInstrument:
     """Сведения об инструменте из справочника брокера — ровно тот набор, что
     домен умеет записать в таблицу instrument.
@@ -57,3 +72,5 @@ class BrokerConnector(Protocol):
     def fetch_operations(self, account_external_id: str, since: datetime) -> list[RawOperation]: ...
 
     def fetch_positions(self, account_external_id: str) -> list[BrokerPosition]: ...
+
+    def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]: ...

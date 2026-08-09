@@ -189,6 +189,9 @@ class RecordingConnector:
     def fetch_positions(self, account_external_id):
         return []
 
+    def fetch_prices(self, account_external_id):
+        return []
+
 
 class SameNameAccountsConnector:
     """Два счёта с одинаковым именем — коннектор Т-Банка подставляет такую
@@ -209,6 +212,9 @@ class SameNameAccountsConnector:
     def fetch_positions(self, account_external_id):
         return []
 
+    def fetch_prices(self, account_external_id):
+        return []
+
 
 class AccountCreationFailsConnector:
     """Счёт с kind длиннее колонки account.kind (String(16)) — Postgres
@@ -225,6 +231,9 @@ class AccountCreationFailsConnector:
         return []
 
     def fetch_positions(self, account_external_id):
+        return []
+
+    def fetch_prices(self, account_external_id):
         return []
 
 

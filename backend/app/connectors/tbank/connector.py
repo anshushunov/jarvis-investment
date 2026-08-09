@@ -5,10 +5,10 @@ from typing import Callable
 
 import httpx
 
-from app.connectors.base import BrokerAccount, BrokerInstrument, BrokerPosition
+from app.connectors.base import BrokerAccount, BrokerInstrument, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS, INSTRUMENT_STATUS_BASE, TBankClient
 from app.connectors.tbank.mapper import map_operation
-from app.connectors.tbank.quotation import to_quantity
+from app.connectors.tbank.quotation import to_money, to_quantity
 from app.instruments import kinds
 from app.ledger.schemas import RawOperation
 
@@ -160,6 +160,34 @@ class TBankConnector:
             ticker = item.get("ticker") or instrument.ticker
             positions.append(BrokerPosition(isin=instrument.isin, ticker=ticker, quantity=qty))
         return positions
+
+    def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]:
+        """Текущие цены бумаг счёта по данным брокера.
+
+        Берётся из того же GetPortfolio, что и позиции. Цена приходит в валюте
+        бумаги (`hkd`, `usd`, `cny`, `rub`), у облигаций — деньгами за штуку, а
+        не процентом от номинала, в отличие от MOEX.
+        """
+        raw_positions = self._client.get_portfolio(account_external_id)
+        figis = {item.get("figi") for item in raw_positions if item.get("figi")}
+        instruments = self._resolve_instruments(figis)
+
+        prices: list[BrokerPrice] = []
+        for item in raw_positions:
+            figi = item.get("figi")
+            instrument = instruments.get(figi) if figi else None
+            if instrument is None or not instrument.isin:
+                continue
+            raw_price = item.get("currentPrice") or {}
+            currency = (raw_price.get("currency") or "").upper()
+            price = to_money(raw_price)
+            # Пустая валюта — признак псевдо-позиции (рублёвый остаток закрытого
+            # счёта приходит именно так), нулевая цена — отсутствие оценки.
+            # Записать такое значит обнулить стоимость бумаги.
+            if not currency or price == 0:
+                continue
+            prices.append(BrokerPrice(isin=instrument.isin, price=price, currency=currency))
+        return prices
 
     def fetch_instrument_reference(self) -> dict[str, BrokerInstrument]:
         """Справочник инструментов брокера, ключ — ISIN. Нужен разовому

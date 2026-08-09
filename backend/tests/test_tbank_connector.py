@@ -4,7 +4,7 @@ from decimal import Decimal
 import httpx
 import respx
 
-from app.connectors.base import BrokerAccount, BrokerPosition
+from app.connectors.base import BrokerAccount, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
 from app.models import OperationType
@@ -537,6 +537,57 @@ def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
     assert positions == [
         BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
     ]
+
+
+@respx.mock
+def test_fetch_prices_returns_price_in_instrument_currency():
+    """GetPortfolio отдаёт currentPrice в валюте бумаги: гонконгская акция — в
+    гонконгских долларах, замещающая облигация — в юанях. Это единственный
+    источник цены для того, чего MOEX не котирует."""
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "BBG015PB0HH9",
+                    "instrumentType": "share",
+                    "quantity": {"units": "40", "nano": 0},
+                    "currentPrice": {"currency": "hkd", "units": "36", "nano": 900000000},
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG015PB0HH9", "ticker": "9866", "isin": "HK0000009866",
+                 "currency": "hkd", "name": "Nio"}],
+    )
+
+    prices = TBankConnector(TOKEN).fetch_prices("1000000001")
+
+    assert prices == [BrokerPrice(isin="HK0000009866", price=Decimal("36.9000"), currency="HKD")]
+
+
+@respx.mock
+def test_fetch_prices_skips_position_without_price():
+    """Нулевая цена без валюты — то, что брокер присылает по псевдо-позиции
+    закрытого счёта. Записать её значит обнулить оценку бумаги."""
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "RUB000UTSTOM",
+                    "instrumentType": "currency",
+                    "quantity": {"units": "0", "nano": 0},
+                    "currentPrice": {"currency": "", "units": "0", "nano": 0},
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists()
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={"instrument": {}})
+    )
+
+    assert TBankConnector(TOKEN).fetch_prices("1000000001") == []
 
 
 @respx.mock
