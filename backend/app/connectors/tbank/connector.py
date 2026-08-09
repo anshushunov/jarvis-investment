@@ -106,6 +106,23 @@ class TBankConnector:
         # не кэш в БД и не глобальный кэш на процесс — он живёт и умирает
         # вместе с этим объектом.
         self._bulk_instruments: dict[str, BrokerInstrument] | None = None
+        # Снимок GetPortfolio по счёту — построен лениво, при первом обращении
+        # (из fetch_positions либо fetch_prices, смотря что вызвали раньше), и
+        # переиспользуется вторым вызовом на этом же счёте в рамках прогона.
+        # Без этого кэша оркестрация (app/sync/service.py, sync_broker) на
+        # каждый счёт делает GetPortfolio дважды — тот самый класс проблем,
+        # что уже описан выше для справочника инструментов: ограничение
+        # частоты запросов T-Invest API, ответ 429. Ключ — внешний
+        # идентификатор счёта: счетов в прогоне несколько, и перепутать их
+        # снимки означает подставить одному счёту позиции и цены другого.
+        # Как и _bulk_instruments, это не кэш в БД и не кэш на процесс — он
+        # живёт минуты одного прогона и умирает вместе с этим объектом
+        # коннектора, который оркестрация создаёт заново на каждый прогон.
+        # Побочная выгода не только в экономии запросов: позиции и цены при
+        # этом читаются из одного и того же снимка брокера, а не из двух
+        # разных, между которыми цена могла успеть измениться, — сверка
+        # количества и оценка стоимости теперь согласованы.
+        self._portfolio_cache: dict[str, list[dict]] = {}
 
     def fetch_accounts(self) -> list[BrokerAccount]:
         return [
@@ -138,8 +155,15 @@ class TBankConnector:
                 mapped.append(result)
         return mapped
 
+    def _get_portfolio(self, account_external_id: str) -> list[dict]:
+        """Снимок GetPortfolio по счёту, закэшированный на срок жизни
+        коннектора — см. комментарий к self._portfolio_cache в __init__."""
+        if account_external_id not in self._portfolio_cache:
+            self._portfolio_cache[account_external_id] = self._client.get_portfolio(account_external_id)
+        return self._portfolio_cache[account_external_id]
+
     def fetch_positions(self, account_external_id: str) -> list[BrokerPosition]:
-        raw_positions = self._client.get_portfolio(account_external_id)
+        raw_positions = self._get_portfolio(account_external_id)
         figis = {item.get("figi") for item in raw_positions if item.get("figi")}
         instruments = self._resolve_instruments(figis)
 
@@ -164,11 +188,13 @@ class TBankConnector:
     def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]:
         """Текущие цены бумаг счёта по данным брокера.
 
-        Берётся из того же GetPortfolio, что и позиции. Цена приходит в валюте
+        Берётся из того же GetPortfolio, что и позиции — и из того же
+        закэшированного снимка (см. _get_portfolio), если fetch_positions по
+        этому счёту в рамках прогона уже вызывался. Цена приходит в валюте
         бумаги (`hkd`, `usd`, `cny`, `rub`), у облигаций — деньгами за штуку, а
         не процентом от номинала, в отличие от MOEX.
         """
-        raw_positions = self._client.get_portfolio(account_external_id)
+        raw_positions = self._get_portfolio(account_external_id)
         figis = {item.get("figi") for item in raw_positions if item.get("figi")}
         instruments = self._resolve_instruments(figis)
 

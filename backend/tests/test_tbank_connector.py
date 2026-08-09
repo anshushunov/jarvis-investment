@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -588,6 +589,89 @@ def test_fetch_prices_skips_position_without_price():
     )
 
     assert TBankConnector(TOKEN).fetch_prices("1000000001") == []
+
+
+@respx.mock
+def test_fetch_portfolio_snapshot_is_cached_and_reused_between_positions_and_prices():
+    """GetPortfolio — один и тот же снимок для fetch_positions и fetch_prices:
+    без кэша каждый счёт синхронизации делал бы этот вызов дважды (тот же
+    класс проблем, что уже решён для справочника инструментов кэшем
+    _bulk_instruments, см. __init__ и комментарий к _portfolio_cache). Побочная
+    выгода — позиции и цены читаются из одного снимка, а не из двух разных,
+    между которыми цена могла успеть измениться."""
+    portfolio_route = respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "BBG004730N88",
+                    "instrumentType": "share",
+                    "quantity": {"units": "10", "nano": 0},
+                    "ticker": "SBER",
+                    "currentPrice": {"currency": "rub", "units": "300", "nano": 0},
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
+    )
+
+    connector = TBankConnector(TOKEN)
+    positions = connector.fetch_positions("1000000001")
+    prices = connector.fetch_prices("1000000001")
+
+    assert positions == [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+    ]
+    assert prices == [BrokerPrice(isin="RU0009029540", price=Decimal("300.0000"), currency="RUB")]
+    assert portfolio_route.call_count == 1  # второй вызов взял закэшированный снимок, не сходил в сеть повторно
+
+
+@respx.mock
+def test_fetch_portfolio_snapshot_is_not_mixed_between_accounts():
+    """Кэш без ключа по счёту молча подставил бы одному счёту позиции другого —
+    это была бы уже не экономия запросов, а порча данных."""
+    def by_account(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["accountId"] == "1000000001":
+            return httpx.Response(200, json={
+                "positions": [
+                    {"figi": "BBG004730N88", "instrumentType": "share",
+                     "quantity": {"units": "10", "nano": 0}, "ticker": "SBER",
+                     "currentPrice": {"currency": "rub", "units": "300", "nano": 0}},
+                ],
+            })
+        return httpx.Response(200, json={
+            "positions": [
+                {"figi": "BBG0047315Y7", "instrumentType": "share",
+                 "quantity": {"units": "5", "nano": 0}, "ticker": "GAZP",
+                 "currentPrice": {"currency": "rub", "units": "150", "nano": 0}},
+            ],
+        })
+
+    portfolio_route = respx.post(f"{OPERATIONS}/GetPortfolio").mock(side_effect=by_account)
+    _mock_instrument_lists(
+        Shares=[
+            {"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"},
+            {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"},
+        ],
+    )
+
+    connector = TBankConnector(TOKEN)
+    positions_1 = connector.fetch_positions("1000000001")
+    prices_1 = connector.fetch_prices("1000000001")
+    positions_2 = connector.fetch_positions("1000000002")
+    prices_2 = connector.fetch_prices("1000000002")
+
+    assert positions_1 == [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+    ]
+    assert prices_1 == [BrokerPrice(isin="RU0009029540", price=Decimal("300.0000"), currency="RUB")]
+    assert positions_2 == [
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
+    ]
+    assert prices_2 == [BrokerPrice(isin="RU0007661625", price=Decimal("150.0000"), currency="RUB")]
+    assert portfolio_route.call_count == 2  # по разу на каждый счёт, снимки не перепутаны
 
 
 @respx.mock
