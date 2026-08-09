@@ -28,6 +28,10 @@ MAX_OPERATIONS_PAGES = 500
 # встречаются в истории операций за несколько лет.
 INSTRUMENT_LIST_KINDS = ("Shares", "Bonds", "Etfs", "Currencies", "Futures")
 INSTRUMENT_STATUS_ALL = "INSTRUMENT_STATUS_ALL"
+# Сокращённый справочник — только торгуемые инструменты. Запасной путь
+# коннектора для видов, полный список которых сервер не отдаёт целиком:
+# облигации в ALL — 34 МБ и обрыв на ~30-й секунде, в BASE — 3.4 МБ.
+INSTRUMENT_STATUS_BASE = "INSTRUMENT_STATUS_BASE"
 
 # Устойчивость к 429 (Too Many Requests): T-Invest API ограничивает частоту
 # запросов, и поштучные вызовы (GetInstrumentBy на инструмент, которого нет в
@@ -112,7 +116,27 @@ class TBankClient:
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 1
         while True:
-            response = httpx.post(url, json=body, headers=headers, timeout=self.timeout, verify=self._ssl_context)
+            try:
+                response = httpx.post(
+                    url, json=body, headers=headers, timeout=self.timeout, verify=self._ssl_context
+                )
+            except httpx.TransportError:
+                # Обрыв соединения, тайм-аут, сброс сети. Главный источник —
+                # списочные методы справочника инструментов: ответ на десятки
+                # мегабайт, и он регулярно приходит недокачанным
+                # (RemoteProtocolError «peer closed connection without sending
+                # complete message body»). Без повтора один такой обрыв ронял
+                # синхронизацию целого счёта, а поскольку индекс инструментов
+                # строится заново на каждом счёте, за которым он не успел
+                # закэшироваться, — подряд и все остальные счета тоже.
+                # Исчерпав попытки, ошибку поднимаем: неполный справочник
+                # молча превратил бы часть инструментов в неразрешённые.
+                if attempt >= MAX_RETRY_ATTEMPTS:
+                    raise
+                self._sleep(delay)
+                delay = min(delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY_SECONDS)
+                attempt += 1
+                continue
             if response.status_code == TOO_MANY_REQUESTS and attempt < MAX_RETRY_ATTEMPTS:
                 retry_after = _retry_after_seconds(response)
                 # Ноль — законное "повторяй немедленно"; сравниваем с None
@@ -168,11 +192,15 @@ class TBankClient:
         body = {"idType": "INSTRUMENT_ID_TYPE_FIGI", "id": figi}
         return self._post(INSTRUMENTS_SERVICE, "GetInstrumentBy", body).get("instrument")
 
-    def list_instruments(self, kind: str) -> list[dict]:
-        """Полный список инструментов одного вида (kind — literal-имя метода
+    def list_instruments(self, kind: str, status: str = INSTRUMENT_STATUS_ALL) -> list[dict]:
+        """Список инструментов одного вида (kind — literal-имя метода
         InstrumentsService: один из INSTRUMENT_LIST_KINDS). Несколько таких
         вызовов дают почти полное покрытие FIGI → инструмент за фиксированное
         число запросов вместо одного запроса на каждый уникальный инструмент
-        в истории счёта."""
-        body = {"instrumentStatus": INSTRUMENT_STATUS_ALL}
+        в истории счёта.
+
+        `status` — INSTRUMENT_STATUS_ALL по умолчанию; сокращённый
+        INSTRUMENT_STATUS_BASE нужен коннектору как запасной путь для видов,
+        полный список которых сервер не отдаёт целиком (см. там же)."""
+        body = {"instrumentStatus": status}
         return self._post(INSTRUMENTS_SERVICE, kind, body).get("instruments", [])

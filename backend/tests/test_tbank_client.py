@@ -305,6 +305,53 @@ def test_post_respects_zero_retry_after_header():
 
 
 @respx.mock
+def test_post_retries_when_connection_drops_mid_response():
+    """Справочник инструментов — ответ на десятки мегабайт, и он регулярно
+    обрывается на полпути (RemoteProtocolError «peer closed connection without
+    sending complete message body»). Без повтора один такой обрыв ронял всю
+    синхронизацию счёта: на живом прогоне 09.08.2026 так упали пять счетов из
+    шести подряд."""
+    route = respx.post(f"{INSTRUMENTS}/Shares").mock(
+        side_effect=[
+            httpx.RemoteProtocolError("peer closed connection without sending complete message body"),
+            httpx.Response(200, json={"instruments": [{"figi": "BBG004730N88"}]}),
+        ]
+    )
+    sleep = _FakeSleep()
+
+    instruments = TBankClient(TOKEN, sleep=sleep).list_instruments("Shares")
+
+    assert instruments == [{"figi": "BBG004730N88"}]
+    assert route.call_count == 2
+    assert sleep.calls == [INITIAL_RETRY_DELAY_SECONDS]
+
+
+@respx.mock
+def test_post_retries_on_read_timeout():
+    route = respx.post(f"{USERS}/GetAccounts").mock(
+        side_effect=[httpx.ReadTimeout("тайм-аут"), httpx.Response(200, json={"accounts": []})]
+    )
+    sleep = _FakeSleep()
+
+    assert TBankClient(TOKEN, sleep=sleep).get_accounts() == []
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_post_raises_transport_error_after_exhausting_retries():
+    """Повтор не должен превращать устойчивый сетевой отказ в тихий неполный
+    ответ: попытки исчерпаны — ошибка обязана всплыть наружу."""
+    route = respx.post(f"{USERS}/GetAccounts").mock(side_effect=httpx.ConnectError("нет сети"))
+    sleep = _FakeSleep()
+
+    with pytest.raises(httpx.TransportError):
+        TBankClient(TOKEN, sleep=sleep).get_accounts()
+
+    assert route.call_count == MAX_RETRY_ATTEMPTS
+    assert len(sleep.calls) == MAX_RETRY_ATTEMPTS - 1
+
+
+@respx.mock
 def test_post_raises_after_exhausting_retries():
     route = respx.post(f"{USERS}/GetAccounts").mock(
         return_value=httpx.Response(429)

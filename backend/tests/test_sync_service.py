@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from app.connectors.base import BrokerAccount, BrokerPosition
@@ -98,6 +98,24 @@ class TwoAccountsRecordingConnector:
 
     def fetch_operations(self, account_external_id, since):
         self.received_since[account_external_id] = since
+        return []
+
+    def fetch_positions(self, account_external_id):
+        return []
+
+
+class AccountWithOpeningDateConnector:
+    """Брокер, отдающий дату открытия счёта, — как настоящий T-Invest API."""
+
+    source = "tbank"
+
+    def fetch_accounts(self):
+        return [
+            BrokerAccount(external_id="acc-1", name="Брокерский", kind="brokerage",
+                          opened_at=date(2020, 7, 15))
+        ]
+
+    def fetch_operations(self, account_external_id, since):
         return []
 
     def fetch_positions(self, account_external_id):
@@ -214,11 +232,60 @@ def test_db_level_failure_after_operations_written_keeps_run_and_session_consist
     assert session.query(Account).filter_by(external_id="acc-2").count() == 1
 
 
-def _make_account(session, external_id="acc-1", name="Брокерский") -> Account:
-    account = Account(broker="tbank", kind="brokerage", external_id=external_id, name=name)
+def _make_account(session, external_id="acc-1", name="Брокерский", opened_at=None) -> Account:
+    account = Account(
+        broker="tbank", kind="brokerage", external_id=external_id, name=name, opened_at=opened_at
+    )
     session.add(account)
     session.flush()
     return account
+
+
+def test_resolve_since_starts_from_account_opening_date_on_first_sync(session):
+    """Счёт старше DEFAULT_HISTORY_DAYS: «сегодня минус пять лет» обрезало бы
+    покупки, сделанные до этой границы. Продажи этих бумаг в окно попадают, а
+    покупок нет — движок позиций не даёт уйти в минус, отбрасывает излишек
+    продажи, и на счёте навсегда остаётся бумага, которой давно нет."""
+    account = _make_account(session, opened_at=date(2020, 7, 15))
+    assert resolve_since_for_account(session, account.id) == datetime(2020, 7, 15, tzinfo=timezone.utc)
+
+
+def test_resolve_since_falls_back_to_deep_history_when_opening_date_unknown(session):
+    """Дату открытия отдаёт не всякий брокер — без неё опереться можно только
+    на фиксированную глубину."""
+    account = _make_account(session, opened_at=None)
+    since = resolve_since_for_account(session, account.id)
+    expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    assert abs((since - expected).total_seconds()) < 5
+
+
+def test_resolve_since_prefers_last_successful_run_over_opening_date(session):
+    """Дата открытия — ориентир только для ПЕРВОЙ синхронизации. У счёта с
+    историей успешных прогонов она не должна возвращать вычитывание всей
+    истории заново на каждом запуске планировщика."""
+    account = _make_account(session, opened_at=date(2020, 7, 15))
+    last_started = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    session.add(SyncRun(broker="tbank", account_id=account.id, status="success", started_at=last_started))
+    session.flush()
+
+    assert resolve_since_for_account(session, account.id) == last_started - timedelta(days=SYNC_OVERLAP_DAYS)
+
+
+def test_sync_broker_records_opening_date_for_new_account(session):
+    sync_broker(session, AccountWithOpeningDateConnector(), SINCE)
+    assert session.query(Account).one().opened_at == date(2020, 7, 15)
+
+
+def test_sync_broker_backfills_opening_date_of_already_known_account(session):
+    """Счета, заведённые до появления этого поля, стоят с пустой датой открытия.
+    Дозаполнить её обязана обычная синхронизация — иначе первый же прогон
+    такого счёта снова уйдёт на фиксированную глубину."""
+    account = _make_account(session, external_id="acc-1", opened_at=None)
+
+    sync_broker(session, AccountWithOpeningDateConnector(), SINCE)
+
+    session.refresh(account)
+    assert account.opened_at == date(2020, 7, 15)
 
 
 def test_resolve_since_uses_deep_history_when_no_successful_run_for_account(session):

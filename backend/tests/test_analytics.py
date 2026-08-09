@@ -57,6 +57,30 @@ def test_position_row_computes_profit(session):
     assert rows["SBER"].profit_percent == Decimal("50.0000")
 
 
+def test_short_position_profit_percent_is_not_inverted(session):
+    """У короткой позиции количество отрицательное, значит и себестоимость
+    отрицательная. Делить прибыль на неё как есть — получить верную по модулю
+    доходность с перевёрнутым знаком: выкупили дешевле, чем продали, это
+    заработок, а не убыток."""
+    account = seed(session)
+    shorted = Instrument(isin="RU000SHORTED", ticker="SHRT", secid="SHRT",
+                         kind="share", currency="RUB")
+    session.add(shorted)
+    session.flush()
+    session.add_all([
+        Position(account_id=account.id, instrument_id=shorted.id,
+                 quantity=Decimal("-10"), average_price=Decimal("200")),
+        Price(instrument_id=shorted.id, on_date=date(2026, 3, 12),
+              close=Decimal("180"), source="moex"),
+    ])
+    session.flush()
+
+    row = {r.ticker: r for r in position_rows(session)}["SHRT"]
+    assert row.market_value == Decimal("-1800.0000")
+    assert row.profit == Decimal("200.0000")
+    assert row.profit_percent == Decimal("10.0000")
+
+
 def test_position_without_price_has_no_market_value_not_zero(session):
     account = seed(session)
     nameless = Instrument(isin="RU000NOPRICE", ticker="NONE", secid=None,

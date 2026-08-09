@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -11,6 +11,11 @@ class BrokerAccount:
     external_id: str
     name: str
     kind: str
+    # Дата открытия счёта у брокера, если он её отдаёт. Нужна ровно для одного:
+    # задать глубину самой первой синхронизации этого счёта (см.
+    # app/sync/service.py, resolve_since_for_account). Необязательное поле —
+    # не всякий брокер такое сообщает.
+    opened_at: date | None = None
 
 
 @dataclass(frozen=True)

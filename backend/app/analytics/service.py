@@ -110,7 +110,10 @@ def position_rows(session: Session) -> list[PositionRow]:
         else:
             market_value = money(position.quantity * last_price)
             profit = money(market_value - cost)
-            percent = money(profit / cost * 100) if cost != 0 else money("0")
+            # По модулю себестоимости: у короткой позиции количество, а с ним и
+            # себестоимость отрицательные, и деление на неё как есть перевернуло
+            # бы знак доходности — заработок на шорте показывался бы убытком.
+            percent = money(profit / abs(cost) * 100) if cost != 0 else money("0")
 
         result.append(
             PositionRow(

@@ -46,6 +46,20 @@ def test_creates_position_from_journal(session):
     assert position.average_price == Decimal("100.0000")
 
 
+def test_full_redemption_read_from_db_closes_the_position(session):
+    """Через настоящую БД, а не только на движке: op_type хранится строкой
+    (String(24)), и после чтения это `str`, а не OperationType. Сравнение типа
+    через `is` тут молча ложно — погашение переставало закрывать позицию, и
+    погашенные облигации оставались в портфеле."""
+    account = setup_account(session)
+    instrument = add_instrument(session)
+    add_tx(session, account, instrument, OperationType.BUY, 1, "124", "1000", "-124000")
+    add_tx(session, account, instrument, OperationType.REDEMPTION, 9, "0", "0", "124000")
+
+    assert rebuild_positions(session, account) == 0
+    assert session.query(Position).count() == 0
+
+
 def test_rebuild_is_idempotent(session):
     account = setup_account(session)
     instrument = add_instrument(session)

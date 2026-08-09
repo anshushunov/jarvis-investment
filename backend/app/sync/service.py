@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
@@ -27,8 +27,17 @@ def resolve_since_for_account(session: Session, account_id: int) -> datetime:
     Если у этого счёта уже был хотя бы один успешный прогон — берём момент
     его начала с запасом SYNC_OVERLAP_DAYS назад, а не глубокую историю
     заново: при десятках тысяч операций и синхронизации по расписанию
-    вычитывать всю историю каждый раз слишком дорого. Если успешных
-    прогонов по этому счёту ещё не было — берём DEFAULT_HISTORY_DAYS вглубь.
+    вычитывать всю историю каждый раз слишком дорого.
+
+    Прогонов ещё не было — идём от даты открытия счёта, если брокер её
+    сообщил. Фиксированная глубина «сегодня минус DEFAULT_HISTORY_DAYS»
+    молча обрезает историю ровно у тех счетов, что старше неё, и обрезает
+    несимметрично: продажа бумаги попадает в окно, а покупка до границы —
+    нет. Движок позиций не даёт остатку уйти в минус, отбрасывает излишек
+    продажи, и на счёте навсегда остаётся бумага, которой давно нет. На
+    живом счёте владельца (открыт 15.07.2020, окно начиналось 12.08.2021)
+    так возникали фантомные остатки. DEFAULT_HISTORY_DAYS остаётся запасным
+    путём для брокеров, которые дату открытия не отдают.
 
     Считать это по брокеру целиком (взять последний успешный прогон среди
     ЛЮБОГО счёта брокера) нельзя: при частичном сбое синхронизации — а такое
@@ -42,10 +51,14 @@ def resolve_since_for_account(session: Session, account_id: int) -> datetime:
         )
     ).scalar_one()
 
-    if last_started_at is None:
-        return datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
+    if last_started_at is not None:
+        return last_started_at - timedelta(days=SYNC_OVERLAP_DAYS)
 
-    return last_started_at - timedelta(days=SYNC_OVERLAP_DAYS)
+    opened_at = session.get(Account, account_id).opened_at
+    if opened_at is not None:
+        return datetime.combine(opened_at, time.min, tzinfo=timezone.utc)
+
+    return datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
 
 
 def _get_or_create_account(session: Session, broker: str, broker_account) -> Account:
@@ -53,6 +66,12 @@ def _get_or_create_account(session: Session, broker: str, broker_account) -> Acc
         select(Account).where(Account.broker == broker, Account.external_id == broker_account.external_id)
     ).scalar_one_or_none()
     if existing is not None:
+        # Дозаполняем дату открытия, но не переписываем уже известную: счета,
+        # заведённые до появления этого поля, стоят с пустой датой, и без
+        # дозаполнения их первая синхронизация навсегда осталась бы на
+        # фиксированной глубине.
+        if existing.opened_at is None and broker_account.opened_at is not None:
+            existing.opened_at = broker_account.opened_at
         return existing
 
     account = Account(
@@ -61,6 +80,7 @@ def _get_or_create_account(session: Session, broker: str, broker_account) -> Acc
         external_id=broker_account.external_id,
         name=broker_account.name,
         currency="RUB",
+        opened_at=broker_account.opened_at,
     )
     session.add(account)
     session.flush()

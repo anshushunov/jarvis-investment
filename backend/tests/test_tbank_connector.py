@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -48,6 +48,46 @@ def test_fetch_accounts_maps_iis_and_default_kind():
         BrokerAccount(external_id="1000000002", name="ИИС", kind="iis"),
         BrokerAccount(external_id="1000000003", name="Смарт-счет", kind="brokerage"),
     ]
+
+
+@respx.mock
+def test_fetch_accounts_carries_opening_date():
+    """Дата открытия счёта — единственный честный ориентир для глубины самой
+    первой синхронизации: «сегодня минус N лет» обрезает историю ровно у тех
+    счетов, что старше N (см. resolve_since_for_account)."""
+    respx.post(f"{USERS}/GetAccounts").mock(
+        return_value=httpx.Response(200, json={
+            "accounts": [
+                {"id": "1000000001", "type": "ACCOUNT_TYPE_TINKOFF", "name": "Инвестиционный",
+                 "openedDate": "2020-07-15T00:00:00Z"},
+            ]
+        })
+    )
+
+    accounts = TBankConnector(TOKEN).fetch_accounts()
+
+    assert accounts[0].opened_at == date(2020, 7, 15)
+
+
+@respx.mock
+def test_fetch_accounts_treats_epoch_zero_and_missing_opening_date_as_unknown():
+    """Незаполненную дату T-Invest API отдаёт не пустой строкой, а нулём эпохи
+    (так приходит closedDate у открытого счёта). Принять её за настоящую значит
+    при первой синхронизации запросить историю с 1970 года."""
+    respx.post(f"{USERS}/GetAccounts").mock(
+        return_value=httpx.Response(200, json={
+            "accounts": [
+                {"id": "1", "type": "ACCOUNT_TYPE_TINKOFF", "name": "Нулевая дата",
+                 "openedDate": "1970-01-01T00:00:00Z"},
+                {"id": "2", "type": "ACCOUNT_TYPE_TINKOFF", "name": "Без поля"},
+            ]
+        })
+    )
+
+    accounts = TBankConnector(TOKEN).fetch_accounts()
+
+    assert accounts[0].opened_at is None
+    assert accounts[1].opened_at is None
 
 
 @respx.mock
@@ -216,6 +256,110 @@ def test_fetch_operations_falls_back_to_get_instrument_by_when_not_in_bulk_lists
     # он тоже обязан доехать, а не потеряться.
     assert operations[0].payload["instrument_kind"] == "bond"
     assert operations[0].payload["instrument_name"] == "Экзотика"
+
+
+def _one_buy(figi: str, op_id: str = "500000004") -> httpx.Response:
+    return httpx.Response(200, json={
+        "hasNext": False,
+        "nextCursor": "",
+        "items": [
+            {
+                "id": op_id,
+                "type": "OPERATION_TYPE_BUY",
+                "state": "OPERATION_STATE_EXECUTED",
+                "date": "2026-03-12T10:30:00Z",
+                "figi": figi,
+                "quantity": "1",
+                "price": {"currency": "rub", "units": "100", "nano": 0},
+                "payment": {"currency": "rub", "units": "-100", "nano": 0},
+            },
+        ],
+    })
+
+
+@respx.mock
+def test_oversized_instrument_list_falls_back_to_base_status():
+    """Полный справочник (ALL) включает переставшие торговаться инструменты и
+    потому нужен, но для облигаций он весит 34 МБ и сервер обрывает ответ на
+    ~30-й секунде. Сокращённый (BASE) — 3.4 МБ за 4 секунды (живой замер
+    09.08.2026). Взять из него хотя бы торгуемые лучше, чем не взять ничего:
+    остаток доберёт поштучное разрешение по FIGI."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(return_value=_one_buy("BBG00T22WKV5"))
+    _mock_instrument_lists()
+
+    def by_status(request: httpx.Request) -> httpx.Response:
+        # Отказ на ALL — устойчивый, а не разовый: повторы клиента его не
+        # переживают, и откат наступает только после того, как они исчерпаны.
+        if b"INSTRUMENT_STATUS_ALL" in request.content:
+            raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+        return httpx.Response(200, json={"instruments": [
+            {"figi": "BBG00T22WKV5", "ticker": "SU26238RMFS4",
+             "isin": "RU000A1038V6", "name": "ОФЗ 26238"}
+        ]})
+
+    bonds = respx.post(f"{INSTRUMENTS}/Bonds").mock(side_effect=by_status)
+    by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy")
+
+    operations = TBankConnector(TOKEN, sleep=lambda _: None).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert operations[0].isin == "RU000A1038V6"
+    assert operations[0].payload["instrument_kind"] == "bond"
+    # Последняя попытка ушла именно за сокращённым списком, и поштучный запрос не понадобился.
+    assert b'"instrumentStatus":"INSTRUMENT_STATUS_BASE"' in bonds.calls[-1].request.content
+    assert by_figi.call_count == 0
+
+
+@respx.mock
+def test_unavailable_instrument_list_degrades_to_per_figi_instead_of_failing():
+    """Справочник облигаций — 34 МБ, и сервер обрывает его на ~30-й секунде,
+    сколько ни повторяй (живой замер 09.08.2026: Shares 11.5 МБ проходят,
+    Bonds 34.4 МБ — нет). Один недоступный список не должен ронять
+    синхронизацию целого счёта: у коннектора есть поштучное разрешение по
+    FIGI, и оно обязано подхватить то, чего не хватило в списках."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(return_value=_one_buy("BBG00T22WKV5"))
+    _mock_instrument_lists(Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}])
+    respx.post(f"{INSTRUMENTS}/Bonds").mock(
+        side_effect=httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+    )
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "BBG00T22WKV5", "ticker": "SU26238RMFS4",
+                           "isin": "RU000A1038V6", "instrumentType": "bond", "name": "ОФЗ 26238"}
+        })
+    )
+
+    operations = TBankConnector(TOKEN, sleep=lambda _: None).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert len(operations) == 1
+    assert operations[0].isin == "RU000A1038V6"
+    assert operations[0].payload["instrument_kind"] == "bond"
+
+
+@respx.mock
+def test_per_figi_resolution_is_reused_across_calls():
+    """Поштучный запрос — именно то, что раньше упиралось в ограничение частоты
+    (429). Когда списочный метод недоступен, таких запросов становится много, и
+    повторять их на каждом счёте прогона нельзя: один и тот же FIGI встречается
+    в истории нескольких счетов."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(return_value=_one_buy("TCS00A0EXOTIC"))
+    _mock_instrument_lists()
+    by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC",
+                           "instrumentType": "bond", "name": "Экзотика"}
+        })
+    )
+
+    connector = TBankConnector(TOKEN)
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    connector.fetch_operations("1000000001", since)
+    connector.fetch_operations("1000000002", since)
+
+    assert by_figi.call_count == 1
 
 
 @respx.mock
