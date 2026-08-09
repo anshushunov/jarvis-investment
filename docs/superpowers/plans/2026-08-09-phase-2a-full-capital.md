@@ -91,8 +91,8 @@ pytest на настоящей базе; React 19 + TypeScript + Vite, Vitest.
 | `backend/app/marketdata/fx.py` | загрузка курсов в базу и пересчёт сумм в рубли |
 | `backend/app/analytics/valuation.py` | оценка одной позиции: цена → валюта → рубли |
 | `backend/app/valuation_check.py` | сверка нашего итога с итогом брокера, запускается вручную |
-| `backend/alembic/versions/0010_fx_rate.py` … `0013_broker_holding.py` | миграции |
-| `backend/tests/test_cbr.py`, `test_fx.py`, `test_valuation.py`, `test_cash.py`, `test_broker_holding.py` | тесты новых модулей |
+| `backend/alembic/versions/0010_fx_rate.py` … `0014_instrument_trading_restricted.py` | миграции |
+| `backend/tests/test_cbr.py`, `test_fx.py`, `test_valuation.py`, `test_cash.py`, `test_broker_holding.py`, `test_restrictions.py` | тесты новых модулей |
 | `frontend/src/components/CashCard.tsx` | денежные остатки по валютам |
 
 Изменяются:
@@ -100,6 +100,9 @@ pytest на настоящей базе; React 19 + TypeScript + Vite, Vitest.
 | Файл | Что меняется |
 |---|---|
 | `backend/app/models/price.py` | колонки `currency` и `source` в ключе уникальности |
+| `backend/app/models/instrument.py` | колонка `trading_restricted` |
+| `backend/app/connectors/tbank/mapper.py` | флаги торгуемости в payload операции |
+| `backend/app/instruments/service.py`, `backfill.py` | перенос флагов в справочник |
 | `backend/app/connectors/base.py` | `BrokerPosition.blocked`, новые `BrokerCash` и `BrokerPrice`, расширение протокола |
 | `backend/app/connectors/tbank/connector.py` | `fetch_cash`, `fetch_prices`, заполнение `blocked` |
 | `backend/app/marketdata/service.py` | валюта цены, приоритет источников в `latest_prices` |
@@ -1848,7 +1851,7 @@ git commit -m "feat: денежные остатки счетов из GetPositi
 
 ---
 
-### Task 6: Заблокированные бумаги
+### Task 6: Заблокированное количество на счёте
 
 **Files:**
 - Create: `backend/app/models/broker_holding.py`
@@ -2286,7 +2289,396 @@ git commit -m "feat: снимок бумаг брокера с заблокир�
 
 ---
 
-### Task 7: Капитал целиком — оценка в рублях
+### Task 7: Признак ограничения в обороте
+
+Задача 6 закрыла блокировку в узком смысле — поле `blocked` у брокера. Владелец
+имеет в виду более широкое: бумага, которой нельзя распорядиться. Таких в
+портфеле гораздо больше двух, и признак у них другой.
+
+**Files:**
+- Modify: `backend/app/models/instrument.py`
+- Create: `backend/alembic/versions/0014_instrument_trading_restricted.py`
+- Modify: `backend/app/connectors/base.py`
+- Modify: `backend/app/connectors/tbank/connector.py`
+- Modify: `backend/app/connectors/tbank/mapper.py`
+- Modify: `backend/app/instruments/service.py`
+- Modify: `backend/app/instruments/backfill.py`
+- Create: `backend/tests/test_restrictions.py`
+- Modify: `backend/tests/test_tbank_mapper.py`
+
+**Interfaces:**
+- Consumes: `BrokerInstrument` и `apply_reference` в том виде, в каком они есть
+  до этой задачи; `_reference_from(op)` из `app/instruments/service.py`.
+- Produces: `BrokerInstrument.buy_available: bool | None` и `sell_available: bool | None`;
+  колонка `Instrument.trading_restricted: bool`;
+  `apply_reference(instrument, kind, name, currency=None, restricted=None) -> bool`;
+  ключи payload `instrument_buy_available` и `instrument_sell_available`.
+
+**Что установлено разведкой.** `tradingStatus` для этого не годится: он
+описывает текущую сессию, и в выходной день `NOT_AVAILABLE_FOR_TRADING` стоит
+даже у обычных рублёвых облигаций и у фонда EQMX. Разделяет пара флагов
+`buyAvailableFlag`/`sellAvailableFlag` — оба `false` ровно у того, чем нельзя
+распорядиться:
+
+| Инструменты счёта | buy/sell |
+|---|---|
+| Рублёвые акции, облигации, фонды: X5, OZON, YDEX, T, DOMRF, EQMX, TMOS@, все выпуски RU000… | `true/true` |
+| Гонконгские: 9866, 700, 3690, 939, 9618, 9868, 288, 9988, 2015, 3988, 9888, 3067 | `false/false` |
+| Американские: XYZ, TDOC, U, MELI | `false/false` |
+| Внебиржевые US30303M1027, US69608A1088 | `false/false`, плюс `blockedTcaFlag=true` |
+| Конвертированные AGRO и FIVE | `false/false` |
+| `HK0000051877` | `false/false` |
+| `HK0000123577` | `true/true` — ловится только полем `blocked` из задачи 6 |
+
+Последняя строка и есть причина, по которой признака нужно два: справочник и
+снимок остатков знают о разном, и ни один из них не покрывает оба случая.
+Флаги приходят и в списочных методах справочника (проверено на `Etfs` и
+`Currencies`), то есть доезжают обычной синхронизацией, а не только поштучным
+разрешением по FIGI.
+
+- [ ] **Step 1: Написать падающий тест переноса флагов через границу коннектора**
+
+Создать `backend/tests/test_restrictions.py`:
+
+```python
+from decimal import Decimal
+
+from app.connectors.base import BrokerInstrument
+from app.instruments.service import apply_reference
+from app.models import Instrument
+
+
+def add_instrument(session, isin: str, restricted: bool = False) -> Instrument:
+    instrument = Instrument(isin=isin, ticker=isin, secid=isin, kind="share",
+                            currency="RUB", trading_restricted=restricted)
+    session.add(instrument)
+    session.flush()
+    return instrument
+
+
+def test_instrument_is_restricted_when_neither_buy_nor_sell_available(session):
+    """Гонконгская акция: купить нельзя, продать нельзя. Именно так выглядят в
+    справочнике все иностранные бумаги портфеля."""
+    instrument = add_instrument(session, "HK0000009866")
+
+    changed = apply_reference(instrument, "share", "Nio", "HKD", restricted=True)
+
+    assert changed is True
+    assert instrument.trading_restricted is True
+
+
+def test_restriction_is_lifted_when_broker_says_so(session):
+    """False — законное значение, а не «сведений нет». Если бумагу разблокируют,
+    признак обязан сняться сам, без ручной правки базы."""
+    instrument = add_instrument(session, "RU0009029540", restricted=True)
+
+    changed = apply_reference(instrument, "share", "Сбербанк", "RUB", restricted=False)
+
+    assert changed is True
+    assert instrument.trading_restricted is False
+
+
+def test_unknown_restriction_does_not_touch_the_flag(session):
+    """Справочник флагов не дал — прежнее значение сохраняется. Так приходят
+    операции, записанные до появления флагов в payload."""
+    instrument = add_instrument(session, "RU0009029540", restricted=True)
+
+    apply_reference(instrument, "share", "Сбербанк", "RUB", restricted=None)
+
+    assert instrument.trading_restricted is True
+
+
+def test_broker_instrument_carries_availability_flags():
+    """Флаги едут через границу коннектора отдельными полями, а не одним уже
+    вычисленным признаком: решение «оба false значит нельзя распорядиться» —
+    доменное, и принимать его коннектору не положено."""
+    instrument = BrokerInstrument(isin="HK0000009866", ticker="9866", kind="share",
+                                  buy_available=False, sell_available=False)
+
+    assert (instrument.buy_available, instrument.sell_available) == (False, False)
+```
+
+- [ ] **Step 2: Запустить тест и убедиться, что он падает**
+
+Run: `cd backend && uv run pytest tests/test_restrictions.py -v`
+Expected: FAIL — `Instrument` не принимает `trading_restricted`
+
+- [ ] **Step 3: Добавить колонку и миграцию**
+
+В `backend/app/models/instrument.py` дописать в класс:
+
+```python
+    # Бумагой нельзя распорядиться: брокер не даёт ни купить, ни продать.
+    # Так выглядят все иностранные бумаги портфеля после 2022 года, а также
+    # выпуски, снятые с торгов после конвертации (AGRO, FIVE). Это не то же
+    # самое, что заблокированное количество в broker_holding: там блокировка
+    # конкретных бумаг на конкретном счёте, здесь — свойство самой бумаги.
+    trading_restricted: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                     server_default=text("false"))
+```
+
+Импорты дополнить: `from sqlalchemy import Boolean, Date, Numeric, String, text`.
+
+Создать `backend/alembic/versions/0014_instrument_trading_restricted.py`:
+
+```python
+"""признак ограничения в обороте у инструмента
+
+Revision ID: 0014
+Revises: 0013
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+revision: str = '0014'
+down_revision: Union[str, Sequence[str], None] = '0013'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # По умолчанию не ограничен: у большинства бумаг это так, а те, что
+    # ограничены, проставит дозаполнение справочника
+    # (python -m app.instruments.backfill) — оно же чинит вид и валюту.
+    op.add_column('instrument', sa.Column('trading_restricted', sa.Boolean(), nullable=False,
+                                          server_default=sa.text('false')))
+
+
+def downgrade() -> None:
+    op.drop_column('instrument', 'trading_restricted')
+```
+
+- [ ] **Step 4: Расширить `BrokerInstrument` и разбор справочника**
+
+В `backend/app/connectors/base.py` дописать в `BrokerInstrument`:
+
+```python
+    # Доступность операций по данным справочника брокера. Оба флага False
+    # означают, что бумагой нельзя распорядиться; вывод из этого делает домен
+    # (app/instruments/service.py), а не коннектор. None — брокер сведений не
+    # дал: у уже записанных операций этих ключей в payload нет вовсе.
+    buy_available: bool | None = None
+    sell_available: bool | None = None
+```
+
+В `backend/app/connectors/tbank/connector.py` в `_to_broker_instrument`:
+
+```python
+    return BrokerInstrument(
+        isin=raw.get("isin") or None,
+        ticker=raw.get("ticker") or None,
+        kind=kind,
+        name=raw.get("name") or None,
+        currency=currency.upper() if currency else None,
+        # Флаги есть и в списочных методах справочника, и в поштучном
+        # GetInstrumentBy — оба пути дают их одинаково.
+        buy_available=raw.get("buyAvailableFlag"),
+        sell_available=raw.get("sellAvailableFlag"),
+    )
+```
+
+- [ ] **Step 5: Провести флаги через payload операции**
+
+В `backend/app/connectors/tbank/mapper.py` в `_instrument_payload` дописать:
+
+```python
+        # Доступность операций: по ней домен решает, ограничена ли бумага в
+        # обороте. Едут двумя полями, а не готовым признаком, — вывод доменный.
+        "instrument_buy_available": instrument.buy_available,
+        "instrument_sell_available": instrument.sell_available,
+```
+
+В `backend/tests/test_tbank_mapper.py` дописать тест по образцу существующих
+проверок payload:
+
+```python
+def test_payload_carries_availability_flags():
+    instrument = BrokerInstrument(isin="HK0000009866", ticker="9866", kind="share",
+                                  name="Nio", currency="HKD",
+                                  buy_available=False, sell_available=False)
+
+    result = map_operation(EXECUTED_BUY_OPERATION, instrument, now=NOW)
+
+    assert result.payload["instrument_buy_available"] is False
+    assert result.payload["instrument_sell_available"] is False
+```
+
+`EXECUTED_BUY_OPERATION` и `NOW` — уже существующие в файле фикстуры; если они
+названы иначе, использовать те, что есть.
+
+- [ ] **Step 6: Научить резолвер инструментов проставлять признак**
+
+В `backend/app/instruments/service.py` расширить `apply_reference`:
+
+```python
+def apply_reference(
+    instrument: Instrument,
+    kind: str | None,
+    name: str | None,
+    currency: str | None = None,
+    restricted: bool | None = None,
+) -> bool:
+```
+
+и дописать в её тело перед `return changed`:
+
+```python
+    # None и False здесь разное: None — «справочник ничего не сказал», и тогда
+    # прежнее значение сохраняется; False — «брокер говорит, что операции
+    # доступны», и признак обязан сняться. Проверка на истинность, как у
+    # остальных полей, склеила бы эти два случая, и разблокированная бумага
+    # осталась бы ограниченной навсегда.
+    if restricted is not None and instrument.trading_restricted != restricted:
+        instrument.trading_restricted = restricted
+        changed = True
+```
+
+В докстринг `apply_reference` дописать абзац:
+
+```
+    Признак ограничения в обороте обновляется в обе стороны, в отличие от
+    остальных полей: снятие блокировки — такое же сообщение справочника, как и
+    её появление.
+```
+
+Расширить `_reference_from`, чтобы она возвращала и признак:
+
+```python
+def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | None, bool | None]:
+    """Справочные сведения, положенные коннектором в payload операции (см.
+    app/connectors/tbank/mapper.py). Ключей может не быть вовсе — например, у
+    операции, записанной в журнал до того, как коннектор научился их класть."""
+    kind = op.payload.get("instrument_kind")
+    name = op.payload.get("instrument_name")
+    currency = op.payload.get("instrument_currency")
+    buy = op.payload.get("instrument_buy_available")
+    sell = op.payload.get("instrument_sell_available")
+    return (
+        str(kind) if kind else None,
+        str(name) if name else None,
+        str(currency).upper() if currency else None,
+        _restricted(buy, sell),
+    )
+
+
+def _restricted(buy: object, sell: object) -> bool | None:
+    """Ограничена ли бумага в обороте: недоступны обе операции сразу.
+
+    Одного флага мало. Бумага, которую нельзя купить, но можно продать,
+    распоряжению поддаётся — именно так выглядят выпуски, закрытые для новых
+    покупок, но не замороженные. Ограничением считается только пара.
+
+    Хотя бы один флаг отсутствует — сведений нет, возвращаем None: прежнее
+    значение в базе трогать нельзя.
+    """
+    if not isinstance(buy, bool) or not isinstance(sell, bool):
+        return None
+    return not buy and not sell
+```
+
+Оба места вызова `_reference_from` распаковывают теперь четыре значения:
+в `resolve_instrument` это `apply_reference(existing, *_reference_from(op))` —
+менять не нужно, распаковка звёздочкой сама передаст четвёртый аргумент;
+в `_insert_instrument` строка `kind, name, currency = _reference_from(op)`
+превращается в `kind, name, currency, restricted = _reference_from(op)`, поле
+`trading_restricted=bool(restricted)` добавляется в конструктор `Instrument`,
+а вызов в обработчике гонки становится
+`apply_reference(winner, kind, name, currency, restricted)`.
+
+- [ ] **Step 7: Дозаполнять признак по всему справочнику**
+
+В `backend/app/instruments/backfill.py` в `backfill_instruments` заменить строку
+применения справочника:
+
+```python
+        if found is not None:
+            touched |= apply_reference(
+                instrument, found.kind, found.name, found.currency,
+                _restricted_from(found),
+            )
+```
+
+и добавить в тот же файл:
+
+```python
+def _restricted_from(found: BrokerInstrument) -> bool | None:
+    """Ограничение в обороте по флагам справочника. Правило то же, что и для
+    операций (app/instruments/service.py): ограничением считается недоступность
+    обеих операций сразу, а отсутствие любого из флагов — отсутствие сведений."""
+    if not isinstance(found.buy_available, bool) or not isinstance(found.sell_available, bool):
+        return None
+    return not found.buy_available and not found.sell_available
+```
+
+Докстринг `backfill_instruments` дополнить: «вид, название, валюту и признак
+ограничения в обороте». Это основной путь для 251 уже записанного инструмента:
+операции по бумагам, которые просто лежат в портфеле годами, в окно
+синхронизации не попадают никогда.
+
+- [ ] **Step 8: Дописать тест дозаполнения**
+
+В `backend/tests/test_restrictions.py`:
+
+```python
+def test_backfill_marks_restricted_instruments(session):
+    from app.instruments.backfill import backfill_instruments
+
+    add_instrument(session, "HK0000009866")
+    add_instrument(session, "RU0009029540")
+
+    changed = backfill_instruments(session, {
+        "HK0000009866": BrokerInstrument(isin="HK0000009866", ticker="9866", kind="share",
+                                         name="Nio", currency="HKD",
+                                         buy_available=False, sell_available=False),
+        "RU0009029540": BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share",
+                                         name="Сбербанк", currency="RUB",
+                                         buy_available=True, sell_available=True),
+    })
+
+    assert changed == 1
+    restricted = {i.isin: i.trading_restricted for i in session.query(Instrument).all()}
+    assert restricted == {"HK0000009866": True, "RU0009029540": False}
+
+
+def test_sell_only_instrument_is_not_restricted(session):
+    """Купить нельзя, продать можно — распоряжению поддаётся. Ограничением
+    считается только пара недоступных операций."""
+    instrument = add_instrument(session, "RU000A1054W1")
+
+    apply_reference(instrument, "bond", "Выпуск", "RUB", restricted=None)
+    changed = apply_reference(instrument, "bond", "Выпуск", "RUB", restricted=False)
+
+    assert changed is False
+    assert instrument.trading_restricted is False
+```
+
+- [ ] **Step 9: Запустить тесты**
+
+Run: `cd backend && uv run pytest tests/test_restrictions.py tests/test_instrument_seam.py tests/test_tbank_mapper.py tests/test_migrations.py -v`
+Expected: PASS
+
+- [ ] **Step 10: Прогнать весь бэкенд**
+
+Run: `cd backend && uv run pytest`
+Expected: PASS
+
+- [ ] **Step 11: Коммит**
+
+```bash
+git add backend/app/models/instrument.py backend/app/connectors/base.py \
+        backend/app/connectors/tbank/connector.py backend/app/connectors/tbank/mapper.py \
+        backend/app/instruments/service.py backend/app/instruments/backfill.py \
+        backend/alembic/versions/0014_instrument_trading_restricted.py \
+        backend/tests/test_restrictions.py backend/tests/test_tbank_mapper.py
+git commit -m "feat: признак ограничения бумаги в обороте"
+```
+
+---
+
+### Task 8: Капитал целиком — оценка в рублях
 
 **Files:**
 - Create: `backend/app/analytics/valuation.py`
@@ -2298,14 +2690,22 @@ git commit -m "feat: снимок бумаг брокера с заблокир�
 **Interfaces:**
 - Consumes: `latest_prices` и `LatestPrice` из `app/marketdata/service.py`;
   `latest_rates`, `to_base` из `app/marketdata/fx.py`; `cash_by_account` из
-  `app/accounts/cash.py`; `blocked_by_instrument` из `app/sync/holdings.py`.
+  `app/accounts/cash.py`; `blocked_by_instrument` из `app/sync/holdings.py`;
+  `Instrument.trading_restricted` из задачи 7.
 - Produces: `ValuedPosition` и `value_position(...)` в `app/analytics/valuation.py`;
   переработанный `Overview` в `app/analytics/service.py` с полями
-  `total_value`, `securities_value`, `cash_value`, `blocked_value`,
+  `total_value`, `securities_value`, `cash_value`, `restricted_value`,
   `by_asset_class`, `by_account`, `by_currency`, `position_currencies`,
   `as_of`, `fx_as_of`, `valued_positions`, `positions_total`;
   `PositionRow` дополняется полями `value_base: Decimal | None`,
-  `blocked: Decimal`, `price_source: str | None`.
+  `blocked: Decimal`, `restricted: bool`, `price_source: str | None`.
+
+**Про две разновидности ограничения.** Задача 6 дала заблокированное количество
+на счёте, задача 7 — свойство самой бумаги. Наружу отдаётся одна сумма
+`restricted_value`: владельцу важно, какой частью капитала он не может
+распорядиться, а не по какой из двух причин. Различие сохраняется в строке
+позиции (`blocked` — количество, `restricted` — признак бумаги), чтобы
+происхождение можно было увидеть.
 
 - [ ] **Step 1: Написать падающий тест оценки**
 
@@ -2447,7 +2847,11 @@ Expected: PASS, 5 тестов
 - [ ] **Step 5: Написать падающий тест нового обзора**
 
 Дописать в `backend/tests/test_analytics.py` (помощники создания счёта,
-инструмента, позиции и цены брать из уже существующих в файле):
+инструмента, позиции и цены брать из уже существующих в файле; `add_priced_position`
+дополнить параметром `restricted: bool = False`, который проставляется в
+`Instrument.trading_restricted`, и параметром `currency`, задающим валюту цены,
+а `add_rate` завести новым — он кладёт строку в `fx_rate` за сегодняшнюю
+московскую дату):
 
 ```python
 def test_total_includes_cash(session):
@@ -2517,14 +2921,13 @@ def test_gold_balance_is_valued_as_metal(session):
     assert overview.total_value == Decimal("114100.0000")
 
 
-def test_blocked_value_is_reported_but_stays_in_the_total(session):
+def test_blocked_quantity_counts_as_restricted(session):
     """Заблокированные бумаги никуда не делись и в капитал входят — брокер
     считает их так же. Отдельная цифра нужна, чтобы владелец видел, какой
     частью капитала он не может распоряжаться."""
     account = add_account(session)
-    instrument = add_priced_position(session, account, isin="HK0000123577",
-                                     quantity=Decimal("92"), price=Decimal("100"),
-                                     currency="RUB")
+    add_priced_position(session, account, isin="HK0000123577", quantity=Decimal("92"),
+                        price=Decimal("100"), currency="RUB")
     store_holdings(session, account, [BrokerPosition(isin="HK0000123577", ticker="x",
                                                      quantity=Decimal("92"),
                                                      blocked=Decimal("92"))])
@@ -2532,13 +2935,57 @@ def test_blocked_value_is_reported_but_stays_in_the_total(session):
     overview = portfolio_overview(session)
 
     assert overview.total_value == Decimal("9200.0000")
-    assert overview.blocked_value == Decimal("9200.0000")
+    assert overview.restricted_value == Decimal("9200.0000")
+
+
+def test_partially_blocked_position_counts_only_its_blocked_share(session):
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("100"),
+                        price=Decimal("300"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="RU0009029540", ticker="SBER",
+                                                     quantity=Decimal("100"),
+                                                     blocked=Decimal("25"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("30000.0000")
+    assert overview.restricted_value == Decimal("7500.0000")
+
+
+def test_instrument_restricted_in_trading_counts_whole_position(session):
+    """Иностранная акция: брокер не даёт ни купить, ни продать. Заблокированного
+    количества у неё при этом нет — недоступна вся позиция, а не её часть.
+    Таких в портфеле владельца больше двадцати, и именно они составляют
+    основную недоступную часть капитала."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD", restricted=True)
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.restricted_value == Decimal("15457.2624")
+
+
+def test_restriction_and_blocking_are_not_added_up(session):
+    """Бумага ограничена в обороте и вдобавок заблокирована. Недоступна она
+    ровно один раз: сложение дало бы больше стоимости самой позиции."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000051877", quantity=Decimal("79"),
+                        price=Decimal("100"), currency="RUB", restricted=True)
+    store_holdings(session, account, [BrokerPosition(isin="HK0000051877", ticker="y",
+                                                     quantity=Decimal("79"),
+                                                     blocked=Decimal("79"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.restricted_value == Decimal("7900.0000")
 ```
 
 - [ ] **Step 6: Запустить тест и убедиться, что он падает**
 
 Run: `cd backend && uv run pytest tests/test_analytics.py -v`
-Expected: FAIL — у `Overview` нет полей `securities_value`, `cash_value`, `blocked_value`
+Expected: FAIL — у `Overview` нет полей `securities_value`, `cash_value`, `restricted_value`
 
 - [ ] **Step 7: Переписать аналитику**
 
@@ -2573,11 +3020,12 @@ class Overview:
     # им быть.
     securities_value: Decimal
     cash_value: Decimal
-    # Часть капитала в заблокированных бумагах. Входит в total_value, а не
-    # вычитается из него: брокер считает так же, и капитал обязан с ним
-    # сходиться. Отдельная цифра отвечает на другой вопрос — какой частью
-    # владелец не может распорядиться.
-    blocked_value: Decimal
+    # Часть капитала, которой нельзя распорядиться: заблокированные брокером
+    # количества плюс бумаги, ограниченные в обороте. Входит в total_value, а
+    # не вычитается из него — брокер считает так же, и капитал обязан с ним
+    # сходиться. Отдельная цифра отвечает на другой вопрос: сколько из этих
+    # денег реально доступно.
+    restricted_value: Decimal
     by_asset_class: dict[str, Decimal]
     by_account: dict[int, Decimal]
     # Итог по каждой валюте в ней самой, без пересчёта: сколько именно
@@ -2636,6 +3084,7 @@ def position_rows(session: Session) -> list[PositionRow]:
                 value_base=valued.value_base,
                 price_source=valued.price_source,
                 blocked=blocked.get((account.id, instrument.id), Decimal("0")),
+                restricted=instrument.trading_restricted,
                 profit=profit,
                 profit_percent=percent,
             )
@@ -2653,7 +3102,7 @@ def portfolio_overview(session: Session) -> Overview:
     by_currency: dict[str, Decimal] = {}
     position_currencies: set[str] = set()
     securities = money("0")
-    blocked_value = money("0")
+    restricted_value = money("0")
     as_of: date | None = None
     positions_total = 0
     valued_positions = 0
@@ -2688,12 +3137,19 @@ def portfolio_overview(session: Session) -> Overview:
             by_account_id.get(account.id, money("0")) + valued.value_base
         )
 
-        blocked_quantity = blocked.get((account.id, instrument.id))
-        if blocked_quantity and position.quantity != 0:
-            # Доля заблокированного в стоимости — по доле в количестве: цена у
-            # заблокированной и свободной части одна и та же бумага.
-            blocked_value = money(
-                blocked_value + valued.value_base * blocked_quantity / position.quantity
+        # Недоступная часть позиции. Две причины дают её по-разному: бумага,
+        # ограниченная в обороте, недоступна целиком, а заблокированное
+        # количество — только своей долей. Когда верно и то и другое,
+        # ограничение бумаги поглощает блокировку количества, и складывать их
+        # нельзя — получится больше, чем сама позиция.
+        blocked_quantity = blocked.get((account.id, instrument.id), Decimal("0"))
+        if instrument.trading_restricted:
+            restricted_value = money(restricted_value + valued.value_base)
+        elif blocked_quantity and position.quantity != 0:
+            # Доля по количеству: цена у заблокированной и свободной части одна
+            # и та же бумага.
+            restricted_value = money(
+                restricted_value + valued.value_base * blocked_quantity / position.quantity
             )
 
     cash_total = money("0")
@@ -2717,7 +3173,7 @@ def portfolio_overview(session: Session) -> Overview:
         total_value=money(securities + cash_total),
         securities_value=securities,
         cash_value=cash_total,
-        blocked_value=blocked_value,
+        restricted_value=restricted_value,
         by_asset_class=by_class,
         by_account=dict(sorted(by_account_id.items())),
         by_currency=dict(sorted(by_currency.items())),
@@ -2738,8 +3194,12 @@ def portfolio_overview(session: Session) -> Overview:
     # Метка источника цены: биржа или брокер. Оценка по данным брокера не
     # независима — это видно на экране, а не только в базе.
     price_source: str | None
-    # Заблокированная часть количества по данным брокера.
+    # Заблокированная часть количества по данным брокера (broker_holding).
     blocked: Decimal
+    # Бумагой нельзя распорядиться вовсе: брокер не даёт ни купить, ни продать
+    # (Instrument.trading_restricted). Причина другая, чем у blocked, и обе
+    # встречаются по отдельности.
+    restricted: bool
 ```
 
 Импорты в начале файла дополнить:
@@ -2797,7 +3257,7 @@ git commit -m "feat: капитал целиком — бумаги в любо�
 
 ---
 
-### Task 8: Контракт API
+### Task 9: Контракт API
 
 **Files:**
 - Modify: `backend/app/api/schemas.py`
@@ -2805,11 +3265,12 @@ git commit -m "feat: капитал целиком — бумаги в любо�
 - Modify: `backend/tests/test_api.py`
 
 **Interfaces:**
-- Consumes: `Overview` и `PositionRow` из задачи 7; `cash_by_account` из задачи 5.
+- Consumes: `Overview` и `PositionRow` из задачи 8; `cash_by_account` из задачи 5.
 - Produces: `OverviewOut` с полями `total_value`, `securities_value`,
-  `cash_value`, `blocked_value`, `by_asset_class`, `by_account`, `by_currency`,
+  `cash_value`, `restricted_value`, `by_asset_class`, `by_account`, `by_currency`,
   `position_currencies`, `as_of`, `fx_as_of`, `valued_positions`,
-  `positions_total`; `PositionOut` с `value_base`, `price_source`, `blocked`;
+  `positions_total`; `PositionOut` с `value_base`, `price_source`, `blocked`,
+  `restricted`;
   `CashOut(account: str, currency: str, amount: Decimal, blocked: Decimal)` и
   эндпоинт `GET /api/portfolio/cash`.
 
@@ -2829,7 +3290,7 @@ def test_overview_exposes_capital_parts(client, session):
     assert body["securities_value"] == "3000.0000"
     assert body["cash_value"] == "20782.2700"
     assert body["total_value"] == "23782.2700"
-    assert body["blocked_value"] == "0.0000"
+    assert body["restricted_value"] == "0.0000"
 
 
 def test_positions_expose_price_source_and_blocked(client, session):
@@ -2839,6 +3300,7 @@ def test_positions_expose_price_source_and_blocked(client, session):
 
     assert body[0]["price_source"] in ("moex", "tbank", None)
     assert "blocked" in body[0]
+    assert "restricted" in body[0]
     assert "value_base" in body[0]
 
 
@@ -2865,8 +3327,9 @@ class OverviewOut(BaseModel):
     total_value: Decimal
     securities_value: Decimal
     cash_value: Decimal
-    # Часть капитала в заблокированных бумагах — входит в total_value.
-    blocked_value: Decimal
+    # Часть капитала, которой нельзя распорядиться: заблокированные количества
+    # плюс бумаги, ограниченные в обороте. Входит в total_value.
+    restricted_value: Decimal
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
     # Итог по каждой валюте в ней самой, без пересчёта.
@@ -2879,7 +3342,7 @@ class OverviewOut(BaseModel):
     valued_positions: int
     positions_total: int
 
-    @field_serializer("total_value", "securities_value", "cash_value", "blocked_value")
+    @field_serializer("total_value", "securities_value", "cash_value", "restricted_value")
     def serialize_amount(self, value: Decimal) -> str:
         return f"{value:.4f}"
 
@@ -2908,6 +3371,8 @@ class CashOut(BaseModel):
     price_source: str | None
     # Заблокированная брокером часть количества.
     blocked: Decimal
+    # Бумагой нельзя распорядиться вовсе: ни купить, ни продать.
+    restricted: bool
 
     @field_serializer("quantity", "blocked")
     def serialize_quantity(self, value: Decimal) -> str:
@@ -2928,7 +3393,7 @@ class CashOut(BaseModel):
         total_value=overview.total_value,
         securities_value=overview.securities_value,
         cash_value=overview.cash_value,
-        blocked_value=overview.blocked_value,
+        restricted_value=overview.restricted_value,
         by_asset_class=overview.by_asset_class,
         by_account={
             account_label(accounts[account_id]): value
@@ -2990,7 +3455,7 @@ git commit -m "feat: контракт API с деньгами, блокиров�
 
 ---
 
-### Task 9: Интерфейс — полный капитал, деньги, блокировки
+### Task 10: Интерфейс — полный капитал, деньги, ограничения
 
 **Files:**
 - Modify: `frontend/src/api/client.ts`
@@ -3001,10 +3466,10 @@ git commit -m "feat: контракт API с деньгами, блокиров�
 - Modify: `frontend/src/api/format.test.ts`
 
 **Interfaces:**
-- Consumes: контракт из задачи 8.
+- Consumes: контракт из задачи 9.
 - Produces: типы `Overview` (с `securities_value`, `cash_value`,
-  `blocked_value`, `fx_as_of`), `PositionRow` (с `value_base`, `price_source`,
-  `blocked`), `CashRow`; `api.cash()`; компонент `CashCard`.
+  `restricted_value`, `fx_as_of`), `PositionRow` (с `value_base`, `price_source`,
+  `blocked`, `restricted`), `CashRow`; `api.cash()`; компонент `CashCard`.
 
 - [ ] **Step 1: Обновить типы и клиент**
 
@@ -3016,8 +3481,9 @@ export interface Overview {
   total_value: string;
   securities_value: string;
   cash_value: string;
-  // Часть капитала в заблокированных бумагах — входит в total_value.
-  blocked_value: string;
+  // Часть капитала, которой нельзя распорядиться: заблокированные количества
+  // плюс бумаги, ограниченные в обороте. Входит в total_value.
+  restricted_value: string;
   by_asset_class: Record<string, string>;
   by_account: Record<string, string>;
   // Итог по каждой валюте в ней самой, без пересчёта. Складывать нельзя.
@@ -3038,6 +3504,8 @@ export interface Overview {
   price_source: string | null;
   // Заблокированная брокером часть количества.
   blocked: string;
+  // Бумагой нельзя распорядиться вовсе: ни купить, ни продать.
+  restricted: boolean;
 ```
 
 ```ts
@@ -3077,16 +3545,17 @@ function CapitalParts({ overview }: { overview: Overview }) {
   );
 }
 
-// Заблокированное входит в капитал — брокер считает так же. Но распорядиться
-// им нельзя, и знать об этом нужно рядом с самой цифрой.
-function BlockedNotice({ overview }: { overview: Overview }) {
-  if (overview.blocked_value === "0.0000") return null;
+// Недоступное входит в капитал — брокер считает так же. Но распорядиться им
+// нельзя, и знать об этом нужно рядом с самой цифрой: у владельца больше
+// двадцати таких позиций, это заметная доля портфеля.
+function RestrictedNotice({ overview }: { overview: Overview }) {
+  if (overview.restricted_value === "0.0000") return null;
 
   return (
     <div style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
-      В том числе заблокировано{" "}
+      Недоступно к продаже{" "}
       <span style={{ color: "var(--amber)" }}>
-        {formatMoney(overview.blocked_value, BASE_CURRENCY)}
+        {formatMoney(overview.restricted_value, BASE_CURRENCY)}
       </span>
     </div>
   );
@@ -3094,7 +3563,7 @@ function BlockedNotice({ overview }: { overview: Overview }) {
 ```
 
 В теле `SummaryCard` заменить `<ForeignCurrencyTotals byCurrency={overview.by_currency} />`
-на `<CapitalParts overview={overview} />` и `<BlockedNotice overview={overview} />`,
+на `<CapitalParts overview={overview} />` и `<RestrictedNotice overview={overview} />`,
 а подпись под заголовком — на безусловное «Совокупный капитал» без оговорки
 «рублёвая часть»: оговорка описывала прежнее поведение, когда валютные позиции
 в итог не входили, и теперь она была бы неправдой. Импорт `hasForeignCurrency`
@@ -3158,11 +3627,13 @@ export function CashCard({ rows, error }: { rows: CashRow[]; error: string | nul
 }
 ```
 
-- [ ] **Step 4: Показать источник цены и блокировку в таблице позиций**
+- [ ] **Step 4: Показать источник цены и ограничения в таблице позиций**
 
 В `frontend/src/components/PositionsTable.tsx` в строке позиции: рядом с ценой
 показывать пометку источника, когда цена пришла от брокера, и пометку
-блокировки, когда `blocked` не ноль.
+недоступности — когда бумага ограничена в обороте или заблокирована. Причины
+две, и подсказка у них разная: «ни купить, ни продать» — свойство бумаги,
+«заблокировано N шт.» — состояние конкретного остатка.
 
 ```tsx
 // Цена брокера — не независимая оценка: тот же источник, с чьим снимком мы
@@ -3176,18 +3647,24 @@ function PriceSourceMark({ source }: { source: string | null }) {
   );
 }
 
-function BlockedMark({ blocked }: { blocked: string }) {
-  if (Number.parseFloat(blocked) === 0) return null;
-  return (
-    <span title="Заблокировано брокером" style={{ color: "var(--amber)", marginLeft: 4 }}>
-      🔒
-    </span>
-  );
+// Ограничение бумаги и блокировка количества — разные причины недоступности, и
+// обе встречаются по отдельности. Значок один, подсказка разная: владельцу
+// важно, можно ли распорядиться, но при разборе расхождений важно и почему.
+function RestrictedMark({ restricted, blocked }: { restricted: boolean; blocked: string }) {
+  const blockedQuantity = Number.parseFloat(blocked);
+  if (!restricted && blockedQuantity === 0) return null;
+
+  const title = restricted
+    ? "Ни купить, ни продать: бумага ограничена в обороте"
+    : `Заблокировано брокером: ${formatQuantity(blocked)} шт.`;
+
+  return <span title={title} style={{ color: "var(--amber)", marginLeft: 4 }}>🔒</span>;
 }
 ```
 
 Вставить `<PriceSourceMark source={row.price_source} />` в ячейку цены и
-`<BlockedMark blocked={row.blocked} />` рядом с названием бумаги.
+`<RestrictedMark restricted={row.restricted} blocked={row.blocked} />` рядом с
+названием бумаги. Импорт `formatQuantity` из `../api/format` — он там уже есть.
 
 - [ ] **Step 5: Подключить всё на странице**
 
@@ -3225,7 +3702,7 @@ git commit -m "feat: показ полного капитала, денежны�
 
 ---
 
-### Task 10: Проверка на живых данных
+### Task 11: Проверка на живых данных
 
 **Files:**
 - Create: `backend/app/valuation_check.py`
@@ -3233,7 +3710,7 @@ git commit -m "feat: показ полного капитала, денежны�
 - Modify: `docs/roadmap.md`
 
 **Interfaces:**
-- Consumes: `portfolio_overview` из задачи 7, `TBankConnector`, `TBankClient`.
+- Consumes: `portfolio_overview` из задачи 8, `TBankConnector`, `TBankClient`.
 - Produces: `python -m app.valuation_check` — печатает наш итог по каждому счёту
   рядом с итогом брокера и расхождение между ними.
 
@@ -3315,7 +3792,7 @@ def main() -> None:
                     f"{total_ours - total_theirs:,.2f}")
         logger.info("Оценено позиций: %s из %s", overview.valued_positions,
                     overview.positions_total)
-        logger.info("Из них заблокировано на сумму: %s", f"{overview.blocked_value:,.2f}")
+        logger.info("Из них недоступно к продаже: %s", f"{overview.restricted_value:,.2f}")
 
 
 if __name__ == "__main__":
@@ -3329,8 +3806,13 @@ if __name__ == "__main__":
 
 ```bash
 docker compose up -d --build
+cd backend && uv run python -m app.instruments.backfill   # признак ограничения для 251 инструмента
 curl -X POST http://localhost:8001/api/sync/tbank
 ```
+
+Дозаполнение справочника обязательно и именно до синхронизации: без него
+признак ограничения в обороте останется пустым у всех бумаг, купленных раньше
+окна синхронизации, — а это почти весь портфель.
 
 - [ ] **Step 3: Прогнать сверку**
 
@@ -3348,8 +3830,12 @@ Expected: по каждому счёту «ок». Ориентир на 09.08.2
 
 В `README.md` дописать раздел о курсах и оценке: откуда берутся курсы (ЦБ,
 `XML_daily`; золото — MOEX `GLDRUB_TOM`), что цена может прийти от брокера и
-как это видно на экране, что заблокированные бумаги входят в капитал и
-показываются отдельно, и как запустить сверку `uv run python -m app.valuation_check`.
+как это видно на экране, чем ограничение бумаги в обороте отличается от
+заблокированного количества и почему недоступное всё равно входит в капитал,
+и как запустить сверку `uv run python -m app.valuation_check`. Отдельно
+отметить, что после накатывания миграций нужно один раз прогнать
+`uv run python -m app.instruments.backfill` — иначе признак ограничения у 251
+уже записанного инструмента останется пустым.
 Добавить `/api/portfolio/cash` в перечень эндпоинтов, если он там есть.
 
 - [ ] **Step 5: Отметить фазу в роадмепе**
@@ -3375,14 +3861,20 @@ git commit -m "feat: сверка капитала с итогом брокер�
 ## Самопроверка плана
 
 **Покрытие роадмепа.** Раздел «2a. Капитал целиком» требует пяти вещей:
-курсы ЦБ (задача 1), рублёвая оценка валютных позиций (задачи 3, 4, 7),
+курсы ЦБ (задача 1), рублёвая оценка валютных позиций (задачи 3, 4, 8),
 денежные остатки (задача 5), заблокированные активы отдельной сущностью
-(задача 6), курсовая разница отдельной строкой — **не входит**: она требует
+(задачи 6 и 7), курсовая разница отдельной строкой — **не входит**: она требует
 курса на дату каждой операции и разложения прибыли на бумажную и валютную
 части, а это расчёт доходности, то есть фаза 4. В роадмепе строка про курсовую
-разницу перенесена туда же при обновлении статуса (задача 10, шаг 5).
+разницу перенесена туда же при обновлении статуса (задача 11, шаг 5).
 Признак готовности «капитал включает деньги, ни одна позиция не висит без
-оценки, заблокированное показано отдельно» проверяется задачей 10.
+оценки, недоступное показано отдельно» проверяется задачей 11.
+
+**Про «заблокированные активы».** Владелец имеет в виду не только поле
+`blocked` у брокера, но и ограничение торгов: все бумаги в иностранной валюте
+сейчас недоступны к продаже. Поэтому признаков два и задачи под них две —
+задача 6 (количество на счёте) и задача 7 (свойство бумаги), — а наружу они
+сводятся в одну сумму `restricted_value`.
 
 **Что осознанно не входит в 2a.** Накопленный купонный доход по облигациям
 (`currentNkd` есть в ответе брокера, но это доход, а не стоимость бумаги);
@@ -3390,14 +3882,16 @@ git commit -m "feat: сверка капитала с итогом брокер�
 дату операции; корпоративные действия и переводы бумаг (фаза 2b).
 
 **Согласованность имён.** `TBANK_SOURCE` объявляется в задаче 3 и используется
-в задачах 4 и 7. `LatestPrice` получает поля `currency` и `source` в задаче 3 и
-именно так читается в задаче 7. `BrokerPosition.blocked` вводится в задаче 6 и
+в задачах 4 и 8. `LatestPrice` получает поля `currency` и `source` в задаче 3 и
+именно так читается в задаче 8. `BrokerPosition.blocked` вводится в задаче 6 и
 используется в `store_holdings` там же. `latest_rates`/`to_base` из задачи 1
-используются в задачах 2 и 7, `latest_rate_date` добавляется в задаче 7 шагом 8
+используются в задачах 2 и 8, `latest_rate_date` добавляется в задаче 8 шагом 8
 и потребляется в том же шаге. `cash_by_account` из задачи 5 используется в
-задаче 7. `blocked_by_instrument` из задачи 6 используется в задаче 7.
+задаче 8. `blocked_by_instrument` из задачи 6 и `Instrument.trading_restricted`
+из задачи 7 используются в задаче 8. Поле капитала называется
+`restricted_value` во всех трёх слоях — аналитике, контракте и интерфейсе.
 
-**Порядок.** Задачи 1–6 независимы между собой, кроме пары 5→6 (обе используют
+**Порядок.** Задачи 1–7 независимы между собой, кроме пары 5→6 (обе используют
 `_get_positions`, вводимый в задаче 5) и 3→4 (`TBANK_SOURCE` и ключ
-уникальности цены). Задача 7 требует 1–6, задача 8 требует 7, задача 9 требует
-8, задача 10 — всех.
+уникальности цены). Задача 8 требует 1–7, задача 9 требует 8, задача 10 требует
+9, задача 11 — всех.
