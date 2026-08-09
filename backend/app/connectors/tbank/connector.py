@@ -85,6 +85,10 @@ def _to_broker_instrument(raw: dict, kind: str) -> BrokerInstrument:
         kind=kind,
         name=raw.get("name") or None,
         currency=currency.upper() if currency else None,
+        # Флаги есть и в списочных методах справочника, и в поштучном
+        # GetInstrumentBy — оба пути дают их одинаково.
+        buy_available=raw.get("buyAvailableFlag"),
+        sell_available=raw.get("sellAvailableFlag"),
     )
 
 

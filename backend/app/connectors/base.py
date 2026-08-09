@@ -86,6 +86,12 @@ class BrokerInstrument:
     # (комиссия и налог по валютной бумаге приходят в рублях), и та из них, что
     # случайно оказалась первой, определяла валюту инструмента навсегда.
     currency: str | None = None
+    # Доступность операций по данным справочника брокера. Оба флага False
+    # означают, что бумагой нельзя распорядиться; вывод из этого делает домен
+    # (app/instruments/service.py), а не коннектор. None — брокер сведений не
+    # дал: у уже записанных операций этих ключей в payload нет вовсе.
+    buy_available: bool | None = None
+    sell_available: bool | None = None
 
 
 class BrokerConnector(Protocol):

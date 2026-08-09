@@ -156,4 +156,8 @@ def _instrument_payload(instrument: BrokerInstrument | None) -> dict:
         # самой операции выше: та относится к платежу (комиссия по валютной
         # бумаге приходит в рублях), эта — к бумаге.
         "instrument_currency": instrument.currency,
+        # Доступность операций: по ней домен решает, ограничена ли бумага в
+        # обороте. Едут двумя полями, а не готовым признаком, — вывод доменный.
+        "instrument_buy_available": instrument.buy_available,
+        "instrument_sell_available": instrument.sell_available,
     }

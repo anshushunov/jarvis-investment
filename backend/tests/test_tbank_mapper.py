@@ -235,3 +235,14 @@ def test_payload_has_no_instrument_keys_for_cash_operation():
     result = map_operation(op(type="OPERATION_TYPE_INPUT", figi=""), None)
     assert "instrument_kind" not in result.payload
     assert "instrument_name" not in result.payload
+
+
+def test_payload_carries_availability_flags():
+    instrument = BrokerInstrument(isin="HK0000009866", ticker="9866", kind="share",
+                                  name="Nio", currency="HKD",
+                                  buy_available=False, sell_available=False)
+
+    result = map_operation(op(), instrument)
+
+    assert result.payload["instrument_buy_available"] is False
+    assert result.payload["instrument_sell_available"] is False

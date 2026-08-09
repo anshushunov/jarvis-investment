@@ -37,6 +37,7 @@ def apply_reference(
     kind: str | None,
     name: str | None,
     currency: str | None = None,
+    restricted: bool | None = None,
 ) -> bool:
     """Дозаполняет справочные сведения инструмента. Возвращает True, если
     что-то реально изменилось.
@@ -57,6 +58,10 @@ def apply_reference(
     знать экзотический инструмент, и терять из-за этого уже установленное
     значение незачем. Для вида то же самое делает и явный kinds.OTHER —
     «вид неизвестен» не должен вытеснять известный.
+
+    Признак ограничения в обороте обновляется в обе стороны, в отличие от
+    остальных полей: снятие блокировки — такое же сообщение справочника, как и
+    её появление.
     """
     changed = False
 
@@ -72,21 +77,48 @@ def apply_reference(
         instrument.currency = currency
         changed = True
 
+    # None и False здесь разное: None — «справочник ничего не сказал», и тогда
+    # прежнее значение сохраняется; False — «брокер говорит, что операции
+    # доступны», и признак обязан сняться. Проверка на истинность, как у
+    # остальных полей, склеила бы эти два случая, и разблокированная бумага
+    # осталась бы ограниченной навсегда.
+    if restricted is not None and instrument.trading_restricted != restricted:
+        instrument.trading_restricted = restricted
+        changed = True
+
     return changed
 
 
-def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | None]:
+def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | None, bool | None]:
     """Справочные сведения, положенные коннектором в payload операции (см.
     app/connectors/tbank/mapper.py). Ключей может не быть вовсе — например, у
     операции, записанной в журнал до того, как коннектор научился их класть."""
     kind = op.payload.get("instrument_kind")
     name = op.payload.get("instrument_name")
     currency = op.payload.get("instrument_currency")
+    buy = op.payload.get("instrument_buy_available")
+    sell = op.payload.get("instrument_sell_available")
     return (
         str(kind) if kind else None,
         str(name) if name else None,
         str(currency).upper() if currency else None,
+        _restricted(buy, sell),
     )
+
+
+def _restricted(buy: object, sell: object) -> bool | None:
+    """Ограничена ли бумага в обороте: недоступны обе операции сразу.
+
+    Одного флага мало. Бумага, которую нельзя купить, но можно продать,
+    распоряжению поддаётся — именно так выглядят выпуски, закрытые для новых
+    покупок, но не замороженные. Ограничением считается только пара.
+
+    Хотя бы один флаг отсутствует — сведений нет, возвращаем None: прежнее
+    значение в базе трогать нельзя.
+    """
+    if not isinstance(buy, bool) or not isinstance(sell, bool):
+        return None
+    return not buy and not sell
 
 
 def secid_from_ticker(ticker: str | None) -> str | None:
@@ -115,7 +147,7 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
     нарушение уникального индекса и переиспользует уже вставленную запись — без
     падения всей пачки операций.
     """
-    kind, name, currency = _reference_from(op)
+    kind, name, currency, restricted = _reference_from(op)
     instrument = Instrument(
         isin=op.isin,
         ticker=op.ticker,
@@ -128,6 +160,7 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
         # а платёж хоть какую-то валюту всегда несёт.
         currency=currency or op.currency,
         issuer=name,
+        trading_restricted=bool(restricted),
     )
     try:
         with session.begin_nested():
@@ -141,6 +174,6 @@ def _insert_instrument(session: Session, op: RawOperation) -> Instrument:
         winner = session.execute(
             select(Instrument).where(Instrument.isin == op.isin)
         ).scalar_one()
-        apply_reference(winner, kind, name, currency)
+        apply_reference(winner, kind, name, currency, restricted)
         return winner
     return instrument

@@ -30,9 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrument]) -> int:
-    """Дозаполняет вид, название и валюту всем инструментам, которые нашлись в
-    справочнике `reference` (ключ — ISIN). Возвращает число реально изменённых
-    записей. Инструмент, которого в справочнике нет, не трогается вовсе."""
+    """Дозаполняет вид, название, валюту и признак ограничения в обороте всем
+    инструментам, которые нашлись в справочнике `reference` (ключ — ISIN).
+    Возвращает число реально изменённых записей. Инструмент, которого в
+    справочнике нет, не трогается вовсе."""
     changed = 0
     instruments = session.execute(
         select(Instrument).where(Instrument.isin.is_not(None))
@@ -43,13 +44,25 @@ def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrum
 
         found = reference.get(instrument.isin)
         if found is not None:
-            touched |= apply_reference(instrument, found.kind, found.name, found.currency)
+            touched |= apply_reference(
+                instrument, found.kind, found.name, found.currency,
+                _restricted_from(found),
+            )
 
         if touched:
             changed += 1
 
     session.flush()
     return changed
+
+
+def _restricted_from(found: BrokerInstrument) -> bool | None:
+    """Ограничение в обороте по флагам справочника. Правило то же, что и для
+    операций (app/instruments/service.py): ограничением считается недоступность
+    обеих операций сразу, а отсутствие любого из флагов — отсутствие сведений."""
+    if not isinstance(found.buy_available, bool) or not isinstance(found.sell_available, bool):
+        return None
+    return not found.buy_available and not found.sell_available
 
 
 def _repair_secid(instrument: Instrument) -> bool:
