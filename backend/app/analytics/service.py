@@ -46,9 +46,12 @@ class PositionRow:
 
 @dataclass(frozen=True)
 class Overview:
-    # Только рублёвая часть — см. BASE_CURRENCY.
+    # Только рублёвая часть — см. BASE_CURRENCY. Пока это в точности стоимость
+    # позиций: денежные остатки, депозиты и ручные активы появятся в следующей
+    # фазе. Отдельное поле под стоимость позиций тогда и заведём — сейчас оно
+    # было бы дословным дублем этого, а два одинаковых числа в контракте
+    # заставляют гадать, какое из них главное.
     total_value: Decimal
-    positions_value: Decimal
     # Разбивки считаются по той же рублёвой части, чтобы сходиться с итогом.
     by_asset_class: dict[str, Decimal]
     # Ключ — идентификатор счёта, а не подпись: подпись строится при чтении
@@ -181,7 +184,6 @@ def portfolio_overview(session: Session) -> Overview:
 
     return Overview(
         total_value=total,
-        positions_value=total,
         by_asset_class=by_class,
         by_account=dict(sorted(by_account_id.items())),
         by_currency=dict(sorted(by_currency.items())),

@@ -5,7 +5,6 @@ export interface Overview {
   // Рублёвая часть портфеля: позиции в других валютах сюда не входят, пока нет
   // пересчёта по курсам. Их итоги — в by_currency.
   total_value: string;
-  positions_value: string;
   by_asset_class: Record<string, string>;
   by_account: Record<string, string>;
   // Итог по каждой валюте, включая рубль. Складывать между собой нельзя —

@@ -38,7 +38,7 @@ def seed(session):
 def test_total_value_uses_last_prices(session):
     seed(session)
     overview = portfolio_overview(session)
-    assert overview.positions_value == Decimal("7350.0000")
+    assert overview.total_value == Decimal("7350.0000")
 
 
 def test_fund_is_counted_by_its_asset_class(session):
@@ -118,7 +118,7 @@ def test_overview_reports_valuation_coverage(session):
     assert overview.valued_positions == 3
     # Итог по-прежнему только по оценённым — меняется не он, а то, что рядом
     # с ним теперь видно покрытие.
-    assert overview.positions_value == Decimal("7350.0000")
+    assert overview.total_value == Decimal("7350.0000")
 
 
 def test_overview_coverage_is_full_when_every_position_is_priced(session):
@@ -383,4 +383,4 @@ def test_by_account_keeps_same_name_accounts_apart(session):
     assert len(overview.by_account) == 2
     assert overview.by_account[first.id] == Decimal("150.0000")
     assert overview.by_account[second.id] == Decimal("300.0000")
-    assert sum(overview.by_account.values()) == overview.positions_value
+    assert sum(overview.by_account.values()) == overview.total_value

@@ -37,8 +37,12 @@ def seed(session):
 def test_overview_returns_strings_not_floats(client, session):
     seed(session)
     payload = client.get("/api/portfolio/overview").json()
-    assert payload["positions_value"] == "1500.0000"
+    assert payload["total_value"] == "1500.0000"
     assert isinstance(payload["by_asset_class"]["equity"], str)
+    # Дословного дубля total_value в контракте больше нет: два одинаковых числа
+    # заставляли гадать, какое из них главное. Отдельная стоимость позиций
+    # вернётся вместе с денежными остатками, когда перестанет их дублировать.
+    assert "positions_value" not in payload
 
 
 def test_overview_includes_as_of_date(client, session):

@@ -7,7 +7,6 @@ from pydantic import BaseModel, field_serializer
 class OverviewOut(BaseModel):
     # Рублёвая часть портфеля; позиции в других валютах — в by_currency.
     total_value: Decimal
-    positions_value: Decimal
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
     by_currency: dict[str, Decimal]
@@ -19,7 +18,7 @@ class OverviewOut(BaseModel):
     valued_positions: int
     positions_total: int
 
-    @field_serializer("total_value", "positions_value")
+    @field_serializer("total_value")
     def serialize_amount(self, value: Decimal) -> str:
         return f"{value:.4f}"
 

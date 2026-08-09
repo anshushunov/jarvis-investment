@@ -28,7 +28,6 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
     }
     return OverviewOut(
         total_value=overview.total_value,
-        positions_value=overview.positions_value,
         by_asset_class=overview.by_asset_class,
         by_account={
             account_label(accounts[account_id]): value
