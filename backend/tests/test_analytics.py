@@ -407,6 +407,36 @@ def test_breakdowns_add_up_to_the_ruble_total(session):
     assert sum(overview.by_account.values()) == overview.total_value
 
 
+def test_breakdowns_add_up_to_the_total_with_cash_too(session):
+    """Та же сходимость, но на полном составе капитала: бумаги в двух валютах,
+    остатки в двух валютах и второй счёт, у которого из активов только деньги.
+    Денежный цикл — самое свежее место обзора, и расхождение разбивок с итогом
+    появится в нём первым; на одних бумагах его не увидеть."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("10"),
+                        price=Decimal("300"), currency="RUB")
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("20782.27"), blocked=Decimal("0")),
+        BrokerCash(currency="HKD", amount=Decimal("150"), blocked=Decimal("0")),
+    ])
+    cash_only = add_account(session, external_id="acc-2")
+    store_cash(session, cash_only, [BrokerCash(currency="RUB", amount=Decimal("500"),
+                                               blocked=Decimal("0"))])
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.securities_value == Decimal("18457.2624")
+    assert overview.cash_value == Decimal("22853.1300")
+    assert overview.total_value == Decimal("41310.3924")
+    assert sum(overview.by_asset_class.values()) == overview.total_value
+    assert sum(overview.by_account.values()) == overview.total_value
+    # Счёт без единой бумаги обязан быть в разбивке: деньги — тоже капитал.
+    assert sorted(overview.by_account) == [account.id, cash_only.id]
+
+
 def test_foreign_position_with_a_rate_is_counted_as_valued(session):
     """Курс появился — и валютная позиция становится полноценной частью
     капитала, а покрытие оценкой полным. Ровно этого не хватало: раньше такая
@@ -573,6 +603,87 @@ def test_instrument_restricted_in_trading_counts_whole_position(session):
     overview = portfolio_overview(session)
 
     assert overview.restricted_value == Decimal("15457.2624")
+
+
+def test_blocked_more_than_the_ledger_knows_does_not_exceed_the_position(session):
+    """Заблокированное количество приходит из снимка брокера, количество
+    позиции — из журнала операций, и расхождение между ними система не
+    предполагает, а специально ищет и хранит (сверка, quantity_mismatch). У
+    HK0000123577 брокер показывает balance=0 и blocked=92; если журнал знает
+    десять бумаг, доля «92 из 10» дала бы недоступного вдевятеро больше, чем
+    стоит вся позиция, — на экране «недоступно 9 200 ₽» при капитале 1 000 ₽."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000123577", quantity=Decimal("10"),
+                        price=Decimal("100"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="HK0000123577", ticker="x",
+                                                     quantity=Decimal("92"),
+                                                     blocked=Decimal("92"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("1000.0000")
+    assert overview.restricted_value == Decimal("1000.0000")
+
+
+def test_blocked_short_position_does_not_flip_the_sign(session):
+    """Короткая позиция стоит отрицательных денег, и заблокированная её часть —
+    такое же обязательство. Деление на отрицательное количество как есть
+    переворачивало знак: недоступное показывалось положительным, будто шорт чем-то
+    владеет, и вдобавок не сходилось со знаком капитала."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("-10"),
+                        price=Decimal("100"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="RU0009029540", ticker="SBER",
+                                                     quantity=Decimal("-10"),
+                                                     blocked=Decimal("10"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("-1000.0000")
+    assert overview.restricted_value == Decimal("-1000.0000")
+
+
+def test_blocked_cash_counts_as_restricted(session):
+    """Заблокированные деньги — самая бесспорная часть ответа на вопрос «чем я
+    не могу распорядиться»: на живом счёте валюта бывает зарезервирована
+    целиком. В капитал они входят в составе остатка, а не сверх него, поэтому
+    cash_value от них не меняется."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("20782.27"),
+                                             blocked=Decimal("782.27"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.cash_value == Decimal("20782.2700")
+    assert overview.total_value == Decimal("20782.2700")
+    assert overview.restricted_value == Decimal("782.2700")
+
+
+def test_blocked_foreign_cash_is_restricted_by_rate(session):
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="HKD", amount=Decimal("150"),
+                                             blocked=Decimal("50"))])
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.cash_value == Decimal("1570.8600")
+    assert overview.restricted_value == Decimal("523.6200")
+
+
+def test_blocked_cash_without_a_rate_is_not_counted_as_restricted(session):
+    """Курса нет — заблокированный остаток нечем оценить в рублях, и в
+    restricted_value он войти не может, ровно как не входит в сам капитал.
+    Ноль вместо оценки соврал бы в обе стороны сразу."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="USD", amount=Decimal("500"),
+                                             blocked=Decimal("500"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("0.0000")
+    assert overview.restricted_value == Decimal("0.0000")
+    assert overview.by_currency["USD"] == Decimal("500.0000")
 
 
 def test_restriction_and_blocking_are_not_added_up(session):

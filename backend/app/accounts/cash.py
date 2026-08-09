@@ -36,3 +36,26 @@ def cash_by_account(session: Session) -> dict[int, dict[str, Decimal]]:
     for balance in session.execute(select(CashBalance)).scalars():
         result.setdefault(balance.account_id, {})[balance.currency] = balance.amount
     return result
+
+
+def blocked_cash_by_account(session: Session) -> dict[int, dict[str, Decimal]]:
+    """Заблокированные части остатков: идентификатор счёта → валюта → сумма.
+
+    Отдельной функцией, а не вторым числом в ответе `cash_by_account`: вопросы
+    разные — «сколько денег на счёте» и «сколько из них нельзя тронуть», — и
+    склеивать их в один ответ значит заставлять каждого читателя разбираться,
+    какая половина ему нужна. Ровно так же устроены бумаги
+    (`blocked_by_instrument` рядом со снимком позиций).
+
+    Нулевые блокировки пропускаются: строка «заблокировано 0» ничего не
+    сообщает, а отсутствие ключа отвечает на вопрос так же точно.
+
+    Заблокированная сумма входит в `amount`, а не прибавляется к нему (см.
+    `BrokerCash`): капитал от неё не меняется, меняется только та его часть,
+    которой нельзя распорядиться.
+    """
+    result: dict[int, dict[str, Decimal]] = {}
+    rows = session.execute(select(CashBalance).where(CashBalance.blocked != 0)).scalars()
+    for balance in rows:
+        result.setdefault(balance.account_id, {})[balance.currency] = balance.blocked
+    return result

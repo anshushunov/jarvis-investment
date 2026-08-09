@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from app.accounts.cash import cash_by_account, store_cash
+from app.accounts.cash import blocked_cash_by_account, cash_by_account, store_cash
 from app.connectors.base import BrokerCash
 from app.models import Account, CashBalance
 
@@ -68,3 +68,25 @@ def test_cash_by_account_groups_balances(session):
     grouped = cash_by_account(session)
 
     assert grouped[account.id] == {"RUB": Decimal("100.0000"), "USD": Decimal("5.0000")}
+
+
+def test_blocked_cash_is_reported_apart_from_the_balance(session):
+    """Заблокированная часть входит в остаток, а не прибавляется к нему, и
+    вопрос про неё — отдельный: «чем нельзя распорядиться», а не «сколько
+    денег». Поэтому и функция отдельная, и валюта без блокировки в её ответ не
+    попадает вовсе — «заблокировано 0» ничего не сообщает."""
+    account = add_account(session)
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("100"), blocked=Decimal("10")),
+        BrokerCash(currency="USD", amount=Decimal("5"), blocked=Decimal("0")),
+    ])
+
+    assert blocked_cash_by_account(session) == {account.id: {"RUB": Decimal("10.0000")}}
+
+
+def test_blocked_cash_is_empty_when_nothing_is_blocked(session):
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("100"),
+                                             blocked=Decimal("0"))])
+
+    assert blocked_cash_by_account(session) == {}

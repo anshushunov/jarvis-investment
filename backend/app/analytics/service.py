@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.accounts.cash import cash_by_account
+from app.accounts.cash import blocked_cash_by_account, cash_by_account
 from app.analytics.valuation import value_position
 from app.instruments import kinds
 from app.marketdata.fx import latest_rate_date, latest_rates, to_base
@@ -188,7 +188,11 @@ def portfolio_overview(session: Session) -> Overview:
     # Один проход по таблице цен на весь показ дашборда: цена, её валюта и её
     # дата приходят вместе (см. LatestPrice в app/marketdata/service.py).
     prices = latest_prices(session)
-    rates = latest_rates(session, moscow_today())
+    # Дата берётся один раз на весь обзор: два отдельных вызова разошлись бы на
+    # сутки у прогона, начатого за миг до московской полуночи, и курсы оказались
+    # бы датированы не тем днём, по которому посчитаны.
+    today = moscow_today()
+    rates = latest_rates(session, today)
     blocked = blocked_by_instrument(session)
 
     by_class: dict[str, Decimal] = {}
@@ -241,22 +245,43 @@ def portfolio_overview(session: Session) -> Overview:
             restricted_value = money(restricted_value + valued.value_base)
         elif blocked_quantity and position.quantity != 0:
             # Доля по количеству: цена у заблокированной и свободной части одна
-            # и та же бумага.
-            restricted_value = money(
-                restricted_value + valued.value_base * blocked_quantity / position.quantity
-            )
+            # и та же бумага. Доля берётся от модулей и обрезается единицей,
+            # потому что числитель и знаменатель приходят из разных источников:
+            # blocked — из снимка брокера (broker_holding), quantity — из
+            # журнала операций. Их расхождение здесь не гипотеза: система его
+            # специально ищет и хранит отдельной таблицей со статусом
+            # quantity_mismatch (app/sync/reconcile.py). Без обрезки бумага, у
+            # которой брокер показывает blocked 92 при десяти в журнале, дала бы
+            # недоступного в девять раз больше собственной стоимости; без
+            # модулей знаковое деление у короткой позиции превратило бы
+            # обязательство в положительное «недоступно».
+            share = min(abs(blocked_quantity) / abs(position.quantity), Decimal("1"))
+            restricted_value = money(restricted_value + valued.value_base * share)
 
     cash_total = money("0")
+    blocked_cash = blocked_cash_by_account(session)
     for account_id, balances in cash_by_account(session).items():
         for currency, amount in balances.items():
+            # Остаток виден в своей валюте всегда, даже когда пересчитать его
+            # нечем: иначе валюта без курса исчезает бесследно.
+            by_currency[currency] = money(by_currency.get(currency, money("0")) + amount)
+
+            # Заблокированная часть остатка недоступна к распоряжению так же,
+            # как заблокированные бумаги, и в restricted_value входит наравне с
+            # ними. В капитал она уже входит в составе amount, а не сверх него
+            # (см. BrokerCash), поэтому cash_total от неё не меняется.
+            blocked_amount = blocked_cash.get(account_id, {}).get(currency)
+            if blocked_amount is not None:
+                blocked_in_base = to_base(blocked_amount, currency, rates)
+                if blocked_in_base is not None:
+                    restricted_value = money(restricted_value + blocked_in_base)
+
             in_base = to_base(amount, currency, rates)
             if in_base is None:
-                # Курса нет — остаток в капитал не входит, но в разбивке по
-                # валютам виден: иначе он исчезает бесследно.
-                by_currency[currency] = money(by_currency.get(currency, money("0")) + amount)
+                # Курса нет — в рублёвый капитал и рублёвые разбивки остаток
+                # войти не может.
                 continue
             cash_total = money(cash_total + in_base)
-            by_currency[currency] = money(by_currency.get(currency, money("0")) + amount)
             klass = cash_asset_class(currency)
             by_class[klass] = money(by_class.get(klass, money("0")) + in_base)
             by_account_id[account_id] = money(
@@ -277,7 +302,7 @@ def portfolio_overview(session: Session) -> Overview:
         # главной цифры обеспечивается признаком покрытия рядом
         # (valued_positions/positions_total), а не сдвигом даты назад.
         as_of=as_of,
-        fx_as_of=latest_rate_date(session, moscow_today()),
+        fx_as_of=latest_rate_date(session, today),
         valued_positions=valued_positions,
         positions_total=positions_total,
     )
