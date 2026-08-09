@@ -7,7 +7,7 @@ from app.timeutils import MOSCOW_TZ, moscow_now, moscow_today
 def test_scheduler_registers_expected_jobs():
     scheduler = build_scheduler()
     job_ids = {job.id for job in scheduler.get_jobs()}
-    assert job_ids == {"refresh_prices", "daily_snapshot", "sync_tbank"}
+    assert job_ids == {"refresh_prices", "refresh_fx", "daily_snapshot", "sync_tbank"}
 
 
 def test_snapshot_runs_after_market_close():
@@ -38,3 +38,10 @@ def test_calendar_date_is_taken_in_moscow_not_in_container_timezone():
     assert utc_evening.astimezone(MOSCOW_TZ).date() == date(2026, 3, 12)
 
     assert moscow_today() == moscow_now().date()
+
+
+def test_fx_job_is_registered():
+    # build_scheduler() здесь не стартует (как и в остальных тестах файла),
+    # поэтому shutdown() не нужен и упал бы с SchedulerNotRunningError.
+    scheduler = build_scheduler()
+    assert scheduler.get_job("refresh_fx") is not None

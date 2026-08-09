@@ -1,7 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
-from app.marketdata.fx import latest_rates, refresh_fx_rates, to_base
+from app.marketdata.fx import latest_rates, refresh_fx_rates, refresh_metal_rates, to_base
+from app.marketdata.moex import MoexQuote
 from app.models import FxRate
 
 
@@ -67,3 +68,35 @@ def test_to_base_returns_none_for_unknown_currency(session):
 
     assert to_base(Decimal("100"), "HKD", rates) is None
     assert to_base(Decimal("100"), "RUB", rates) == Decimal("100.0000")
+
+
+class FakeMoexForMetals:
+    def __init__(self, prices: dict[str, Decimal | None]) -> None:
+        self.prices = prices
+        self.calls: list[tuple[str, str, str]] = []
+
+    def quote(self, secid: str, market: str = "shares", engine: str = "stock") -> MoexQuote:
+        self.calls.append((secid, engine, market))
+        return MoexQuote(price=self.prices.get(secid))
+
+
+def test_gold_rate_comes_from_moex(session):
+    """У ЦБ в XML_daily драгоценных металлов нет, а в денежных остатках
+    Т-Банка золото лежит наравне с валютами — 10 граммов под кодом xau."""
+    client = FakeMoexForMetals({"GLDRUB_TOM": Decimal("11410")})
+
+    written = refresh_metal_rates(session, client, date(2026, 8, 9))
+
+    assert written == 1
+    assert client.calls == [("GLDRUB_TOM", "currency", "selt")]
+    assert latest_rates(session, date(2026, 8, 9))["XAU"] == Decimal("11410")
+    assert session.query(FxRate).one().source == "moex"
+
+
+def test_metal_without_quote_is_skipped(session):
+    """Нет котировки — нет строки курса. Позиция в золоте останется
+    неоценённой, и это честнее нуля."""
+    written = refresh_metal_rates(session, FakeMoexForMetals({}), date(2026, 8, 9))
+
+    assert written == 0
+    assert "XAU" not in latest_rates(session, date(2026, 8, 9))

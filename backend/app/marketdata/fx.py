@@ -62,6 +62,43 @@ def latest_rates(session: Session, on_date: date) -> dict[str, Decimal]:
     return result
 
 
+MOEX_SOURCE = "moex"
+
+# Металлы в денежных остатках Т-Банка приходят валютными кодами (`xau` — 10 это
+# граммы). У ЦБ в XML_daily металлов нет вовсе, поэтому курс берётся с MOEX,
+# где GLDRUB_TOM котируется в рублях за грамм. Серебро, платина и палладий
+# добавляются сюда же, когда появятся в остатках: пока их нет, заводить
+# непроверенные идентификаторы незачем.
+METAL_SECIDS = {"XAU": "GLDRUB_TOM"}
+
+
+class QuoteSource(Protocol):
+    def quote(self, secid: str, market: str = ..., engine: str = ...) -> object: ...
+
+
+def refresh_metal_rates(session: Session, client: QuoteSource, on_date: date) -> int:
+    """Курсы металлов на дату, из тех же торгов MOEX, что и валюты (движок
+    currency, рынок selt). Пишутся под запрошенной датой, а не под датой
+    установления: у биржевой цены нет «даты установления», она торговая."""
+    written = 0
+    for currency, secid in METAL_SECIDS.items():
+        quote = client.quote(secid, market="selt", engine="currency")
+        price = getattr(quote, "price", None)
+        if price is None:
+            continue
+        statement = insert(FxRate).values(
+            currency=currency, on_date=on_date, rate=price, source=MOEX_SOURCE
+        ).on_conflict_do_update(
+            index_elements=[FxRate.currency, FxRate.on_date],
+            set_={"rate": price, "source": MOEX_SOURCE},
+        )
+        session.execute(statement)
+        written += 1
+
+    session.flush()
+    return written
+
+
 def to_base(amount: Decimal, currency: str, rates: dict[str, Decimal]) -> Decimal | None:
     """Сумма в рублях либо None, если курса нет.
 
