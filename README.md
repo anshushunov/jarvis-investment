@@ -5,6 +5,9 @@
 Т-Банка и снимает ежедневный снимок стоимости портфеля — без ручных действий
 владельца.
 
+Куда движется проект — [`docs/roadmap.md`](docs/roadmap.md). Описание системы
+целиком — [`docs/superpowers/specs/2026-08-07-jarvis-investment-design.md`](docs/superpowers/specs/2026-08-07-jarvis-investment-design.md).
+
 ## Требования
 
 - Docker с `docker compose` (Docker Desktop или аналог, например Rancher Desktop) —
