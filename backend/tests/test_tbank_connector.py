@@ -435,6 +435,48 @@ def test_fetch_instrument_reference_is_keyed_by_isin_and_keeps_kind():
 
 
 @respx.mock
+def test_fetch_instrument_reference_carries_availability_flags():
+    """Признак ограничения в обороте (задача 7) собирается из buyAvailableFlag
+    и sellAvailableFlag справочника. Флаги обязаны доехать уже через списочный
+    путь — тот самый, которым fetch_instrument_reference кормит backfill, —
+    а не только через поштучный GetInstrumentBy ниже."""
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG000BJ35N5", "ticker": "9866", "isin": "HK0000009866",
+                 "name": "Nio", "currency": "hkd",
+                 "buyAvailableFlag": False, "sellAvailableFlag": False}],
+    )
+
+    reference = TBankConnector(TOKEN).fetch_instrument_reference()
+
+    instrument = reference["HK0000009866"]
+    assert instrument.buy_available is False
+    assert instrument.sell_available is False
+
+
+@respx.mock
+def test_fetch_operations_carries_availability_flags_from_get_instrument_by():
+    """Тот же признак — но по поштучному запасному пути (FIGI не нашёлся ни в
+    одном списочном методе). Оба пути разбираются общей _to_broker_instrument,
+    но по отдельности их пока не проверял ни один тест."""
+    respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(return_value=_one_buy("TCS00A0EXOTIC"))
+    _mock_instrument_lists()
+    respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
+        return_value=httpx.Response(200, json={
+            "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC",
+                           "instrumentType": "bond", "name": "Экзотика",
+                           "buyAvailableFlag": False, "sellAvailableFlag": False}
+        })
+    )
+
+    operations = TBankConnector(TOKEN).fetch_operations(
+        "1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert operations[0].payload["instrument_buy_available"] is False
+    assert operations[0].payload["instrument_sell_available"] is False
+
+
+@respx.mock
 def test_fetch_operations_without_figis_does_not_call_instrument_lists():
     respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
         return_value=httpx.Response(200, json={
