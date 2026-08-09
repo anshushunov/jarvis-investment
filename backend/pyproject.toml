@@ -1,0 +1,33 @@
+[project]
+name = "jarvis-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",
+    # tinkoff-investments (task 9): пакет удалён с PyPI, upstream архивирован.
+    # Заменён собственным REST-клиентом поверх httpx (app/connectors/tbank).
+    "certifi>=2026.7.22",
+    "apscheduler>=3.11",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.9.1",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "respx>=0.22",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+package = false

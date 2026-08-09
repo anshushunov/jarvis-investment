@@ -1,1 +1,8 @@
 .superpowers/
+.backup/
+.env
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.playwright-mcp/
