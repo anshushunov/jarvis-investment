@@ -37,6 +37,9 @@ class FakeConnector:
     def fetch_prices(self, account_external_id):
         return self.prices
 
+    def fetch_cash(self, account_external_id):
+        return []
+
 
 class TwoAccountsConnector:
     """Первый счёт несёт битые данные (kind длиннее колонки account.kind —
@@ -59,6 +62,9 @@ class TwoAccountsConnector:
         return []
 
     def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 
@@ -86,6 +92,9 @@ class LateDbFailureConnector:
         return []
 
     def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 
@@ -116,6 +125,9 @@ class TwoAccountsRecordingConnector:
     def fetch_prices(self, account_external_id):
         return []
 
+    def fetch_cash(self, account_external_id):
+        return []
+
 
 class AccountWithOpeningDateConnector:
     """Брокер, отдающий дату открытия счёта, — как настоящий T-Invest API."""
@@ -135,6 +147,9 @@ class AccountWithOpeningDateConnector:
         return []
 
     def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 

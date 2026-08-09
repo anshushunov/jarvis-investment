@@ -5,7 +5,7 @@ from decimal import Decimal
 import httpx
 import respx
 
-from app.connectors.base import BrokerAccount, BrokerPosition, BrokerPrice
+from app.connectors.base import BrokerAccount, BrokerCash, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
 from app.models import OperationType
@@ -589,6 +589,83 @@ def test_fetch_prices_skips_position_without_price():
     )
 
     assert TBankConnector(TOKEN).fetch_prices("1000000001") == []
+
+
+@respx.mock
+def test_fetch_cash_reads_money_and_blocked():
+    """Денежные остатки лежат в GetPositions.money по валютам. Золото приходит
+    там же валютным кодом xau — граммами, и в брокерский итог по счёту оно
+    входит наравне с валютами."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [
+                {"currency": "rub", "units": "20782", "nano": 270000000},
+                {"currency": "usd", "units": "0", "nano": 380000000},
+                {"currency": "xau", "units": "10", "nano": 0},
+            ],
+            "blocked": [{"currency": "rub", "units": "500", "nano": 0}],
+            "securities": [],
+        })
+    )
+
+    cash = TBankConnector(TOKEN).fetch_cash("1000000001")
+
+    assert sorted(cash, key=lambda c: c.currency) == [
+        BrokerCash(currency="RUB", amount=Decimal("20782.2700"), blocked=Decimal("500.0000")),
+        BrokerCash(currency="USD", amount=Decimal("0.3800"), blocked=Decimal("0")),
+        BrokerCash(currency="XAU", amount=Decimal("10.0000"), blocked=Decimal("0")),
+    ]
+
+
+@respx.mock
+def test_fetch_cash_keeps_negative_balance():
+    """Минус на счёте — не ошибка разбора: на «Копилке» владельца рублёвый
+    остаток равен −3571,34. Обнулить его значит завысить капитал."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [{"currency": "rub", "units": "-3571", "nano": -340000000}],
+            "blocked": [],
+            "securities": [],
+        })
+    )
+
+    assert TBankConnector(TOKEN).fetch_cash("1000000001") == [
+        BrokerCash(currency="RUB", amount=Decimal("-3571.3400"), blocked=Decimal("0"))
+    ]
+
+
+@respx.mock
+def test_fetch_cash_returns_empty_when_account_has_no_positions_endpoint():
+    """GetPositions отвечает 404 «Account not found» для счёта типа
+    ACCOUNT_TYPE_DFA (у владельца это «Смарт-счет»). Один такой счёт не должен
+    ронять синхронизацию остальных — денег на нём просто нет."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(404, json={
+            "code": 5, "message": "Account not found", "description": "50004",
+        })
+    )
+
+    assert TBankConnector(TOKEN).fetch_cash("1000000001") == []
+
+
+@respx.mock
+def test_fetch_positions_snapshot_is_cached_across_repeated_cash_calls():
+    """_get_positions — тот же образец кэша, что и _get_portfolio: второй
+    вызов fetch_cash на том же счёте не должен снова ходить в сеть (задача 6
+    добавит ещё одного читателя того же снимка)."""
+    positions_route = respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [{"currency": "rub", "units": "100", "nano": 0}],
+            "blocked": [],
+            "securities": [],
+        })
+    )
+
+    connector = TBankConnector(TOKEN)
+    connector.fetch_cash("1000000001")
+    connector.fetch_cash("1000000001")
+
+    assert positions_route.call_count == 1
 
 
 @respx.mock

@@ -1,21 +1,29 @@
 import logging
 import time
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Callable
 
 import httpx
 
-from app.connectors.base import BrokerAccount, BrokerInstrument, BrokerPosition, BrokerPrice
+from app.connectors.base import BrokerAccount, BrokerCash, BrokerInstrument, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS, INSTRUMENT_STATUS_BASE, TBankClient
 from app.connectors.tbank.mapper import map_operation
 from app.connectors.tbank.quotation import to_money, to_quantity
 from app.instruments import kinds
 from app.ledger.schemas import RawOperation
+from app.money import money
 
 ACCOUNT_KIND = {
     "ACCOUNT_TYPE_TINKOFF": "brokerage",
     "ACCOUNT_TYPE_TINKOFF_IIS": "iis",
 }
+
+# Коды ошибок HTTP, при которых счёт просто не поддерживает вызов, а не сломан.
+# GetPositions отвечает 404 «Account not found» для счетов типа
+# ACCOUNT_TYPE_DFA (цифровые финансовые активы) — денег и бумаг в привычном
+# смысле там нет, и падать из-за этого всей синхронизацией незачем.
+_NO_SUCH_ACCOUNT = 404
 
 # Вид инструмента по имени списочного метода справочника (INSTRUMENT_LIST_KINDS):
 # сами объекты Share/Bond/Etf/... поля с видом не несут — вид известен только из
@@ -123,6 +131,14 @@ class TBankConnector:
         # разных, между которыми цена могла успеть измениться, — сверка
         # количества и оценка стоимости теперь согласованы.
         self._portfolio_cache: dict[str, list[dict]] = {}
+        # Снимок GetPositions по счёту — тот же образец кэша, что и у
+        # _portfolio_cache выше, и по той же причине: fetch_cash (задача 5) и
+        # заблокированное количество бумаг (задача 6) читают один и тот же
+        # вызов, и второй из них не должен снова ходить в сеть за тем же
+        # счётом. Значение — None для счетов, которые GetPositions не
+        # поддерживает (_NO_SUCH_ACCOUNT), чтобы такой отказ тоже кэшировался,
+        # а не повторял неудачный запрос на каждое обращение.
+        self._positions_cache: dict[str, dict | None] = {}
 
     def fetch_accounts(self) -> list[BrokerAccount]:
         return [
@@ -214,6 +230,59 @@ class TBankConnector:
                 continue
             prices.append(BrokerPrice(isin=instrument.isin, price=price, currency=currency))
         return prices
+
+    def fetch_cash(self, account_external_id: str) -> list[BrokerCash]:
+        """Денежные остатки счёта по данным OperationsService/GetPositions.
+
+        Источник намеренно один: то же самое (в рублях, долларах, юанях и
+        золоте) приходит и здесь массивом по валютам, и в GetPortfolio
+        псевдо-инструментами (RUB000UTSTOM и подобными). Взять оба значило бы
+        удвоить деньги в капитале — вторые в систему и так не попадают
+        (fetch_positions/fetch_prices пропускают всё без ISIN)."""
+        payload = self._get_positions(account_external_id)
+        if payload is None:
+            return []
+
+        blocked_by_currency: dict[str, Decimal] = {}
+        for item in payload.get("blocked") or []:
+            currency = (item.get("currency") or "").upper()
+            if currency:
+                blocked_by_currency[currency] = to_money(item)
+
+        balances: list[BrokerCash] = []
+        for item in payload.get("money") or []:
+            currency = (item.get("currency") or "").upper()
+            if not currency:
+                continue
+            balances.append(BrokerCash(
+                currency=currency,
+                amount=to_money(item),
+                blocked=blocked_by_currency.get(currency, money("0")),
+            ))
+        return balances
+
+    def _get_positions(self, account_external_id: str) -> dict | None:
+        """Ответ GetPositions, закэшированный на срок жизни коннектора — по
+        тому же образцу, что и _get_portfolio (см. self._portfolio_cache в
+        __init__): вызывается и fetch_cash (задача 5), и заблокированным
+        количеством бумаг (задача 6), и второй вызов на том же счёте не должен
+        снова ходить в сеть.
+
+        Возвращает None, если счёт этот вызов не поддерживает (см.
+        _NO_SUCH_ACCOUNT) — это не ошибка, а особенность типа счёта."""
+        if account_external_id not in self._positions_cache:
+            try:
+                self._positions_cache[account_external_id] = self._client.get_positions(account_external_id)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != _NO_SUCH_ACCOUNT:
+                    raise
+                logger.info(
+                    "GetPositions недоступен для счёта %s (счёт особого типа) — "
+                    "остатки и блокировки по нему не читаются",
+                    account_external_id,
+                )
+                self._positions_cache[account_external_id] = None
+        return self._positions_cache[account_external_id]
 
     def fetch_instrument_reference(self) -> dict[str, BrokerInstrument]:
         """Справочник инструментов брокера, ключ — ISIN. Нужен разовому

@@ -1,0 +1,70 @@
+from decimal import Decimal
+
+from app.accounts.cash import cash_by_account, store_cash
+from app.connectors.base import BrokerCash
+from app.models import Account, CashBalance
+
+
+def add_account(session, external_id: str = "acc-1") -> Account:
+    account = Account(broker="tbank", kind="brokerage", external_id=external_id,
+                      name="Счёт", currency="RUB")
+    session.add(account)
+    session.flush()
+    return account
+
+
+def test_stores_balances_per_currency(session):
+    account = add_account(session)
+
+    written = store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("20782.27"), blocked=Decimal("0")),
+        BrokerCash(currency="XAU", amount=Decimal("10"), blocked=Decimal("0")),
+    ])
+
+    assert written == 2
+    stored = session.query(CashBalance).order_by(CashBalance.currency).all()
+    assert [(b.currency, b.amount) for b in stored] == [
+        ("RUB", Decimal("20782.2700")), ("XAU", Decimal("10.0000"))
+    ]
+
+
+def test_currency_gone_from_broker_is_removed(session):
+    """Остаток — снимок, а не журнал: валюта, которой у брокера больше нет,
+    обязана исчезнуть, иначе проданная валюта вечно висит в капитале."""
+    account = add_account(session)
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("100"), blocked=Decimal("0")),
+        BrokerCash(currency="EUR", amount=Decimal("1"), blocked=Decimal("0")),
+    ])
+
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("100"),
+                                             blocked=Decimal("0"))])
+
+    assert [b.currency for b in session.query(CashBalance).all()] == ["RUB"]
+
+
+def test_balances_of_other_accounts_are_untouched(session):
+    first = add_account(session, "acc-1")
+    second = add_account(session, "acc-2")
+    store_cash(session, first, [BrokerCash(currency="RUB", amount=Decimal("100"),
+                                           blocked=Decimal("0"))])
+    store_cash(session, second, [BrokerCash(currency="USD", amount=Decimal("5"),
+                                            blocked=Decimal("0"))])
+
+    store_cash(session, first, [])
+
+    assert [(b.account_id, b.currency) for b in session.query(CashBalance).all()] == [
+        (second.id, "USD")
+    ]
+
+
+def test_cash_by_account_groups_balances(session):
+    account = add_account(session)
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("100"), blocked=Decimal("10")),
+        BrokerCash(currency="USD", amount=Decimal("5"), blocked=Decimal("0")),
+    ])
+
+    grouped = cash_by_account(session)
+
+    assert grouped[account.id] == {"RUB": Decimal("100.0000"), "USD": Decimal("5.0000")}

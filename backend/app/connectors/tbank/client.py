@@ -185,6 +185,16 @@ class TBankClient:
     def get_portfolio(self, account_id: str) -> list[dict]:
         return self._post(OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account_id}).get("positions", [])
 
+    def get_positions(self, account_id: str) -> dict:
+        """OperationsService/GetPositions — денежные остатки и заблокированные
+        количества бумаг.
+
+        Это не то же самое, что GetPortfolio: там позиции с оценкой, здесь
+        остатки. Заблокированная часть есть только здесь, а деньги здесь
+        приходят массивом по валютам, тогда как в GetPortfolio они размазаны по
+        псевдо-инструментам (RUB000UTSTOM и подобным)."""
+        return self._post(OPERATIONS_SERVICE, "GetPositions", {"accountId": account_id})
+
     def get_instrument_by_figi(self, figi: str) -> dict | None:
         """Поштучное разрешение одного инструмента по FIGI. Оставлен как
         запасной путь для того, чего не нашлось в list_instruments (см. там же) —

@@ -4,6 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from app.accounts.cash import store_cash
 from app.connectors.base import BrokerConnector
 from app.ledger.service import append_operations
 from app.marketdata.broker_prices import store_broker_prices
@@ -133,6 +134,8 @@ def sync_broker(
             # MOEX. Пишутся под московской календарной датой, той же, под
             # которой пишутся биржевые котировки и снимок стоимости.
             store_broker_prices(session, connector.fetch_prices(account.external_id), moscow_today())
+
+            store_cash(session, account, connector.fetch_cash(account.external_id))
 
             broker_positions = connector.fetch_positions(account.external_id)
             findings = reconcile_account(session, account, broker_positions)

@@ -41,6 +41,24 @@ class BrokerPrice:
 
 
 @dataclass(frozen=True)
+class BrokerCash:
+    """Денежный остаток счёта в одной валюте.
+
+    `blocked` — часть остатка, недоступная к распоряжению (залог, расчёты по
+    сделке). Хранится отдельно, но входит в `amount`: капитал она не покидает,
+    а вот распорядиться ею нельзя.
+
+    Валютой брокер называет и драгоценные металлы: золото приходит кодом `XAU`
+    и измеряется граммами. Для оценки это такая же валюта, у которой есть курс
+    к рублю, — только берётся он не у ЦБ, а с MOEX.
+    """
+
+    currency: str
+    amount: Decimal
+    blocked: Decimal
+
+
+@dataclass(frozen=True)
 class BrokerInstrument:
     """Сведения об инструменте из справочника брокера — ровно тот набор, что
     домен умеет записать в таблицу instrument.
@@ -74,3 +92,5 @@ class BrokerConnector(Protocol):
     def fetch_positions(self, account_external_id: str) -> list[BrokerPosition]: ...
 
     def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]: ...
+
+    def fetch_cash(self, account_external_id: str) -> list[BrokerCash]: ...
