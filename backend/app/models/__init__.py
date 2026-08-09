@@ -1,5 +1,6 @@
 from app.models.account import Account
 from app.models.base import Base
+from app.models.broker_holding import BrokerHolding
 from app.models.cash_balance import CashBalance
 from app.models.fx_rate import FxRate
 from app.models.instrument import Instrument
@@ -13,6 +14,7 @@ from app.models.transaction import OperationType, Transaction
 __all__ = [
     "Account",
     "Base",
+    "BrokerHolding",
     "CashBalance",
     "DailySnapshot",
     "FxRate",

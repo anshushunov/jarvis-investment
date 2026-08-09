@@ -12,7 +12,7 @@ from app.connectors.tbank.mapper import map_operation
 from app.connectors.tbank.quotation import to_money, to_quantity
 from app.instruments import kinds
 from app.ledger.schemas import RawOperation
-from app.money import money
+from app.money import money, quantity
 
 ACCOUNT_KIND = {
     "ACCOUNT_TYPE_TINKOFF": "brokerage",
@@ -182,6 +182,7 @@ class TBankConnector:
         raw_positions = self._get_portfolio(account_external_id)
         figis = {item.get("figi") for item in raw_positions if item.get("figi")}
         instruments = self._resolve_instruments(figis)
+        blocked_by_figi = self._blocked_by_figi(account_external_id)
 
         positions = []
         for item in raw_positions:
@@ -198,8 +199,30 @@ class TBankConnector:
             if instrument is None or not instrument.isin:
                 continue
             ticker = item.get("ticker") or instrument.ticker
-            positions.append(BrokerPosition(isin=instrument.isin, ticker=ticker, quantity=qty))
+            positions.append(BrokerPosition(
+                isin=instrument.isin, ticker=ticker, quantity=qty,
+                blocked=blocked_by_figi.get(figi, quantity("0")),
+            ))
         return positions
+
+    def _blocked_by_figi(self, account_external_id: str) -> dict[str, Decimal]:
+        """Заблокированные количества бумаг счёта, ключ — FIGI.
+
+        Сведения есть только в GetPositions; счёт, который этого вызова не
+        поддерживает, отдаёт пустое отображение, и позиции читаются как раньше,
+        просто без блокировок."""
+        payload = self._get_positions(account_external_id)
+        if payload is None:
+            return {}
+
+        result: dict[str, Decimal] = {}
+        for item in payload.get("securities") or []:
+            figi = item.get("figi")
+            raw_blocked = item.get("blocked")
+            if not figi or raw_blocked in (None, "", "0"):
+                continue
+            result[figi] = quantity(str(raw_blocked))
+        return result
 
     def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]:
         """Текущие цены бумаг счёта по данным брокера.

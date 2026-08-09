@@ -31,6 +31,16 @@ def _mock_instrument_lists(**by_kind: list[dict]) -> dict[str, respx.Route]:
     return routes
 
 
+def _mock_empty_positions() -> respx.Route:
+    """GetPositions без блокировок — для тестов fetch_positions, которым
+    заблокированное количество безразлично: fetch_positions (задача 6) читает
+    этот вызов наравне с GetPortfolio, и без мока respx роняет тест как
+    непредусмотренный запрос."""
+    return respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={"money": [], "blocked": [], "securities": []})
+    )
+
+
 @respx.mock
 def test_fetch_accounts_maps_iis_and_default_kind():
     respx.post(f"{USERS}/GetAccounts").mock(
@@ -481,6 +491,7 @@ def test_fetch_positions_skips_entries_without_isin():
     _mock_instrument_lists(
         Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
     )
+    _mock_empty_positions()
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
@@ -509,6 +520,7 @@ def test_fetch_positions_keeps_full_precision_for_fractional_quantity():
     _mock_instrument_lists(
         Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
     )
+    _mock_empty_positions()
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
@@ -533,11 +545,83 @@ def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
             {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"},
         ],
     )
+    _mock_empty_positions()
 
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
     assert positions == [
         BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
+    ]
+
+
+@respx.mock
+def test_position_carries_blocked_quantity():
+    """У владельца две заблокированные позиции: HK0000123577 с balance=0 и
+    blocked=92, HK0000051877 с balance=0 и blocked=79. Проверено на живом API:
+    balance + blocked в точности равно quantity из GetPortfolio на всех 43
+    бумагах счёта — значит блокировка это часть количества, а не добавка."""
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "TCS000123577",
+                    "instrumentType": "etf",
+                    "quantity": {"units": "92", "nano": 0},
+                    "ticker": "HK0000123577",
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Etfs=[{"figi": "TCS000123577", "ticker": "HK0000123577", "isin": "HK0000123577"}],
+    )
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [], "blocked": [],
+            "securities": [{"figi": "TCS000123577", "balance": "0", "blocked": "92",
+                            "ticker": "HK0000123577", "instrumentType": "etf",
+                            "exchangeBlocked": False}],
+        })
+    )
+
+    positions = TBankConnector(TOKEN).fetch_positions("1000000001")
+
+    assert positions == [
+        BrokerPosition(isin="HK0000123577", ticker="HK0000123577",
+                       quantity=Decimal("92"), blocked=Decimal("92"))
+    ]
+
+
+@respx.mock
+def test_blocked_defaults_to_zero_when_positions_call_unavailable():
+    """Счёт типа ACCOUNT_TYPE_DFA не отвечает на GetPositions. Позиции при этом
+    читаются из GetPortfolio как раньше — просто без сведений о блокировке."""
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "BBG004730N88",
+                    "instrumentType": "share",
+                    "quantity": {"units": "10", "nano": 0},
+                    "ticker": "SBER",
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
+    )
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(404, json={
+            "code": 5, "message": "Account not found", "description": "50004",
+        })
+    )
+
+    positions = TBankConnector(TOKEN).fetch_positions("1000000001")
+
+    assert positions == [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10"),
+                       blocked=Decimal("0"))
     ]
 
 
@@ -749,6 +833,7 @@ def test_fetch_portfolio_snapshot_is_cached_and_reused_between_positions_and_pri
     _mock_instrument_lists(
         Shares=[{"figi": "BBG004730N88", "ticker": "SBER", "isin": "RU0009029540"}],
     )
+    _mock_empty_positions()
 
     connector = TBankConnector(TOKEN)
     positions = connector.fetch_positions("1000000001")
@@ -790,6 +875,7 @@ def test_fetch_portfolio_snapshot_is_not_mixed_between_accounts():
             {"figi": "BBG0047315Y7", "ticker": "GAZP", "isin": "RU0007661625"},
         ],
     )
+    _mock_empty_positions()
 
     connector = TBankConnector(TOKEN)
     positions_1 = connector.fetch_positions("1000000001")
@@ -847,6 +933,7 @@ def test_bulk_instrument_index_is_built_once_and_reused_across_operations_and_po
     instrument_by_figi = respx.post(f"{INSTRUMENTS}/GetInstrumentBy").mock(
         return_value=httpx.Response(200, json={"instrument": {}})
     )
+    _mock_empty_positions()
 
     connector = TBankConnector(TOKEN)
     # Разные счета одного прогона на одном и том же экземпляре коннектора —
@@ -903,6 +990,7 @@ def test_fallback_to_get_instrument_by_still_works_after_index_is_cached():
             "instrument": {"figi": "TCS00A0EXOTIC", "ticker": "EXOTIC", "isin": "RU000AEXOTIC"}
         })
     )
+    _mock_empty_positions()
 
     connector = TBankConnector(TOKEN)
     connector.fetch_operations("1000000001", datetime(2026, 1, 1, tzinfo=timezone.utc))

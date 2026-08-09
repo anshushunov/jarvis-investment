@@ -10,6 +10,7 @@ from app.ledger.service import append_operations
 from app.marketdata.broker_prices import store_broker_prices
 from app.models import Account, SyncRun
 from app.positions.service import rebuild_positions
+from app.sync.holdings import store_holdings
 from app.sync.reconcile import reconcile_account
 from app.timeutils import moscow_today
 
@@ -138,6 +139,7 @@ def sync_broker(
             store_cash(session, account, connector.fetch_cash(account.external_id))
 
             broker_positions = connector.fetch_positions(account.external_id)
+            store_holdings(session, account, broker_positions)
             findings = reconcile_account(session, account, broker_positions)
             run.mismatches = len(findings)
 

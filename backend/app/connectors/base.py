@@ -23,6 +23,12 @@ class BrokerPosition:
     isin: str
     ticker: str | None
     quantity: Decimal
+    # Часть количества, заблокированная брокером или биржей: заморозка после
+    # 2022 года, залог, расчёты по сделке. Это доля от quantity, а не добавка к
+    # нему — проверено на живом API: balance + blocked из GetPositions в
+    # точности равно quantity из GetPortfolio. Ноль, если брокер сведений о
+    # блокировках не даёт.
+    blocked: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
