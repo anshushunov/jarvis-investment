@@ -249,14 +249,39 @@ class TBankConnector:
             if currency:
                 blocked_by_currency[currency] = to_money(item)
 
-        balances: list[BrokerCash] = []
+        # Валюта в money изредка повторяется (в т.ч. в разном регистре —
+        # 'rub' и 'RUB' нормализуются в одну и ту же валюту). Дубль
+        # складываем, а не берём последний: у cash_balance уникальный ключ
+        # (account_id, currency), и если бы здесь осталось две записи на одну
+        # валюту, store_cash упал бы на вставке второй, откатив SAVEPOINT
+        # всего счёта. Сложение — это ещё и единственный вариант, который не
+        # теряет деньги молча: обе записи брокер прислал как часть остатка,
+        # отбросить любую из них значило бы занизить капитал без всякого
+        # признака этого в данных.
+        money_by_currency: dict[str, Decimal] = {}
         for item in payload.get("money") or []:
             currency = (item.get("currency") or "").upper()
             if not currency:
                 continue
+            money_by_currency[currency] = money_by_currency.get(currency, money("0")) + to_money(item)
+
+        # Итог — объединение валют money и blocked, а не проход только по
+        # money: валюта, которая целиком зарезервирована, может не попасть в
+        # money вовсе (распоряжаемой суммы в ней нет), но деньги в ней
+        # реальны и обязаны остаться в капитале, а не пропасть из-за того,
+        # что цикл раньше видел только money.
+        balances: list[BrokerCash] = []
+        for currency in sorted(set(money_by_currency) | set(blocked_by_currency)):
             balances.append(BrokerCash(
                 currency=currency,
-                amount=to_money(item),
+                amount=money_by_currency.get(currency, money("0")),
+                # Ноль amount при ненулевом blocked — не нарушение соглашения
+                # «blocked — часть amount» (см. докстринг BrokerCash), а его
+                # крайний случай: money и blocked — два независимых массива
+                # ответа брокера, и money не обязана перечислять валюту, для
+                # которой распоряжаемой суммы нет вовсе. Подставить сюда сам
+                # blocked вместо нуля значило бы придумать за брокера число,
+                # которого он в money не прислал.
                 blocked=blocked_by_currency.get(currency, money("0")),
             ))
         return balances

@@ -5,10 +5,11 @@ from decimal import Decimal
 import httpx
 import respx
 
+from app.accounts.cash import store_cash
 from app.connectors.base import BrokerAccount, BrokerCash, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
-from app.models import OperationType
+from app.models import Account, CashBalance, OperationType
 
 BASE = "https://invest-public-api.tinkoff.ru/rest"
 USERS = f"{BASE}/tinkoff.public.invest.api.contract.v1.UsersService"
@@ -646,6 +647,62 @@ def test_fetch_cash_returns_empty_when_account_has_no_positions_endpoint():
     )
 
     assert TBankConnector(TOKEN).fetch_cash("1000000001") == []
+
+
+@respx.mock
+def test_fetch_cash_keeps_currency_blocked_only_without_money_entry():
+    """Валюта, вся сумма которой зарезервирована, может отсутствовать в money
+    целиком: money отвечает за распоряжаемую сумму, а не за факт наличия
+    валюты. Если собирать итог проходом только по money, такая валюта — и
+    реальные деньги владельца в ней — молча пропадёт из капитала."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [{"currency": "rub", "units": "100", "nano": 0}],
+            "blocked": [{"currency": "usd", "units": "20", "nano": 0}],
+            "securities": [],
+        })
+    )
+
+    cash = sorted(TBankConnector(TOKEN).fetch_cash("1000000001"), key=lambda c: c.currency)
+
+    assert cash == [
+        BrokerCash(currency="RUB", amount=Decimal("100.0000"), blocked=Decimal("0")),
+        BrokerCash(currency="USD", amount=Decimal("0"), blocked=Decimal("20.0000")),
+    ]
+
+
+@respx.mock
+def test_fetch_cash_deduplicates_same_currency_before_it_reaches_store_cash(session):
+    """Дубль валюты в money (в т.ч. разным регистром — 'rub' и 'RUB' после
+    нормализации одна и та же валюта) не должен превращаться в две строки
+    CashBalance: у таблицы уникальный ключ (account_id, currency), и вторая
+    вставка уронила бы SAVEPOINT всего счёта в sync_broker. Тест проходит путь
+    целиком — от ответа брокера до store_cash, — потому что поломка была
+    именно на стыке: проверка одной только длины списка из fetch_cash не
+    поймала бы нарушение уникальности при записи."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [
+                {"currency": "rub", "units": "100", "nano": 0},
+                {"currency": "RUB", "units": "50", "nano": 0},
+            ],
+            "blocked": [],
+            "securities": [],
+        })
+    )
+
+    balances = TBankConnector(TOKEN).fetch_cash("1000000001")
+
+    account = Account(broker="tbank", kind="brokerage", external_id="1000000001",
+                      name="Счёт", currency="RUB")
+    session.add(account)
+    session.flush()
+
+    written = store_cash(session, account, balances)
+
+    assert written == 1
+    stored = session.query(CashBalance).all()
+    assert [(b.currency, b.amount) for b in stored] == [("RUB", Decimal("150.0000"))]
 
 
 @respx.mock
