@@ -42,7 +42,10 @@ export interface PositionRow {
   // Валюта котировки: текущая цена и стоимость — в ней.
   currency: string;
   quantity: string;
-  average_price: string;
+  // null = себестоимость неизвестна: бумаги пришли переводом, брокер цены
+  // покупки не сообщил. Это не ноль — на экране прочерк.
+  average_price: string | null;
+  cost_basis_known: boolean;
   // Валюта средней цены: у замещающей облигации расчёты рублёвые, а котировка
   // валютная, и подписать среднюю знаком котировки значит соврать в разы.
   average_price_currency: string;

@@ -41,6 +41,7 @@ def rebuild_positions(session: Session, account: Account) -> int:
                 instrument_id=instrument_id,
                 quantity=state.quantity,
                 average_price=state.average_price,
+                cost_basis_known=state.cost_basis_known,
             )
         )
         kept += 1

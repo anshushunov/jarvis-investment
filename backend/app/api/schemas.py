@@ -58,7 +58,10 @@ class PositionOut(BaseModel):
     # по умолчанию.
     currency: str
     quantity: Decimal
-    average_price: Decimal
+    # None — себестоимость неизвестна (бумаги пришли переводом). Сериализуется
+    # как null и на экране даёт прочерк, а не ноль.
+    average_price: Decimal | None
+    cost_basis_known: bool
     # Валюта средней цены — своя, потому что у замещающей облигации расчёты
     # рублёвые, а котировка валютная (см. PositionRow в app/analytics/service.py).
     average_price_currency: str

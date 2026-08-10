@@ -78,6 +78,39 @@ def test_purchase_only_position_keeps_cost_known():
     assert result.positions[1].cost_basis_known is True
 
 
+def test_position_row_hides_average_and_profit_when_cost_unknown(session):
+    """Позиция, куда бумаги пришли переводом, не показывает ни среднюю, ни
+    доходность: себестоимости у неё нет, а ноль в этом месте читается как
+    «досталось даром» и завышает доходность до бесконечности."""
+    from datetime import date
+
+    from app.analytics.service import position_rows
+    from app.models import Account, Instrument, Position, Price
+
+    account = Account(broker="tbank", kind="broker", external_id="acc-2",
+                      name="Инвестиционный", currency="RUB")
+    instrument = Instrument(isin="RU000A0JQUZ6", ticker="AGRO", secid="AGRO",
+                            kind="share", currency="RUB", issuer="РусАгро")
+    session.add_all([account, instrument])
+    session.flush()
+
+    session.add(Position(account_id=account.id, instrument_id=instrument.id,
+                         quantity=Decimal("560"), average_price=Decimal("0"),
+                         cost_basis_known=False))
+    session.add(Price(instrument_id=instrument.id, on_date=date(2026, 8, 10),
+                      close=Decimal("200"), currency="RUB", source="moex"))
+    session.flush()
+
+    row = next(r for r in position_rows(session) if r.isin == "RU000A0JQUZ6")
+
+    assert row.cost_basis_known is False
+    assert row.average_price is None
+    assert row.profit is None
+    assert row.profit_percent is None
+    # Стоимость при этом известна: цена есть, неизвестна только себестоимость.
+    assert row.market_value == Decimal("112000.0000")
+
+
 def test_transfer_in_closing_a_short_position_does_not_realize_fabricated_profit():
     """Продажа без остатка открывает короткую позицию (см. test_positions_engine.py:
     test_selling_more_than_owned_opens_a_short_for_the_excess); закрывающий её
