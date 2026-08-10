@@ -1,3 +1,4 @@
+import { coverageWarning } from "../api/coverage";
 import { BASE_CURRENCY, formatMoney } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
@@ -39,22 +40,35 @@ function RestrictedNotice({ overview }: { overview: Overview }) {
   );
 }
 
-// Совокупный капитал считается только по позициям, для которых есть котировка.
-// Пока оценены не все, сама цифра об этом не говорит ничего — предупреждение
-// должно стоять вплотную к ней и читаться, а не теряться мелким шрифтом.
+// Совокупный капитал считается только по той части портфеля, которую удалось
+// перевести в рубли. Пока это не весь портфель, сама цифра об этом не говорит
+// ничего — предупреждение должно стоять вплотную к ней, читаться, а не теряться
+// мелким шрифтом, и называть настоящую причину: нет котировок и нет курсов —
+// это разные поломки, и чинятся они по-разному.
 function CoverageNotice({ overview }: { overview: Overview }) {
-  const { valued_positions: valued, positions_total: total } = overview;
-  if (total === 0 || valued === total) return null;
+  const warning = coverageWarning(overview);
+  if (warning === null) return null;
+
+  const style = {
+    margin: "10px 0 0", padding: "7px 10px", borderRadius: 8, fontSize: 13,
+  } as const;
+
+  if (warning.kind === "rates") {
+    return (
+      <div style={{ ...style, background: "rgba(224,108,108,0.14)", color: "var(--red)" }}>
+        Курсов валют нет — валютная часть портфеля ({warning.currencies.join(", ")}) в
+        сумму не входит: ни бумаги, ни остатки, ни золото. Дело не в котировках, они
+        есть. Курсы подтянутся сами (ЦБ, ежедневно в 12:10 МСК) или вручную —
+        см. README, «Курсы, цены и оценка капитала». В рублях посчитаны{" "}
+        {warning.valued} позиций из {warning.total}.
+      </div>
+    );
+  }
 
   return (
-    <div
-      style={{
-        margin: "10px 0 0", padding: "7px 10px", borderRadius: 8,
-        background: "rgba(232,176,75,0.14)", color: "var(--amber)", fontSize: 13,
-      }}
-    >
-      Часть портфеля не оценена: цены есть только для {valued} позиций из {total}.
-      Остальные в эту сумму не входят.
+    <div style={{ ...style, background: "rgba(232,176,75,0.14)", color: "var(--amber)" }}>
+      Часть портфеля не оценена: цены есть только для {warning.valued} позиций из{" "}
+      {warning.total}. Остальные в эту сумму не входят.
     </div>
   );
 }
