@@ -71,7 +71,7 @@ function ReconciliationSummary({ rows }: { rows: ReconciliationRow[] }) {
               {" "}
               <button
                 type="button"
-                onClick={() => setOpen(open === `${row.account}-${row.isin}` ? null : `${row.account}-${row.isin}`)}
+                onClick={() => setOpen(open === `${row.account}-${row.isin}-${index}` ? null : `${row.account}-${row.isin}-${index}`)}
                 style={{ background: "none", border: "none", padding: 0, cursor: "pointer",
                          color: "var(--amber)", font: "inherit", textDecoration: "underline" }}
               >
@@ -80,7 +80,7 @@ function ReconciliationSummary({ rows }: { rows: ReconciliationRow[] }) {
               {row.suggestions.length > 0 && (
                 <span title="Система нашла подходящую пару" style={{ marginLeft: 4 }}>💡</span>
               )}
-              {open === `${row.account}-${row.isin}` && (
+              {open === `${row.account}-${row.isin}-${index}` && (
                 <DecisionPanel row={row} onDone={() => setOpen(null)} />
               )}
             </div>

@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api, type DecisionInput, type ReconciliationRow } from "../api/client";
+import { api, type DecisionInput, type ReconciliationRow, type Suggestion } from "../api/client";
 import { formatQuantity } from "../api/format";
 
 const KINDS = [
@@ -11,6 +11,7 @@ const KINDS = [
 ] as const;
 
 type Kind = (typeof KINDS)[number]["value"];
+type Direction = "CREDIT" | "DEBIT";
 
 // Дата события по умолчанию — сегодня. Конвертация случилась когда-то раньше,
 // и владелец обычно знает когда; поле редактируемое именно поэтому.
@@ -22,14 +23,29 @@ export function DecisionPanel({ row, onDone }: {
   row: ReconciliationRow;
   onDone: () => void;
 }) {
-  const suggestion = row.suggestions[0] ?? null;
+  const suggestions = row.suggestions;
+  // Гипотеза считается решённой автоматически только когда она единственная
+  // и сам бэкенд не пометил её неоднозначной. У ambiguous-группы этот признак
+  // стоит на каждом кандидате, включая тот единственный, что попал в список
+  // именно этой строки: у него есть конкуренты на другой стороне, которых
+  // отсюда не видно, — выбор всё равно остаётся за владельцем (см. докстринг
+  // backend/app/decisions/suggestions.py про цену «правдоподобного» выбора).
+  const certainSuggestion = suggestions.length === 1 && !suggestions[0].ambiguous ? suggestions[0] : null;
+  const needsChoice = suggestions.length > 0 && certainSuggestion === null;
   const queryClient = useQueryClient();
 
-  const [kind, setKind] = useState<Kind>(suggestion ? "CONVERSION" : "ADJUSTMENT");
-  const [fromIsin, setFromIsin] = useState(suggestion?.from_isin ?? row.isin ?? "");
-  const [fromQuantity, setFromQuantity] = useState(suggestion?.from_quantity ?? "");
-  const [toIsin, setToIsin] = useState(suggestion?.to_isin ?? "");
-  const [toQuantity, setToQuantity] = useState(suggestion?.to_quantity ?? "");
+  const [selectedSuggestion, setSelectedSuggestion] = useState<Suggestion | null>(certainSuggestion);
+  const [kind, setKind] = useState<Kind>(suggestions.length > 0 ? "CONVERSION" : "ADJUSTMENT");
+  // Направление поправки: корректировка описывает ровно одну сторону
+  // (зачисление или списание) — бэкенд отвергает решение, где заполнены обе
+  // или ни одной (app/decisions/service.py, _validate).
+  const [direction, setDirection] = useState<Direction>("CREDIT");
+  const [fromIsin, setFromIsin] = useState(
+    certainSuggestion?.from_isin ?? (suggestions.length === 0 ? row.isin ?? "" : ""),
+  );
+  const [fromQuantity, setFromQuantity] = useState(certainSuggestion?.from_quantity ?? "");
+  const [toIsin, setToIsin] = useState(certainSuggestion?.to_isin ?? "");
+  const [toQuantity, setToQuantity] = useState(certainSuggestion?.to_quantity ?? "");
   const [effectiveAt, setEffectiveAt] = useState(today());
   const [note, setNote] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
@@ -42,6 +58,47 @@ export function DecisionPanel({ row, onDone }: {
     },
   });
 
+  // Кандидат подставляется в форму только по явному клику владельца — до
+  // этого момента поля формы пусты, ни один вариант не выбран за него.
+  function chooseSuggestion(candidate: Suggestion) {
+    setSelectedSuggestion(candidate);
+    setKind("CONVERSION");
+    setFromIsin(candidate.from_isin);
+    setFromQuantity(candidate.from_quantity);
+    setToIsin(candidate.to_isin);
+    setToQuantity(candidate.to_quantity);
+  }
+
+  // Смена вида решения обязана убрать значения полей, которые вид больше не
+  // показывает: иначе они остаются в состоянии и невидимо уходят в запрос —
+  // например, «сколько списать» из гипотезы конвертации доезжало бы до
+  // корректировки, у которой на экране видно только поле зачисления.
+  function changeKind(next: Kind) {
+    setKind(next);
+    if (next === "CONVERSION" && selectedSuggestion) {
+      setFromIsin(selectedSuggestion.from_isin);
+      setFromQuantity(selectedSuggestion.from_quantity);
+      setToIsin(selectedSuggestion.to_isin);
+      setToQuantity(selectedSuggestion.to_quantity);
+      return;
+    }
+    setFromIsin(next === "CONVERSION" ? (row.isin ?? "") : "");
+    setFromQuantity("");
+    setToIsin("");
+    setToQuantity("");
+  }
+
+  // Тот же принцип при смене направления корректировки: поле стороны, что
+  // перестала быть видна, не должно унести в запрос значение, введённое для
+  // другой стороны.
+  function changeDirection(next: Direction) {
+    setDirection(next);
+    setFromIsin("");
+    setFromQuantity("");
+    setToIsin("");
+    setToQuantity("");
+  }
+
   function confirm(status: "CONFIRMED" | "REJECTED") {
     if (note.trim() === "") {
       // Проверяем до запроса: бэкенд то же самое отвергнет, но владелец
@@ -50,14 +107,38 @@ export function DecisionPanel({ row, onDone }: {
       return;
     }
     setValidation(null);
+
+    // В запрос идёт только то, что видно на экране для текущего вида решения
+    // (и, для корректировки, для текущего направления) — скрытые поля не
+    // подмешиваются, даже если в состоянии остался их старый текст.
+    let payloadFromIsin: string | null = null;
+    let payloadFromQuantity: string | null = null;
+    let payloadToIsin: string | null = null;
+    let payloadToQuantity: string | null = null;
+
+    if (kind === "CONVERSION") {
+      payloadFromIsin = fromIsin || null;
+      payloadFromQuantity = fromQuantity || null;
+      payloadToIsin = toIsin || null;
+      payloadToQuantity = toQuantity || null;
+    } else if (kind === "ADJUSTMENT") {
+      if (direction === "DEBIT") {
+        payloadFromIsin = fromIsin || null;
+        payloadFromQuantity = fromQuantity || null;
+      } else {
+        payloadToIsin = toIsin || null;
+        payloadToQuantity = toQuantity || null;
+      }
+    }
+
     submit.mutate({
       account: row.account,
       kind,
       status,
-      from_isin: kind === "ACCEPTED_AS_IS" ? null : fromIsin || null,
-      from_quantity: kind === "ACCEPTED_AS_IS" ? null : fromQuantity || null,
-      to_isin: kind === "CONVERSION" || kind === "ADJUSTMENT" ? toIsin || null : null,
-      to_quantity: kind === "CONVERSION" || kind === "ADJUSTMENT" ? toQuantity || null : null,
+      from_isin: payloadFromIsin,
+      from_quantity: payloadFromQuantity,
+      to_isin: payloadToIsin,
+      to_quantity: payloadToQuantity,
       effective_at: `${effectiveAt}T00:00:00Z`,
       note,
     });
@@ -65,28 +146,46 @@ export function DecisionPanel({ row, onDone }: {
 
   return (
     <div style={{ marginTop: 8, padding: 10, border: "1px solid var(--line)", borderRadius: 6 }}>
-      {suggestion && (
+      {certainSuggestion && (
         <div style={{ fontSize: 12.5, marginBottom: 8 }}>
-          Похоже на конвертацию: {formatQuantity(suggestion.from_quantity)} шт.{" "}
-          {suggestion.from_isin} → {formatQuantity(suggestion.to_quantity)} шт.{" "}
-          {suggestion.to_isin}
-          {suggestion.blocked_fully && (
+          Похоже на конвертацию: {formatQuantity(certainSuggestion.from_quantity)} шт.{" "}
+          {certainSuggestion.from_isin} → {formatQuantity(certainSuggestion.to_quantity)} шт.{" "}
+          {certainSuggestion.to_isin}
+          {certainSuggestion.blocked_fully && (
             <div style={{ color: "var(--amber)", fontSize: 11.5 }}>
               Бумага-получатель заблокирована у брокера целиком — частый след
               корпоративного действия.
             </div>
           )}
-          {suggestion.ambiguous && (
-            <div style={{ color: "var(--amber)", fontSize: 11.5 }}>
-              Подходящих бумаг несколько: выбор за вами, система не угадывает.
-            </div>
-          )}
         </div>
+      )}
+
+      {needsChoice && (
+        <fieldset style={{
+          fontSize: 12.5, marginBottom: 8, border: "1px solid var(--line)",
+          borderRadius: 6, padding: 8,
+        }}>
+          <legend style={{ fontSize: 12, color: "var(--amber)" }}>
+            Подходящих бумаг несколько: выбор за вами, система не угадывает.
+          </legend>
+          {suggestions.map((candidate, index) => (
+            <label key={`${candidate.from_isin}-${candidate.to_isin}-${index}`}
+                   style={{ display: "block", padding: "2px 0" }}>
+              <input type="radio" name="suggestion-choice"
+                     checked={selectedSuggestion === candidate}
+                     onChange={() => chooseSuggestion(candidate)}
+                     style={{ marginRight: 6 }} />
+              {formatQuantity(candidate.from_quantity)} шт. {candidate.from_isin} →{" "}
+              {formatQuantity(candidate.to_quantity)} шт. {candidate.to_isin}
+              {candidate.blocked_fully && " · получатель заблокирован целиком"}
+            </label>
+          ))}
+        </fieldset>
       )}
 
       <label style={{ display: "block", fontSize: 12, marginBottom: 6 }}>
         Что произошло
-        <select value={kind} onChange={(event) => setKind(event.target.value as Kind)}
+        <select value={kind} onChange={(event) => changeKind(event.target.value as Kind)}
                 style={{ display: "block", marginTop: 3, width: "100%" }}>
           {KINDS.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
@@ -94,22 +193,18 @@ export function DecisionPanel({ row, onDone }: {
         </select>
       </label>
 
-      {kind !== "ACCEPTED_AS_IS" && (
+      {kind === "CONVERSION" && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
-          {kind === "CONVERSION" && (
-            <>
-              <label style={{ fontSize: 12 }}>
-                Из какой бумаги
-                <input value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
-                       style={{ display: "block", width: "100%" }} />
-              </label>
-              <label style={{ fontSize: 12 }}>
-                Сколько списать
-                <input value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
-                       style={{ display: "block", width: "100%" }} />
-              </label>
-            </>
-          )}
+          <label style={{ fontSize: 12 }}>
+            Из какой бумаги
+            <input value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
+                   style={{ display: "block", width: "100%" }} />
+          </label>
+          <label style={{ fontSize: 12 }}>
+            Сколько списать
+            <input value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
+                   style={{ display: "block", width: "100%" }} />
+          </label>
           <label style={{ fontSize: 12 }}>
             В какую бумагу
             <input value={toIsin} onChange={(e) => setToIsin(e.target.value)}
@@ -120,6 +215,52 @@ export function DecisionPanel({ row, onDone }: {
             <input value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
                    style={{ display: "block", width: "100%" }} />
           </label>
+        </div>
+      )}
+
+      {kind === "ADJUSTMENT" && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ display: "flex", gap: 12, marginBottom: 6, fontSize: 12 }}>
+            <label>
+              <input type="radio" name="adjustment-direction" checked={direction === "CREDIT"}
+                     onChange={() => changeDirection("CREDIT")} style={{ marginRight: 4 }} />
+              Зачислить бумагу
+            </label>
+            <label>
+              <input type="radio" name="adjustment-direction" checked={direction === "DEBIT"}
+                     onChange={() => changeDirection("DEBIT")} style={{ marginRight: 4 }} />
+              Списать бумагу
+            </label>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            {direction === "DEBIT" ? (
+              <>
+                <label style={{ fontSize: 12 }}>
+                  Из какой бумаги
+                  <input value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
+                         style={{ display: "block", width: "100%" }} />
+                </label>
+                <label style={{ fontSize: 12 }}>
+                  Сколько списать
+                  <input value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
+                         style={{ display: "block", width: "100%" }} />
+                </label>
+              </>
+            ) : (
+              <>
+                <label style={{ fontSize: 12 }}>
+                  В какую бумагу
+                  <input value={toIsin} onChange={(e) => setToIsin(e.target.value)}
+                         style={{ display: "block", width: "100%" }} />
+                </label>
+                <label style={{ fontSize: 12 }}>
+                  Сколько зачислить
+                  <input value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
+                         style={{ display: "block", width: "100%" }} />
+                </label>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -150,7 +291,7 @@ export function DecisionPanel({ row, onDone }: {
                 disabled={submit.isPending}>
           {submit.isPending ? "Отправляем…" : "Подтвердить"}
         </button>
-        {suggestion && (
+        {selectedSuggestion && (
           <button type="button" onClick={() => confirm("REJECTED")}
                   disabled={submit.isPending}>
             Это не конвертация
