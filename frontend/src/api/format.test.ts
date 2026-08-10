@@ -6,7 +6,22 @@ import {
   formatMoney,
   formatPercent,
   formatQuantity,
+  isPositiveAmount,
 } from "./format";
+
+describe("isPositiveAmount", () => {
+  it("отличает ноль и отрицательное от положительного", () => {
+    // Отрицательное «недоступно к продаже» достижимо: короткая позиция с
+    // блокировкой стоит отрицательных денег (см. test_analytics.py,
+    // test_blocked_short_position_does_not_flip_the_sign). Плашке о нём
+    // сообщать нечего — как и о нуле.
+    expect(isPositiveAmount("0.0000")).toBe(false);
+    expect(isPositiveAmount("-0.0000")).toBe(false);
+    expect(isPositiveAmount("-1000.0000")).toBe(false);
+    expect(isPositiveAmount("782.2700")).toBe(true);
+    expect(isPositiveAmount("0.0001")).toBe(true);
+  });
+});
 
 describe("formatMoney", () => {
   it("группирует разряды неразрывными пробелами и добавляет рубль", () => {

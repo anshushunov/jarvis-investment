@@ -1,5 +1,5 @@
 import { coverageWarning } from "../api/coverage";
-import { BASE_CURRENCY, formatMoney } from "../api/format";
+import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -28,7 +28,12 @@ function CapitalParts({ overview }: { overview: Overview }) {
 // нельзя, и знать об этом нужно рядом с самой цифрой: у владельца больше
 // двадцати таких позиций, это заметная доля портфеля.
 function RestrictedNotice({ overview }: { overview: Overview }) {
-  if (overview.restricted_value === "0.0000") return null;
+  // Плашка имеет смысл только у положительной суммы. Ноль сообщать не о чем, а
+  // отрицательное «недоступно» достижимо у короткой позиции с блокировкой:
+  // обязательство стоит отрицательных денег, и «Недоступно к продаже −1 000 ₽»
+  // читалось бы как ошибка расчёта. Сравнение строки с «0.0000» ловило только
+  // ноль.
+  if (!isPositiveAmount(overview.restricted_value)) return null;
 
   return (
     <div style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>

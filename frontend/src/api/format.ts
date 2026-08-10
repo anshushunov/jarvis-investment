@@ -90,6 +90,14 @@ export function formatMoney(raw: string | null | undefined, currency: string): s
   return `${negative ? "−" : ""}${body}${NBSP}${currencySign(currency)}`;
 }
 
+// Строго больше нуля — строковой проверкой, потому что деньги через Number не
+// проходят. Ноль отличается от положительного отсутствием любой значащей
+// цифры, отрицательное — ведущим минусом. Нужно тем плашкам, которые имеют
+// смысл только при положительной сумме.
+export function isPositiveAmount(raw: string): boolean {
+  return !raw.startsWith("-") && /[1-9]/.test(raw);
+}
+
 export function formatPercent(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "—";
   const value = Number.parseFloat(raw);
