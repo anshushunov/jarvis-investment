@@ -92,6 +92,24 @@ def _to_broker_instrument(raw: dict, kind: str) -> BrokerInstrument:
     )
 
 
+def _availability_rank(instrument: BrokerInstrument) -> int:
+    """Насколько запись справочника свидетельствует о свободе распоряжения
+    бумагой. Порядок важен только внутри одного ISIN — см.
+    TBankConnector.fetch_instrument_reference.
+
+    Ноль — сведений нет вовсе (хотя бы одного флага не хватает), и такая запись
+    проигрывает любой другой: по ней всё равно ничего не решить. Единица — обе
+    операции недоступны. Двойка — доступна хотя бы одна, а этого достаточно,
+    чтобы бумага ограниченной не считалась (правило то же, что в
+    app/instruments/service.py: ограничение — недоступность обеих сразу).
+    """
+    if not isinstance(instrument.buy_available, bool):
+        return 0
+    if not isinstance(instrument.sell_available, bool):
+        return 0
+    return 2 if (instrument.buy_available or instrument.sell_available) else 1
+
+
 class TBankConnector:
     """Реализация BrokerConnector поверх TBankClient. Клиент не знает про
     доменные модели (RawOperation, BrokerAccount, ...), коннектор не знает
@@ -341,12 +359,25 @@ class TBankConnector:
         дозаполнению уже записанных инструментов (app/instruments/backfill.py):
         обычная синхронизация видит только те инструменты, что встретились в
         операциях её окна, а привести в порядок надо всю таблицу целиком.
-        Читающий вызов, состояние счёта не трогает."""
-        return {
-            instrument.isin: instrument
-            for instrument in self._bulk_instrument_index().values()
-            if instrument.isin
-        }
+        Читающий вызов, состояние счёта не трогает.
+
+        Одному ISIN в справочнике брокера соответствует не одна запись, а по
+        одной на каждый режим торгов: у OZON их четыре (TQBR, SPBXM, A36, A53),
+        у NVDA — десяток. Флаги доступности у них разные: основной режим TQBR
+        отдаёт `buyAvailableFlag: true`, а внебиржевые и служебные доски —
+        `false`. Взять «последнюю по порядку ответа» значит с вероятностью три
+        четверти записать свободно торгуемой бумаге ограничение в обороте
+        (живая проверка 10.08.2026: так ограниченными оказались OZON, EQMX,
+        GOLD, T, SBBY, OBLG, DATA и ДОМ.РФ — на 2.45 млн ₽). Поэтому при
+        совпадении ISIN выигрывает самая «доступная» запись."""
+        reference: dict[str, BrokerInstrument] = {}
+        for instrument in self._bulk_instrument_index().values():
+            if not instrument.isin:
+                continue
+            known = reference.get(instrument.isin)
+            if known is None or _availability_rank(instrument) > _availability_rank(known):
+                reference[instrument.isin] = instrument
+        return reference
 
     def _bulk_instrument_index(self) -> dict[str, BrokerInstrument]:
         """Полный список инструментов по видам (INSTRUMENT_LIST_KINDS),

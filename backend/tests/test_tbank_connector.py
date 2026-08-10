@@ -454,6 +454,69 @@ def test_fetch_instrument_reference_carries_availability_flags():
 
 
 @respx.mock
+def test_fetch_instrument_reference_prefers_the_tradable_board_of_the_same_isin():
+    """Одному ISIN соответствует по записи на каждый режим торгов, и флаги
+    доступности у них разные: основной режим разрешает операции, служебные и
+    внебиржевые доски — нет. Побеждать обязана доступная запись, иначе свободно
+    торгуемая бумага получает ограничение в обороте по случайности порядка
+    ответа. Доступная запись здесь идёт первой, а недоступные — после неё,
+    чтобы «последний выигрывает» тест не прошёл."""
+    _mock_instrument_lists(
+        Shares=[
+            {"figi": "BBG004730N88", "ticker": "OZON", "isin": "RU000A10CW95",
+             "name": "Озон", "buyAvailableFlag": True, "sellAvailableFlag": True},
+            {"figi": "TCS80A10CW95", "ticker": "RU000A10CW95", "isin": "RU000A10CW95",
+             "name": "Озон", "buyAvailableFlag": False, "sellAvailableFlag": False},
+            {"figi": "SPBXMA10CW95", "ticker": "OZON", "isin": "RU000A10CW95",
+             "name": "Озон", "buyAvailableFlag": False, "sellAvailableFlag": False},
+        ],
+    )
+
+    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["RU000A10CW95"]
+
+    assert instrument.buy_available is True
+    assert instrument.sell_available is True
+
+
+@respx.mock
+def test_fetch_instrument_reference_keeps_restriction_when_every_board_forbids_both():
+    """Обратная сторона того же правила: у бумаги, которую не даёт ни купить,
+    ни продать ни один режим, ограничение обязано сохраниться. Иначе «выбираем
+    самую доступную запись» превратилось бы в «ограничений не бывает»."""
+    _mock_instrument_lists(
+        Shares=[
+            {"figi": "TCS6066G1040", "ticker": "US67066G1040", "isin": "US67066G1040",
+             "name": "NVIDIA", "buyAvailableFlag": False, "sellAvailableFlag": False},
+            {"figi": "SPBXM66G1040", "ticker": "NVDA", "isin": "US67066G1040",
+             "name": "NVIDIA", "buyAvailableFlag": False, "sellAvailableFlag": False},
+        ],
+    )
+
+    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["US67066G1040"]
+
+    assert instrument.buy_available is False
+    assert instrument.sell_available is False
+
+
+@respx.mock
+def test_fetch_instrument_reference_prefers_a_board_with_known_flags():
+    """Запись без флагов не должна вытеснять запись с флагами: «сведений нет»
+    оставило бы признак ограничения в базе прежним, то есть отменило бы работу
+    дозаполнения ради записи, которая ничего не сообщает."""
+    _mock_instrument_lists(
+        Bonds=[
+            {"figi": "TQCB0A10F728", "isin": "RU000A10F728", "name": "Газпром капитал",
+             "buyAvailableFlag": True, "sellAvailableFlag": True},
+            {"figi": "NSD00A10F728", "isin": "RU000A10F728", "name": "Газпром капитал"},
+        ],
+    )
+
+    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["RU000A10F728"]
+
+    assert instrument.buy_available is True
+
+
+@respx.mock
 def test_fetch_operations_carries_availability_flags_from_get_instrument_by():
     """Тот же признак — но по поштучному запасному пути (FIGI не нашёлся ни в
     одном списочном методе). Оба пути разбираются общей _to_broker_instrument,
