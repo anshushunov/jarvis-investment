@@ -2,7 +2,8 @@
 const BASE = "http://localhost:8001/api";
 
 export interface Overview {
-  // Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам ЦБ.
+  // Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам на
+  // дату оценки — валюты от ЦБ, драгоценные металлы с MOEX (у ЦБ их нет).
   total_value: string;
   securities_value: string;
   cash_value: string;

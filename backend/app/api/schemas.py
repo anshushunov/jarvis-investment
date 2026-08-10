@@ -5,7 +5,8 @@ from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 class OverviewOut(BaseModel):
-    # Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам ЦБ.
+    # Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам на
+    # дату оценки — валюты от ЦБ, драгоценные металлы с MOEX (у ЦБ их нет).
     total_value: Decimal
     securities_value: Decimal
     cash_value: Decimal

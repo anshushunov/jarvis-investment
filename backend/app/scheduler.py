@@ -97,7 +97,7 @@ def build_scheduler() -> BackgroundScheduler:
         CronTrigger(day_of_week="mon-fri", hour="10-18", minute="*/15"),
         id="refresh_prices",
     )
-    # Курсы ЦБ на следующий день публикуются днём; 12:00 МСК — время, когда
+    # Курсы ЦБ на следующий день публикуются днём; 12:10 МСК — время, когда
     # они уже есть, а до вечернего снимка стоимости ещё далеко.
     scheduler.add_job(
         job_refresh_fx,
