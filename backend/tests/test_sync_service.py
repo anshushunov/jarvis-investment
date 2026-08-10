@@ -1,9 +1,9 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from app.connectors.base import BrokerAccount, BrokerPosition
+from app.connectors.base import BrokerAccount, BrokerPosition, BrokerPrice
 from app.ledger.schemas import RawOperation
-from app.models import Account, OperationType, Position, SyncRun
+from app.models import Account, OperationType, Position, Price, SyncRun
 from app.sync.service import (
     DEFAULT_HISTORY_DAYS,
     SYNC_OVERLAP_DAYS,
@@ -17,10 +17,11 @@ SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 class FakeConnector:
     source = "tbank"
 
-    def __init__(self, operations=None, positions=None, fail_on_positions=False):
+    def __init__(self, operations=None, positions=None, fail_on_positions=False, prices=None):
         self.operations = operations or []
         self.positions = positions or []
         self.fail_on_positions = fail_on_positions
+        self.prices = prices or []
 
     def fetch_accounts(self):
         return [BrokerAccount(external_id="acc-1", name="Брокерский", kind="brokerage")]
@@ -32,6 +33,12 @@ class FakeConnector:
         if self.fail_on_positions:
             raise RuntimeError("брокер недоступен")
         return self.positions
+
+    def fetch_prices(self, account_external_id):
+        return self.prices
+
+    def fetch_cash(self, account_external_id):
+        return []
 
 
 class TwoAccountsConnector:
@@ -52,6 +59,12 @@ class TwoAccountsConnector:
         return []
 
     def fetch_positions(self, account_external_id):
+        return []
+
+    def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 
@@ -76,6 +89,12 @@ class LateDbFailureConnector:
     def fetch_positions(self, account_external_id):
         if account_external_id == "acc-late-fail":
             return [BrokerPosition(isin="RU0009029540XX", ticker="FAKE", quantity=Decimal("1"))]
+        return []
+
+    def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 
@@ -103,6 +122,12 @@ class TwoAccountsRecordingConnector:
     def fetch_positions(self, account_external_id):
         return []
 
+    def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
+        return []
+
 
 class AccountWithOpeningDateConnector:
     """Брокер, отдающий дату открытия счёта, — как настоящий T-Invest API."""
@@ -119,6 +144,12 @@ class AccountWithOpeningDateConnector:
         return []
 
     def fetch_positions(self, account_external_id):
+        return []
+
+    def fetch_prices(self, account_external_id):
+        return []
+
+    def fetch_cash(self, account_external_id):
         return []
 
 
@@ -343,6 +374,22 @@ def test_resolve_since_is_scoped_per_account_not_broker(session):
     since = resolve_since_for_account(session, account_without_history.id)
     expected = datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_HISTORY_DAYS)
     assert abs((since - expected).total_seconds()) < 5
+
+
+def test_sync_stores_broker_prices(session):
+    """Цена брокера доезжает до таблицы котировок тем же прогоном, что и
+    операции: иначе новая бумага оставалась бы неоценённой до ближайшего
+    обновления котировок."""
+    connector = FakeConnector(
+        operations=[buy()],
+        positions=[],
+        prices=[BrokerPrice(isin="RU0009029540", price=Decimal("315.00"), currency="RUB")],
+    )
+
+    sync_broker(session, connector, SINCE)
+
+    stored = session.query(Price).one()
+    assert (stored.close, stored.source) == (Decimal("315.0000"), "tbank")
 
 
 def test_sync_broker_resolves_since_independently_per_account(session):

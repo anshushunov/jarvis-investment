@@ -1,21 +1,29 @@
 import logging
 import time
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Callable
 
 import httpx
 
-from app.connectors.base import BrokerAccount, BrokerInstrument, BrokerPosition
+from app.connectors.base import BrokerAccount, BrokerCash, BrokerInstrument, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS, INSTRUMENT_STATUS_BASE, TBankClient
 from app.connectors.tbank.mapper import map_operation
-from app.connectors.tbank.quotation import to_quantity
+from app.connectors.tbank.quotation import to_money, to_quantity
 from app.instruments import kinds
 from app.ledger.schemas import RawOperation
+from app.money import money, quantity
 
 ACCOUNT_KIND = {
     "ACCOUNT_TYPE_TINKOFF": "brokerage",
     "ACCOUNT_TYPE_TINKOFF_IIS": "iis",
 }
+
+# Коды ошибок HTTP, при которых счёт просто не поддерживает вызов, а не сломан.
+# GetPositions отвечает 404 «Account not found» для счетов типа
+# ACCOUNT_TYPE_DFA (цифровые финансовые активы) — денег и бумаг в привычном
+# смысле там нет, и падать из-за этого всей синхронизацией незачем.
+_NO_SUCH_ACCOUNT = 404
 
 # Вид инструмента по имени списочного метода справочника (INSTRUMENT_LIST_KINDS):
 # сами объекты Share/Bond/Etf/... поля с видом не несут — вид известен только из
@@ -77,6 +85,10 @@ def _to_broker_instrument(raw: dict, kind: str) -> BrokerInstrument:
         kind=kind,
         name=raw.get("name") or None,
         currency=currency.upper() if currency else None,
+        # Флаги есть и в списочных методах справочника, и в поштучном
+        # GetInstrumentBy — оба пути дают их одинаково.
+        buy_available=raw.get("buyAvailableFlag"),
+        sell_available=raw.get("sellAvailableFlag"),
     )
 
 
@@ -106,6 +118,31 @@ class TBankConnector:
         # не кэш в БД и не глобальный кэш на процесс — он живёт и умирает
         # вместе с этим объектом.
         self._bulk_instruments: dict[str, BrokerInstrument] | None = None
+        # Снимок GetPortfolio по счёту — построен лениво, при первом обращении
+        # (из fetch_positions либо fetch_prices, смотря что вызвали раньше), и
+        # переиспользуется вторым вызовом на этом же счёте в рамках прогона.
+        # Без этого кэша оркестрация (app/sync/service.py, sync_broker) на
+        # каждый счёт делает GetPortfolio дважды — тот самый класс проблем,
+        # что уже описан выше для справочника инструментов: ограничение
+        # частоты запросов T-Invest API, ответ 429. Ключ — внешний
+        # идентификатор счёта: счетов в прогоне несколько, и перепутать их
+        # снимки означает подставить одному счёту позиции и цены другого.
+        # Как и _bulk_instruments, это не кэш в БД и не кэш на процесс — он
+        # живёт минуты одного прогона и умирает вместе с этим объектом
+        # коннектора, который оркестрация создаёт заново на каждый прогон.
+        # Побочная выгода не только в экономии запросов: позиции и цены при
+        # этом читаются из одного и того же снимка брокера, а не из двух
+        # разных, между которыми цена могла успеть измениться, — сверка
+        # количества и оценка стоимости теперь согласованы.
+        self._portfolio_cache: dict[str, list[dict]] = {}
+        # Снимок GetPositions по счёту — тот же образец кэша, что и у
+        # _portfolio_cache выше, и по той же причине: fetch_cash (задача 5) и
+        # заблокированное количество бумаг (задача 6) читают один и тот же
+        # вызов, и второй из них не должен снова ходить в сеть за тем же
+        # счётом. Значение — None для счетов, которые GetPositions не
+        # поддерживает (_NO_SUCH_ACCOUNT), чтобы такой отказ тоже кэшировался,
+        # а не повторял неудачный запрос на каждое обращение.
+        self._positions_cache: dict[str, dict | None] = {}
 
     def fetch_accounts(self) -> list[BrokerAccount]:
         return [
@@ -138,10 +175,18 @@ class TBankConnector:
                 mapped.append(result)
         return mapped
 
+    def _get_portfolio(self, account_external_id: str) -> list[dict]:
+        """Снимок GetPortfolio по счёту, закэшированный на срок жизни
+        коннектора — см. комментарий к self._portfolio_cache в __init__."""
+        if account_external_id not in self._portfolio_cache:
+            self._portfolio_cache[account_external_id] = self._client.get_portfolio(account_external_id)
+        return self._portfolio_cache[account_external_id]
+
     def fetch_positions(self, account_external_id: str) -> list[BrokerPosition]:
-        raw_positions = self._client.get_portfolio(account_external_id)
+        raw_positions = self._get_portfolio(account_external_id)
         figis = {item.get("figi") for item in raw_positions if item.get("figi")}
         instruments = self._resolve_instruments(figis)
+        blocked_by_figi = self._blocked_by_figi(account_external_id)
 
         positions = []
         for item in raw_positions:
@@ -158,20 +203,160 @@ class TBankConnector:
             if instrument is None or not instrument.isin:
                 continue
             ticker = item.get("ticker") or instrument.ticker
-            positions.append(BrokerPosition(isin=instrument.isin, ticker=ticker, quantity=qty))
+            positions.append(BrokerPosition(
+                isin=instrument.isin, ticker=ticker, quantity=qty,
+                blocked=blocked_by_figi.get(figi, quantity("0")),
+            ))
         return positions
 
-    def fetch_instrument_reference(self) -> dict[str, BrokerInstrument]:
-        """Справочник инструментов брокера, ключ — ISIN. Нужен разовому
+    def _blocked_by_figi(self, account_external_id: str) -> dict[str, Decimal]:
+        """Заблокированные количества бумаг счёта, ключ — FIGI.
+
+        Сведения есть только в GetPositions; счёт, который этого вызова не
+        поддерживает, отдаёт пустое отображение, и позиции читаются как раньше,
+        просто без блокировок."""
+        payload = self._get_positions(account_external_id)
+        if payload is None:
+            return {}
+
+        result: dict[str, Decimal] = {}
+        for item in payload.get("securities") or []:
+            figi = item.get("figi")
+            raw_blocked = item.get("blocked")
+            if not figi or raw_blocked in (None, "", "0"):
+                continue
+            result[figi] = quantity(str(raw_blocked))
+        return result
+
+    def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]:
+        """Текущие цены бумаг счёта по данным брокера.
+
+        Берётся из того же GetPortfolio, что и позиции — и из того же
+        закэшированного снимка (см. _get_portfolio), если fetch_positions по
+        этому счёту в рамках прогона уже вызывался. Цена приходит в валюте
+        бумаги (`hkd`, `usd`, `cny`, `rub`), у облигаций — деньгами за штуку, а
+        не процентом от номинала, в отличие от MOEX.
+        """
+        raw_positions = self._get_portfolio(account_external_id)
+        figis = {item.get("figi") for item in raw_positions if item.get("figi")}
+        instruments = self._resolve_instruments(figis)
+
+        prices: list[BrokerPrice] = []
+        for item in raw_positions:
+            figi = item.get("figi")
+            instrument = instruments.get(figi) if figi else None
+            if instrument is None or not instrument.isin:
+                continue
+            raw_price = item.get("currentPrice") or {}
+            currency = (raw_price.get("currency") or "").upper()
+            price = to_money(raw_price)
+            # Пустая валюта — признак псевдо-позиции (рублёвый остаток закрытого
+            # счёта приходит именно так), нулевая цена — отсутствие оценки.
+            # Записать такое значит обнулить стоимость бумаги.
+            if not currency or price == 0:
+                continue
+            prices.append(BrokerPrice(isin=instrument.isin, price=price, currency=currency))
+        return prices
+
+    def fetch_cash(self, account_external_id: str) -> list[BrokerCash]:
+        """Денежные остатки счёта по данным OperationsService/GetPositions.
+
+        Источник намеренно один: то же самое (в рублях, долларах, юанях и
+        золоте) приходит и здесь массивом по валютам, и в GetPortfolio
+        псевдо-инструментами (RUB000UTSTOM и подобными). Взять оба значило бы
+        удвоить деньги в капитале — вторые в систему и так не попадают
+        (fetch_positions/fetch_prices пропускают всё без ISIN)."""
+        payload = self._get_positions(account_external_id)
+        if payload is None:
+            return []
+
+        # Валюта в money изредка повторяется (в т.ч. в разном регистре —
+        # 'rub' и 'RUB' нормализуются в одну и ту же валюту). Дубль
+        # складываем, а не берём последний: у cash_balance уникальный ключ
+        # (account_id, currency), и если бы здесь осталось две записи на одну
+        # валюту, store_cash упал бы на вставке второй, откатив SAVEPOINT
+        # всего счёта. Сложение — это ещё и единственный вариант, который не
+        # теряет деньги молча: обе записи брокер прислал как часть остатка,
+        # отбросить любую из них значило бы занизить капитал без всякого
+        # признака этого в данных.
+        #
+        # Оба массива сводятся одинаково: blocked — такой же список записей по
+        # валютам, и дубль в нём точно так же реален. «Последний побеждает»
+        # занижал бы недоступную часть (rub 300 плюс rub 200 давали 200 вместо
+        # 500) — ошибка тише денежной, но того же рода.
+        def sum_by_currency(items: list[dict] | None) -> dict[str, Decimal]:
+            totals: dict[str, Decimal] = {}
+            for item in items or []:
+                currency = (item.get("currency") or "").upper()
+                if not currency:
+                    continue
+                totals[currency] = totals.get(currency, money("0")) + to_money(item)
+            return totals
+
+        blocked_by_currency = sum_by_currency(payload.get("blocked"))
+        money_by_currency = sum_by_currency(payload.get("money"))
+
+        # Итог — объединение валют money и blocked, а не проход только по
+        # money: валюта, которая целиком зарезервирована, может не попасть в
+        # money вовсе (распоряжаемой суммы в ней нет), но деньги в ней
+        # реальны и обязаны остаться в капитале, а не пропасть из-за того,
+        # что цикл раньше видел только money.
+        balances: list[BrokerCash] = []
+        for currency in sorted(set(money_by_currency) | set(blocked_by_currency)):
+            blocked = blocked_by_currency.get(currency, money("0"))
+            # Валюты нет в money вовсе — значит распоряжаемой суммы в ней нет, а
+            # весь остаток зарезервирован. По соглашению «blocked — часть
+            # amount» (см. докстринг BrokerCash) остаток в этом случае равен
+            # блокировке, а не нулю: ноль означал бы, что денег в этой валюте
+            # нет, и они молча выпали бы из капитала — ровно то, ради чего
+            # объединение валют money и blocked здесь и заведено.
+            balances.append(BrokerCash(
+                currency=currency,
+                amount=money_by_currency.get(currency, blocked),
+                blocked=blocked,
+            ))
+        return balances
+
+    def _get_positions(self, account_external_id: str) -> dict | None:
+        """Ответ GetPositions, закэшированный на срок жизни коннектора — по
+        тому же образцу, что и _get_portfolio (см. self._portfolio_cache в
+        __init__): вызывается и fetch_cash (задача 5), и заблокированным
+        количеством бумаг (задача 6), и второй вызов на том же счёте не должен
+        снова ходить в сеть.
+
+        Возвращает None, если счёт этот вызов не поддерживает (см.
+        _NO_SUCH_ACCOUNT) — это не ошибка, а особенность типа счёта."""
+        if account_external_id not in self._positions_cache:
+            try:
+                self._positions_cache[account_external_id] = self._client.get_positions(account_external_id)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != _NO_SUCH_ACCOUNT:
+                    raise
+                logger.info(
+                    "GetPositions недоступен для счёта %s (счёт особого типа) — "
+                    "остатки и блокировки по нему не читаются",
+                    account_external_id,
+                )
+                self._positions_cache[account_external_id] = None
+        return self._positions_cache[account_external_id]
+
+    def fetch_instruments_by_figi(self) -> dict[str, BrokerInstrument]:
+        """Справочник инструментов брокера целиком, ключ — FIGI. Нужен разовому
         дозаполнению уже записанных инструментов (app/instruments/backfill.py):
         обычная синхронизация видит только те инструменты, что встретились в
         операциях её окна, а привести в порядок надо всю таблицу целиком.
-        Читающий вызов, состояние счёта не трогает."""
-        return {
-            instrument.isin: instrument
-            for instrument in self._bulk_instrument_index().values()
-            if instrument.isin
-        }
+        Читающий вызов, состояние счёта не трогает.
+
+        Ключ именно FIGI, а не ISIN, хотя дозаполнению нужен ISIN: одному ISIN
+        соответствует не одна запись справочника, а по одной на каждую
+        площадку. У OZON их четыре (TQBR, SPBXM, A36, A53), у NVDA — двенадцать,
+        и различаются они не только флагами доступности, но и валютой: зеркало
+        MTQR («NVDA-RM») торгуется за рубли и покупку разрешает, а сама NVDA на
+        SPBXM — за доллары и недоступна. Свести их в один ISIN здесь нечем:
+        какая из площадок относится к бумаге владельца, знает только домен — по
+        FIGI из журнала операций. Поэтому сведение живёт в
+        app/instruments/backfill.py, а коннектор отдаёт справочник как есть."""
+        return dict(self._bulk_instrument_index())
 
     def _bulk_instrument_index(self) -> dict[str, BrokerInstrument]:
         """Полный список инструментов по видам (INSTRUMENT_LIST_KINDS),

@@ -1,11 +1,18 @@
 import ReactECharts from "echarts-for-react";
-import { BASE_CURRENCY, formatMoney, hasForeignCurrency } from "../api/format";
+import { BASE_CURRENCY, formatMoney } from "../api/format";
 
+// Металлы перечислены все четыре, а не одно золото: METAL_CURRENCIES в
+// аналитике бэкенда знает XAU, XAG, XPT и XPD, и остаток в любом из них
+// заводит собственный класс актива. Без подписи сектор рисуется сырым ключом
+// («silver» латиницей посреди русского графика).
 const LABELS: Record<string, string> = {
   equity: "Акции",
   bonds: "Облигации",
   money_market: "Денежный рынок",
   gold: "Золото",
+  silver: "Серебро",
+  platinum: "Платина",
+  palladium: "Палладий",
   cash: "Валюта",
   derivatives: "Срочный рынок",
   mixed: "Смешанные",
@@ -18,22 +25,27 @@ const LABELS: Record<string, string> = {
 // Восемь оттенков в этом порядке и шаге под тёмную поверхность прошли
 // проверку accessibility-валидатором dataviz: попарное CVD-разделение
 // (протанопия, дейтеранопия, тританопия) и контраст с фоном приложения.
+// Серебро, платина и палладий добавлены сверх проверенной восьмёрки: у них
+// взяты оттенки из свободных участков круга (нейтральный серый, голубой,
+// оливковый), не занятых ни одним из восьми. Класс без цвета echarts
+// раскрашивает своей палитрой по порядку — то есть цвет сектора менялся бы от
+// состава портфеля, ровно то, против чего заведена эта таблица.
 const COLORS: Record<string, string> = {
   equity: "#3987e5",
   bonds: "#d95926",
   money_market: "#199e70",
   gold: "#c98500",
+  silver: "#9aa5b8",
+  platinum: "#4fb0bf",
+  palladium: "#8f9a3f",
   cash: "#d55181",
   derivatives: "#008300",
   mixed: "#9085e9",
   other: "#e66767",
 };
 
-export function AllocationChart({ data, positionCurrencies }: {
+export function AllocationChart({ data }: {
   data: Record<string, string>;
-  // Для оговорки «рублёвая часть» — тем же правилом, что и в карточке сводки
-  // (hasForeignCurrency), а не собственным.
-  positionCurrencies: string[];
 }) {
   const entries = Object.entries(data).map(([key, value]) => ({
     name: LABELS[key] ?? key,
@@ -57,7 +69,6 @@ export function AllocationChart({ data, positionCurrencies }: {
     <div className="card">
       <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>
         Структура портфеля
-        {hasForeignCurrency(positionCurrencies) ? " · рублёвая часть" : ""}
       </div>
       <ReactECharts
         style={{ height: 260 }}
@@ -67,8 +78,8 @@ export function AllocationChart({ data, positionCurrencies }: {
             // Подсказка идёт владельцу на экран, а не в геометрию графика —
             // сумма форматируется через formatMoney из исходной строки
             // (params.data.raw), а не пересчётом уже сконвертированного числа.
-            // Разбивка считается по рублёвой части портфеля — валюта здесь
-            // всегда базовая (см. BASE_CURRENCY в аналитике бэкенда).
+            // Разбивка полностью пересчитана в рубли (см. portfolio_overview
+            // в аналитике бэкенда) — валюта здесь всегда базовая.
             formatter: (params: { marker: string; name: string; data: { raw: string } }) =>
               `${params.marker}${params.name}: ${formatMoney(params.data.raw, BASE_CURRENCY)}`,
           },

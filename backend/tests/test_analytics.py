@@ -1,9 +1,15 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
+import pytest
+
+from app.accounts.cash import store_cash
 from app.analytics.service import portfolio_overview, position_rows
-from app.models import Account, DailySnapshot, Instrument, Position, Price
+from app.connectors.base import BrokerCash, BrokerPosition
+from app.models import Account, DailySnapshot, FxRate, Instrument, Position, Price
 from app.snapshots.service import snapshot_by_account, take_snapshot
+from app.sync.holdings import store_holdings
+from app.timeutils import moscow_today
 
 
 def seed(session):
@@ -33,6 +39,68 @@ def seed(session):
     ])
     session.flush()
     return account
+
+
+def add_account(session, external_id: str = "acc-1", kind: str = "brokerage") -> Account:
+    account = Account(broker="tbank", kind=kind, external_id=external_id,
+                      name="Брокерский", currency="RUB")
+    session.add(account)
+    session.flush()
+    return account
+
+
+def add_priced_position(
+    session,
+    account,
+    isin: str,
+    quantity: Decimal,
+    price: Decimal | None = None,
+    currency: str = "RUB",
+    reference_currency: str | None = None,
+    kind: str = "share",
+    restricted: bool = False,
+    average_price: Decimal = Decimal("0"),
+    on_date: date = date(2026, 3, 12),
+) -> Instrument:
+    """Позиция на счёте вместе с её последней котировкой.
+
+    `currency` — валюта цены, а не справочника: это то, чем оценка теперь
+    руководствуется. `reference_currency` задаётся отдельно только там, где они
+    должны разойтись (замещающая облигация: в справочнике брокера рубли,
+    котируется в юанях). `price=None` — котировки нет вовсе, позиция остаётся
+    неоценённой.
+    """
+    instrument = Instrument(isin=isin, ticker=isin, secid=isin, kind=kind,
+                            currency=reference_currency or currency,
+                            trading_restricted=restricted)
+    session.add(instrument)
+    session.flush()
+
+    session.add(Position(account_id=account.id, instrument_id=instrument.id,
+                         quantity=quantity, average_price=average_price))
+    if price is not None:
+        session.add(Price(instrument_id=instrument.id, on_date=on_date,
+                          close=price, currency=currency, source="tbank"))
+    session.flush()
+    return instrument
+
+
+def add_rate(session, currency: str, rate: Decimal, source: str = "cbr",
+             days_ago: int = 0) -> FxRate:
+    """Курс к рублю на сегодняшнюю московскую дату.
+
+    Именно на сегодняшнюю: оценка спрашивает курсы на `moscow_today()`, и курс
+    под фиксированной датой из прошлого она бы нашла, а под датой из будущего —
+    уже нет. Привязка к «сегодня» делает тест независимым от дня запуска.
+
+    `days_ago` сдвигает дату назад — там, где проверяется именно несвежесть
+    курса, а не сам факт его наличия.
+    """
+    stored = FxRate(currency=currency, on_date=moscow_today() - timedelta(days=days_ago),
+                    rate=rate, source=source)
+    session.add(stored)
+    session.flush()
+    return stored
 
 
 def test_total_value_uses_last_prices(session):
@@ -267,10 +335,11 @@ def test_by_account_keeps_distinct_names_as_own_rows(session):
 def _seed_foreign(session, account, source="manual"):
     """Позиция, номинированная не в рублях, — на живых данных таких четверть.
 
-    Котировка по умолчанию не из MOEX: рублёвые котировки MOEX для валютной
-    бумаги при оценке не используются (см. latest_prices), а здесь проверяется
-    именно разделение валют в итогах — то, как поведёт себя валютная позиция,
-    когда курсовой источник цен появится."""
+    Валюта проставлена и у бумаги, и у её цены: цена в долларах — это ровно то,
+    что приходит от брокера, а MOEX за такой бумагой вообще не ходит (см.
+    refresh_last_prices). Курс к рублю сознательно не заводится: тесты вокруг
+    этого помощника проверяют, как ведёт себя позиция, которую в рубли перевести
+    нечем."""
     foreign = Instrument(isin="US0378331005", ticker="AAPL", secid="AAPL",
                          kind="share", currency="USD", issuer="Apple")
     session.add(foreign)
@@ -278,41 +347,93 @@ def _seed_foreign(session, account, source="manual"):
     session.add(Position(account_id=account.id, instrument_id=foreign.id,
                          quantity=Decimal("10"), average_price=Decimal("150")))
     session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
-                       close=Decimal("200"), source=source))
+                       close=Decimal("200"), currency="USD", source=source))
     session.flush()
     return foreign
 
 
-def test_ruble_moex_quote_does_not_value_a_foreign_position(session):
-    """MOEX отдаёт цену в рублях. Показать её под знаком доллара и вычесть
-    позицию из рублёвого итога — хуже, чем честно сказать «не оценена»."""
+def test_position_currency_comes_from_its_price_not_from_the_reference(session):
+    """Замещающая облигация: в справочнике брокера она рублёвая, потому что
+    расчёты по ней рублёвые, а котируется в юанях. Оценка обязана верить цене —
+    взять валюту из справочника значило бы посчитать юани рублями один к
+    одному."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU000A1054W1", quantity=Decimal("10"),
+                        price=Decimal("969.20"), currency="CNY",
+                        reference_currency="RUB", kind="bond")
+    add_rate(session, "CNY", Decimal("12.1655"))
+
+    overview = portfolio_overview(session)
+    row = position_rows(session)[0]
+
+    assert row.currency == "CNY"
+    assert overview.by_currency == {"CNY": Decimal("9692.0000")}
+    assert overview.total_value == Decimal("117908.0260")
+
+
+def test_profit_is_unknown_when_average_and_quote_are_in_different_currencies(session):
+    """Живой RU000A10CRC4: замещающая облигация, куплена за рубли (`BUY 56 @
+    8307.18 RUB`), а MOEX котирует её в процентах от долларового номинала —
+    96,4997 $. Вычитание рублёвой себестоимости из долларовой стоимости давало
+    «−98,8 %», хотя 8138,62 / 96,4997 — это курс доллара, а не убыток. Шесть
+    таких позиций и 13,7 % капитала владельца показывались как почти полная
+    потеря. Неизвестная доходность честнее уверенного минуса; стоимость при
+    этом считается как считалась."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU000A10CRC4", quantity=Decimal("56"),
+                        price=Decimal("96.4997"), currency="USD",
+                        reference_currency="RUB", kind="bond",
+                        average_price=Decimal("8138.6232"))
+    add_rate(session, "USD", Decimal("82.1665"))
+
+    row = position_rows(session)[0]
+
+    assert (row.profit, row.profit_percent) == (None, None)
+    # Стоимость и её рублёвая оценка от разошедшихся валют не страдают.
+    assert row.market_value == Decimal("5403.9832")
+    assert row.value_base == Decimal("444026.3856")
+    # Средняя подписывается валютой справочника, а не валютой котировки: иначе
+    # 8 138,62 ₽ показывались бы как 8 138,62 $.
+    assert (row.currency, row.average_price_currency) == ("USD", "RUB")
+
+
+def test_profit_is_computed_when_both_currencies_agree(session):
+    """Обычная валютная бумага: и расчёты, и котировка в долларах — доходность
+    считается как прежде, разошедшиеся валюты её не отменяют."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=Decimal("200"), currency="USD",
+                        average_price=Decimal("150"))
+    add_rate(session, "USD", Decimal("82.1665"))
+
+    row = position_rows(session)[0]
+
+    assert row.profit == Decimal("500.0000")
+    assert row.profit_percent == Decimal("33.3333")
+    assert (row.currency, row.average_price_currency) == ("USD", "USD")
+
+
+def test_position_currencies_include_unvalued_positions(session):
+    """by_currency отвечает на вопрос «сколько денег в каждой валюте» и
+    позицию без котировки не видит вовсе; position_currencies отвечает на
+    вопрос «портфель вообще только рублёвый» и обязан её учитывать — валюта у
+    неё известна из справочника, даже когда цены нет."""
     account = seed(session)
-    _seed_foreign(session, account, source="moex")
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=None, currency="USD")
 
     overview = portfolio_overview(session)
 
     assert overview.positions_total == 4
     assert overview.valued_positions == 3
-    assert sorted(overview.by_currency) == ["RUB"]
-    # Но валюта позиции всё равно известна — оговорка «рублёвая часть» нужна.
-    assert overview.position_currencies == ["RUB", "USD"]
-
-
-def test_position_currencies_include_unvalued_positions(session):
-    """by_currency отвечает на вопрос «сколько денег в каждой валюте» и
-    неоценённую позицию не видит; position_currencies отвечает на вопрос
-    «портфель вообще только рублёвый» и обязан её учитывать."""
-    account = seed(session)
-    _seed_foreign(session, account, source="moex")
-
-    overview = portfolio_overview(session)
     assert "USD" not in overview.by_currency
     assert "USD" in overview.position_currencies
 
 
-def test_foreign_currency_is_kept_out_of_the_ruble_total(session):
-    """Умножение количества на цену без учёта валюты и подпись рублём молча
-    завышали капитал. Рублёвый итог считается только по рублёвой части."""
+def test_position_without_a_rate_is_kept_out_of_the_ruble_total(session):
+    """Цена в долларах есть, курса нет — в рублёвый итог такая позиция войти не
+    может: подставить рубль вместо доллара значит занизить её в восемьдесят раз
+    и показать это как точную цифру. В своей валюте она при этом видна."""
     account = seed(session)
     _seed_foreign(session, account)
 
@@ -324,8 +445,8 @@ def test_foreign_currency_is_kept_out_of_the_ruble_total(session):
 
 
 def test_breakdowns_add_up_to_the_ruble_total(session):
-    """Разбивки считаются по той же рублёвой части, что и итог, — иначе они
-    с ним не сходятся."""
+    """Разбивки считаются по той же оценённой в рублях части, что и итог, —
+    иначе они с ним не сходятся."""
     account = seed(session)
     _seed_foreign(session, account)
 
@@ -335,15 +456,49 @@ def test_breakdowns_add_up_to_the_ruble_total(session):
     assert sum(overview.by_account.values()) == overview.total_value
 
 
-def test_foreign_position_is_still_counted_as_valued(session):
-    """Позиция в валюте оценена (котировка есть) — она не «неоценённая», она
-    просто вне рублёвого итога. Путать эти две вещи нельзя."""
-    account = seed(session)
-    _seed_foreign(session, account)
+def test_breakdowns_add_up_to_the_total_with_cash_too(session):
+    """Та же сходимость, но на полном составе капитала: бумаги в двух валютах,
+    остатки в двух валютах и второй счёт, у которого из активов только деньги.
+    Денежный цикл — самое свежее место обзора, и расхождение разбивок с итогом
+    появится в нём первым; на одних бумагах его не увидеть."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("10"),
+                        price=Decimal("300"), currency="RUB")
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("20782.27"), blocked=Decimal("0")),
+        BrokerCash(currency="HKD", amount=Decimal("150"), blocked=Decimal("0")),
+    ])
+    cash_only = add_account(session, external_id="acc-2")
+    store_cash(session, cash_only, [BrokerCash(currency="RUB", amount=Decimal("500"),
+                                               blocked=Decimal("0"))])
+    add_rate(session, "HKD", Decimal("10.4724"))
 
     overview = portfolio_overview(session)
+
+    assert overview.securities_value == Decimal("18457.2624")
+    assert overview.cash_value == Decimal("22853.1300")
+    assert overview.total_value == Decimal("41310.3924")
+    assert sum(overview.by_asset_class.values()) == overview.total_value
+    assert sum(overview.by_account.values()) == overview.total_value
+    # Счёт без единой бумаги обязан быть в разбивке: деньги — тоже капитал.
+    assert sorted(overview.by_account) == [account.id, cash_only.id]
+
+
+def test_foreign_position_with_a_rate_is_counted_as_valued(session):
+    """Курс появился — и валютная позиция становится полноценной частью
+    капитала, а покрытие оценкой полным. Ровно этого не хватало: раньше такая
+    позиция не входила в итог никогда, сколько бы курсов ни было."""
+    account = seed(session)
+    _seed_foreign(session, account)
+    add_rate(session, "USD", Decimal("82.1665"))
+
+    overview = portfolio_overview(session)
+
     assert overview.positions_total == 4
     assert overview.valued_positions == 4
+    assert overview.total_value == Decimal("171683.0000")
 
 
 def test_position_row_carries_its_own_currency(session):
@@ -384,3 +539,404 @@ def test_by_account_keeps_same_name_accounts_apart(session):
     assert overview.by_account[first.id] == Decimal("150.0000")
     assert overview.by_account[second.id] == Decimal("300.0000")
     assert sum(overview.by_account.values()) == overview.total_value
+
+
+def test_total_includes_cash(session):
+    """Капитал — это бумаги плюс деньги. Раньше денег в системе не было вовсе,
+    и главная цифра дашборда была неполна на весь денежный остаток."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("10"),
+                        price=Decimal("300"), currency="RUB")
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("20782.27"),
+                                             blocked=Decimal("0"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.securities_value == Decimal("3000.0000")
+    assert overview.cash_value == Decimal("20782.2700")
+    assert overview.total_value == Decimal("23782.2700")
+
+
+def test_foreign_position_enters_the_total_by_rate(session):
+    """Ровно та поломка, ради которой затевалась фаза: 34 валютные позиции из 59
+    не входили в капитал никак."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("15457.2624")
+    assert overview.by_currency["HKD"] == Decimal("1476.0000")
+
+
+def test_position_without_rate_is_counted_as_unvalued(session):
+    """Цена есть, курса нет — позиция не входит в рублёвый итог и обязана быть
+    посчитана как неоценённая, иначе покрытие соврёт «оценены все»."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0000000000", quantity=Decimal("3"),
+                        price=Decimal("79.20"), currency="USD")
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("0.0000")
+    assert (overview.valued_positions, overview.positions_total) == (0, 1)
+
+
+def test_cash_lands_in_its_own_asset_class(session):
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("100"),
+                                             blocked=Decimal("0"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.by_asset_class == {"cash": Decimal("100.0000")}
+
+
+def test_gold_balance_is_valued_as_metal(session):
+    """Золото приходит в остатках валютным кодом XAU и граммами; курс к рублю
+    берётся с MOEX. В классах активов это металл, а не деньги."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="XAU", amount=Decimal("10"),
+                                             blocked=Decimal("0"))])
+    add_rate(session, "XAU", Decimal("11410"), source="moex")
+
+    overview = portfolio_overview(session)
+
+    assert overview.by_asset_class == {"gold": Decimal("114100.0000")}
+    assert overview.total_value == Decimal("114100.0000")
+
+
+def test_blocked_quantity_counts_as_restricted(session):
+    """Заблокированные бумаги никуда не делись и в капитал входят — брокер
+    считает их так же. Отдельная цифра нужна, чтобы владелец видел, какой
+    частью капитала он не может распоряжаться."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000123577", quantity=Decimal("92"),
+                        price=Decimal("100"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="HK0000123577", ticker="x",
+                                                     quantity=Decimal("92"),
+                                                     blocked=Decimal("92"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("9200.0000")
+    assert overview.restricted_value == Decimal("9200.0000")
+
+
+def test_partially_blocked_position_counts_only_its_blocked_share(session):
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("100"),
+                        price=Decimal("300"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="RU0009029540", ticker="SBER",
+                                                     quantity=Decimal("100"),
+                                                     blocked=Decimal("25"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("30000.0000")
+    assert overview.restricted_value == Decimal("7500.0000")
+
+
+def test_instrument_restricted_in_trading_counts_whole_position(session):
+    """Иностранная акция: брокер не даёт ни купить, ни продать. Заблокированного
+    количества у неё при этом нет — недоступна вся позиция, а не её часть.
+    Таких в портфеле владельца больше двадцати, и именно они составляют
+    основную недоступную часть капитала."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD", restricted=True)
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.restricted_value == Decimal("15457.2624")
+
+
+def test_blocked_more_than_the_ledger_knows_does_not_exceed_the_position(session):
+    """Заблокированное количество приходит из снимка брокера, количество
+    позиции — из журнала операций, и расхождение между ними система не
+    предполагает, а специально ищет и хранит (сверка, quantity_mismatch). У
+    HK0000123577 брокер показывает balance=0 и blocked=92; если журнал знает
+    десять бумаг, доля «92 из 10» дала бы недоступного вдевятеро больше, чем
+    стоит вся позиция, — на экране «недоступно 9 200 ₽» при капитале 1 000 ₽."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000123577", quantity=Decimal("10"),
+                        price=Decimal("100"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="HK0000123577", ticker="x",
+                                                     quantity=Decimal("92"),
+                                                     blocked=Decimal("92"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("1000.0000")
+    assert overview.restricted_value == Decimal("1000.0000")
+
+
+def test_blocked_short_position_does_not_flip_the_sign(session):
+    """Короткая позиция стоит отрицательных денег, и заблокированная её часть —
+    такое же обязательство. Деление на отрицательное количество как есть
+    переворачивало знак: недоступное показывалось положительным, будто шорт чем-то
+    владеет, и вдобавок не сходилось со знаком капитала."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("-10"),
+                        price=Decimal("100"), currency="RUB")
+    store_holdings(session, account, [BrokerPosition(isin="RU0009029540", ticker="SBER",
+                                                     quantity=Decimal("-10"),
+                                                     blocked=Decimal("10"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("-1000.0000")
+    assert overview.restricted_value == Decimal("-1000.0000")
+
+
+def test_blocked_cash_counts_as_restricted(session):
+    """Заблокированные деньги — самая бесспорная часть ответа на вопрос «чем я
+    не могу распорядиться»: на живом счёте валюта бывает зарезервирована
+    целиком. В капитал они входят в составе остатка, а не сверх него, поэтому
+    cash_value от них не меняется."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=Decimal("20782.27"),
+                                             blocked=Decimal("782.27"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.cash_value == Decimal("20782.2700")
+    assert overview.total_value == Decimal("20782.2700")
+    assert overview.restricted_value == Decimal("782.2700")
+
+
+def test_blocked_foreign_cash_is_restricted_by_rate(session):
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="HKD", amount=Decimal("150"),
+                                             blocked=Decimal("50"))])
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.cash_value == Decimal("1570.8600")
+    assert overview.restricted_value == Decimal("523.6200")
+
+
+def test_blocked_cash_without_a_rate_is_not_counted_as_restricted(session):
+    """Курса нет — заблокированный остаток нечем оценить в рублях, и в
+    restricted_value он войти не может, ровно как не входит в сам капитал.
+    Ноль вместо оценки соврал бы в обе стороны сразу."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="USD", amount=Decimal("500"),
+                                             blocked=Decimal("500"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("0.0000")
+    assert overview.restricted_value == Decimal("0.0000")
+    assert overview.by_currency["USD"] == Decimal("500.0000")
+
+
+@pytest.mark.parametrize(
+    ("amount", "blocked"),
+    [
+        # Обычный случай: часть остатка зарезервирована.
+        (Decimal("1000"), Decimal("300")),
+        # Заблокировано ровно всё.
+        (Decimal("1000"), Decimal("1000")),
+        # Соглашение «blocked — часть amount» нарушено брокером: блокировка
+        # больше остатка. Проверить настоящую семантику на живом счёте пока
+        # нечем — у владельца blocked нулевой во всех девяти строках.
+        (Decimal("1000"), Decimal("5000")),
+        # Крайний случай того же нарушения: остатка нет вовсе, блокировка есть.
+        (Decimal("0"), Decimal("500")),
+        # Долг по счёту: блокировать в отрицательном остатке нечего.
+        (Decimal("-3571.34"), Decimal("100")),
+    ],
+)
+def test_restricted_cash_never_exceeds_the_balance_it_belongs_to(session, amount, blocked):
+    """Вклад заблокированного денежного остатка в «Недоступно к продаже» не
+    может быть больше самого остатка, которому он принадлежит: ни при
+    частичной блокировке, ни при блокировке всего остатка, ни при нарушении
+    соглашения «blocked — часть amount» (блокировка больше остатка или
+    остаток нулевой), ни при долге по счёту, где блокировать нечего.
+    Опереться на честность брокера здесь нельзя — соглашение о `blocked`
+    держится на докстринге, а не на проверенных данных.
+
+    Счёт в тесте держит одну валюту и не держит бумаг, поэтому
+    restricted_value целиком состоит из этого вклада, а total_value равен
+    самому остатку — сравнение с ним проверяет именно эту границу, а не
+    общее свойство сводки при любом сочетании кэша и бумаг (при отрицательном
+    остатке кэша и одновременно ограниченной в обороте бумаге на другом
+    инструменте общий капитал может уйти в минус, пока вклад бумаги в
+    restricted_value остаётся положительным)."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=amount, blocked=blocked)])
+
+    overview = portfolio_overview(session)
+
+    assert Decimal("0") <= overview.restricted_value <= max(overview.total_value, Decimal("0"))
+
+
+def test_restriction_and_blocking_are_not_added_up(session):
+    """Бумага ограничена в обороте и вдобавок заблокирована. Недоступна она
+    ровно один раз: сложение дало бы больше стоимости самой позиции."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000051877", quantity=Decimal("79"),
+                        price=Decimal("100"), currency="RUB", restricted=True)
+    store_holdings(session, account, [BrokerPosition(isin="HK0000051877", ticker="y",
+                                                     quantity=Decimal("79"),
+                                                     blocked=Decimal("79"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.restricted_value == Decimal("7900.0000")
+
+
+def test_cash_without_rate_stays_out_of_the_total_but_stays_visible(session):
+    """Остаток в валюте, курса к которой нет, в капитал войти не может. Но
+    исчезнуть бесследно он тоже не должен: в разбивке по валютам он виден в
+    своей валюте, и владелец понимает, что деньги не потерялись."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="USD", amount=Decimal("500"),
+                                             blocked=Decimal("0"))])
+
+    overview = portfolio_overview(session)
+
+    assert overview.total_value == Decimal("0.0000")
+    assert overview.cash_value == Decimal("0.0000")
+    assert overview.by_currency["USD"] == Decimal("500.0000")
+    assert overview.by_asset_class == {}
+
+
+def test_position_row_carries_both_kinds_of_unavailability(session):
+    """Наружу обе причины сводятся в одну сумму, но в строке позиции они
+    остаются раздельными: `blocked` — количество на счёте, `restricted` —
+    свойство самой бумаги. Иначе происхождение недоступности не увидеть."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU0009029540", quantity=Decimal("100"),
+                        price=Decimal("300"), currency="RUB")
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD", restricted=True)
+    store_holdings(session, account, [BrokerPosition(isin="RU0009029540", ticker="SBER",
+                                                     quantity=Decimal("100"),
+                                                     blocked=Decimal("25"))])
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    rows = {row.isin: row for row in position_rows(session)}
+
+    sber = rows["RU0009029540"]
+    assert (sber.blocked, sber.restricted) == (Decimal("25.00000000"), False)
+    assert sber.value_base == Decimal("30000.0000")
+    assert sber.price_source == "tbank"
+
+    foreign = rows["HK0000009866"]
+    assert (foreign.blocked, foreign.restricted) == (Decimal("0"), True)
+    # Стоимость строки — в валюте бумаги, рублёвая оценка идёт рядом отдельно.
+    assert foreign.market_value == Decimal("1476.0000")
+    assert foreign.value_base == Decimal("15457.2624")
+
+
+def test_fx_as_of_is_reported_separately_from_price_date(session):
+    """Котировки обновляются каждые пятнадцать минут, курсы — раз в сутки.
+    Одна дата «данные на» на двоих врала бы про свежесть одного из источников."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD", on_date=date(2026, 3, 12))
+    add_rate(session, "HKD", Decimal("10.4724"))
+
+    overview = portfolio_overview(session)
+
+    assert overview.as_of == date(2026, 3, 12)
+    assert overview.fx_as_of == moscow_today()
+
+
+def test_fx_as_of_is_none_without_rates(session):
+    seed(session)
+
+    assert portfolio_overview(session).fx_as_of is None
+
+
+def test_fx_as_of_is_the_oldest_rate_that_took_part_in_the_calculation(session):
+    """Живой случай: золото котируется на MOEX ежедневно и курс у него
+    сегодняшний, а все полсотни курсов ЦБ — двухдневной давности. Максимум по
+    таблице подписывал бы дашборд сегодняшним числом, хотя доллары и юани
+    посчитаны по позавчерашним курсам. Отвались ЦБ на неделю — подпись
+    оставалась бы свежей, потому что золото продолжает обновляться."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    store_cash(session, account, [BrokerCash(currency="XAU", amount=Decimal("10"),
+                                             blocked=Decimal("0"))])
+    add_rate(session, "XAU", Decimal("11410"), source="moex")
+    add_rate(session, "HKD", Decimal("10.4724"), days_ago=2)
+
+    overview = portfolio_overview(session)
+
+    assert overview.fx_as_of == moscow_today() - timedelta(days=2)
+
+
+def test_fx_as_of_ignores_currencies_the_portfolio_does_not_use(session):
+    """Курсы грузятся все подряд, а не только по валютам портфеля (см.
+    refresh_fx_rates), и среди полусотни строк всегда найдётся валюта, которую
+    ЦБ давно не обновлял. Тянуть дату назад из-за курса, который в расчёте не
+    участвовал, — врать в другую сторону."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    add_rate(session, "HKD", Decimal("10.4724"))
+    add_rate(session, "AMD", Decimal("0.21"), days_ago=30)
+
+    assert portfolio_overview(session).fx_as_of == moscow_today()
+
+
+def test_ruble_only_portfolio_reports_no_rate_date(session):
+    """Рубль к рублю — единица, она не хранится и устареть не может. Ни одного
+    курса в расчёт не пошло, значит и подписывать нечего: «курсы на 8 августа»
+    у рублёвого портфеля описывало бы данные, которых он не касался."""
+    seed(session)
+    add_rate(session, "USD", Decimal("82.1665"), days_ago=5)
+
+    assert portfolio_overview(session).fx_as_of is None
+
+
+def test_metal_without_a_rate_is_named_among_uncounted_currencies(session):
+    """Серебро, платина и палладий известны разбивке по классам активов, но в
+    METAL_SECIDS есть только золото — курса серебру взять неоткуда, и остаток
+    в нём выпадает из капитала всегда. Покрытие считает одни позиции и об этом
+    молчит: без отдельного признака сто тысяч рублей исчезают, а цифра рядом
+    выглядит уверенно."""
+    account = add_account(session)
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("1000"), blocked=Decimal("0")),
+        BrokerCash(currency="XAG", amount=Decimal("500"), blocked=Decimal("0")),
+    ])
+
+    overview = portfolio_overview(session)
+
+    assert overview.currencies_without_rate == ["XAG"]
+    assert overview.total_value == Decimal("1000.0000")
+    # Покрытие по позициям на это никак не реагирует — потому признак и нужен.
+    assert (overview.valued_positions, overview.positions_total) == (0, 0)
+
+
+def test_position_without_a_quote_does_not_blame_the_rates(session):
+    """У бумаги без котировки курс не спрашивается вовсе: оценивать нечего.
+    Записать её валюту в «нет курса» значило бы назвать причину, которой нет, и
+    отправить владельца чинить не то."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=None, currency="USD")
+
+    overview = portfolio_overview(session)
+
+    assert overview.currencies_without_rate == []
+    assert (overview.valued_positions, overview.positions_total) == (0, 1)
+
+
+def test_priced_position_without_a_rate_names_its_currency(session):
+    """А вот когда цена есть, а курса нет — причина именно в курсе, и её надо
+    назвать поимённо: «цены есть только для N позиций» тут врёт."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=Decimal("200"), currency="USD")
+
+    assert portfolio_overview(session).currencies_without_rate == ["USD"]

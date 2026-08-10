@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://jarvis:jarvis@localhost:5433/jarvis"
     tbank_token: str = ""
     moex_base_url: str = "https://iss.moex.com/iss"
+    cbr_base_url: str = "https://www.cbr.ru"
 
 
 @lru_cache

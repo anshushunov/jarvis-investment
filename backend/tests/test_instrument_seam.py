@@ -19,7 +19,7 @@ from app.instruments.backfill import backfill_instruments
 from app.instruments.service import resolve_instrument, secid_from_ticker
 from app.ledger.schemas import RawOperation
 from app.marketdata.service import ENGINE_MARKET_BY_KIND
-from app.models import Instrument, OperationType
+from app.models import Account, Instrument, OperationType, Transaction
 from app.sync.service import sync_broker
 
 BASE = "https://invest-public-api.tinkoff.ru/rest"
@@ -197,7 +197,7 @@ def test_backfill_keeps_currency_when_reference_has_none(session):
     session.flush()
 
     changed = backfill_instruments(session, {
-        FOREIGN_ISIN: BrokerInstrument(isin=FOREIGN_ISIN, ticker="700",
+        FOREIGN_FIGI: BrokerInstrument(isin=FOREIGN_ISIN, ticker="700",
                                        kind="share", name="Tencent", currency=None),
     })
 
@@ -211,7 +211,7 @@ def test_backfill_fixes_currency_written_from_payment(session):
     session.flush()
 
     changed = backfill_instruments(session, {
-        FOREIGN_ISIN: BrokerInstrument(isin=FOREIGN_ISIN, ticker="700",
+        FOREIGN_FIGI: BrokerInstrument(isin=FOREIGN_ISIN, ticker="700",
                                        kind="share", name="Tencent", currency="HKD"),
     })
 
@@ -230,7 +230,7 @@ def test_backfill_fixes_instruments_never_seen_in_the_sync_window(session):
     session.flush()
 
     changed = backfill_instruments(session, {
-        BOND_ISIN: BrokerInstrument(isin=BOND_ISIN, ticker="SU26238RMFS4",
+        BOND_FIGI: BrokerInstrument(isin=BOND_ISIN, ticker="SU26238RMFS4",
                                     kind="bond", name="ОФЗ 26238"),
     })
 
@@ -261,12 +261,158 @@ def test_backfill_is_idempotent(session):
                            kind="share", currency="RUB"))
     session.flush()
     reference = {
-        BOND_ISIN: BrokerInstrument(isin=BOND_ISIN, ticker="SU26238RMFS4",
+        BOND_FIGI: BrokerInstrument(isin=BOND_ISIN, ticker="SU26238RMFS4",
                                     kind="bond", name="ОФЗ 26238"),
     }
 
     assert backfill_instruments(session, reference) == 1
     assert backfill_instruments(session, reference) == 0
+
+
+# Площадка бумаги: у одного ISIN в справочнике брокера до двенадцати записей,
+# и берётся из них та, на которой бумага у владельца лежит. Ниже — обе стороны
+# правила и то, что вместе с флагами из той же записи приезжают валюта, вид и
+# название.
+
+MIRROR_FIGI = "TCSC326G1040"
+
+
+def _instrument_traded_at(session, figi: str, **fields) -> Instrument:
+    """Инструмент, у которого в журнале есть операция на площадке `figi`.
+    Именно эта операция и сообщает дозаполнению, какая из записей справочника
+    относится к бумаге владельца."""
+    account = Account(broker="tbank", external_id="1000000001", name="Брокерский", kind="brokerage")
+    instrument = Instrument(**fields)
+    session.add_all([account, instrument])
+    session.flush()
+    session.add(Transaction(
+        account_id=account.id, instrument_id=instrument.id, op_type=OperationType.BUY,
+        executed_at=datetime(2026, 3, 12, tzinfo=timezone.utc), quantity=Decimal("1"),
+        price=Decimal("100"), amount=Decimal("-100"), currency="USD", fee=Decimal("0"),
+        external_id="op-1", source="tbank", dedup_key=f"tbank:{figi}:op-1",
+        payload={"figi": figi},
+    ))
+    session.flush()
+    return instrument
+
+
+def test_backfill_restricts_when_the_owners_board_forbids_both(session):
+    """Основная площадка запрещает обе операции, зеркальная разрешает обе.
+    Бумага владельца лежит на основной — значит она ограничена в обороте, и
+    наличие живого зеркала этого не отменяет. Так на живых данных были потеряны
+    Unity, Block и Teladoc: правило «побеждает самая доступная запись»
+    объявляло их свободными."""
+    instrument = _instrument_traded_at(
+        session, "BBG000BBJQV0",
+        isin="US67066G1040", ticker="NVDA", secid="NVDA", kind="share", currency="USD",
+    )
+
+    backfill_instruments(session, {
+        "BBG000BBJQV0": BrokerInstrument(isin="US67066G1040", ticker="NVDA", kind="share",
+                                         name="NVIDIA", currency="USD",
+                                         buy_available=False, sell_available=False),
+        MIRROR_FIGI: BrokerInstrument(isin="US67066G1040", ticker="NVDA-RM", kind="share",
+                                      name="NVIDIA", currency="RUB",
+                                      buy_available=True, sell_available=True),
+    })
+
+    assert instrument.trading_restricted is True
+
+
+def test_backfill_frees_when_the_owners_board_allows(session):
+    """Обратная сторона: бумага владельца лежит на основной площадке, которая
+    операции разрешает, а служебные доски того же ISIN — нет. Ограничения быть
+    не должно. Так на живых данных ограниченными оказывались OZON, EQMX и GOLD:
+    правило «побеждает последняя запись по порядку ответа» ловило служебную
+    доску."""
+    instrument = _instrument_traded_at(
+        session, "TCS80A10CW95",
+        isin="RU000A10CW95", ticker="OZON", secid="OZON", kind="share", currency="RUB",
+        trading_restricted=True,
+    )
+
+    backfill_instruments(session, {
+        "TCS80A10CW95": BrokerInstrument(isin="RU000A10CW95", ticker="OZON", kind="share",
+                                         name="Озон", currency="RUB",
+                                         buy_available=True, sell_available=True),
+        "TCS70A10CW95": BrokerInstrument(isin="RU000A10CW95", ticker="RU000A10CW95",
+                                         kind="share", name="Озон", currency="RUB",
+                                         buy_available=False, sell_available=False),
+    })
+
+    assert instrument.trading_restricted is False
+
+
+def test_backfill_takes_currency_kind_and_name_from_the_owners_board(session):
+    """Из записи площадки приезжают не только флаги: у зеркала другая валюта и
+    другое название. Живая проверка 10.08.2026: выбор чужой записи переписал
+    валюту 79 американским акциям на рубли, и AT&T с secid «T» после этого
+    поехала за котировкой на MOEX, где под тем же идентификатором торгуются
+    Т-Технологии."""
+    instrument = _instrument_traded_at(
+        session, "BBG000BSJK37",
+        isin="US00206R1023", ticker="T", secid="T", kind="other", currency="RUB",
+    )
+
+    backfill_instruments(session, {
+        "BBG000BSJK37": BrokerInstrument(isin="US00206R1023", ticker="T", kind="share",
+                                         name="AT&T", currency="USD",
+                                         buy_available=False, sell_available=False),
+        "TCSC432R1023": BrokerInstrument(isin="US00206R1023", ticker="AT-RM", kind="share",
+                                         name="AT&T (рубли)", currency="RUB",
+                                         buy_available=True, sell_available=True),
+    })
+
+    assert instrument.currency == "USD"
+    assert instrument.kind == "share"
+    assert instrument.issuer == "AT&T"
+
+
+def test_backfill_falls_back_to_isin_when_the_board_is_unknown(session):
+    """Инструмент без единой операции в журнале — например заведённый из снимка
+    позиций брокера — площадкой не опознаётся. Тогда справочник сводится по
+    ISIN, и из записей выигрывает та, что сообщает о доступности больше:
+    правило грубее, но лучше, чем не дозаполнить бумагу вовсе."""
+    session.add(Instrument(isin="US67066G1040", ticker="NVDA", secid="NVDA",
+                           kind="other", currency="RUB"))
+    session.flush()
+
+    backfill_instruments(session, {
+        "BBG000BBJQV0": BrokerInstrument(isin="US67066G1040", ticker="NVDA", kind="share",
+                                         name="NVIDIA", currency="USD",
+                                         buy_available=False, sell_available=False),
+        MIRROR_FIGI: BrokerInstrument(isin="US67066G1040", ticker="NVDA-RM", kind="share",
+                                      name="NVIDIA", currency="RUB",
+                                      buy_available=True, sell_available=True),
+    })
+
+    stored = session.query(Instrument).filter_by(isin="US67066G1040").one()
+    assert stored.kind == "share"
+    assert stored.trading_restricted is False
+
+
+def test_backfill_fallback_prefers_a_board_with_known_flags(session):
+    """Та же запасная ветка, но про запись без флагов (ранг 0 в
+    _availability_rank): она не должна вытеснять запись с флагами. «Сведений
+    нет» оставило бы признак ограничения прежним, то есть отменило бы работу
+    дозаполнения ради записи, которая не сообщает ничего.
+
+    Запись без флагов идёт первой, а запрещающая — второй, и обе одинаково
+    «недоступны» на глаз: без отдельного ранга для «сведений нет» первая
+    осталась бы победителем при равенстве, и ограничение не проставилось бы."""
+    session.add(Instrument(isin="RU000A10F728", ticker="RU000A10F728",
+                           secid="RU000A10F728", kind="bond", currency="RUB"))
+    session.flush()
+
+    backfill_instruments(session, {
+        "NSD00A10F728": BrokerInstrument(isin="RU000A10F728", ticker="RU000A10F728",
+                                         kind="bond", name="Газпром капитал"),
+        "A5300A10F728": BrokerInstrument(isin="RU000A10F728", ticker="RU000A10F728",
+                                         kind="bond", name="Газпром капитал",
+                                         buy_available=False, sell_available=False),
+    })
+
+    assert session.query(Instrument).filter_by(isin="RU000A10F728").one().trading_restricted is True
 
 
 def test_backfill_does_not_erase_known_kind_with_unknown(session):

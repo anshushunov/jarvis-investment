@@ -1,4 +1,5 @@
-import { BASE_CURRENCY, formatMoney, hasForeignCurrency } from "../api/format";
+import { coverageWarning } from "../api/coverage";
+import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -7,46 +8,72 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "ошибка синхронизации",
 };
 
-function foreignTotals(byCurrency: Record<string, string>): [string, string][] {
-  return Object.entries(byCurrency).filter(([currency]) => currency !== BASE_CURRENCY);
-}
-
-// Позиции в валютах, отличных от рубля, в совокупный капитал не входят:
-// пересчёта по курсам пока нет, а складывать разные деньги под знаком рубля
-// нельзя. Показываем их отдельным итогом по каждой валюте.
-function ForeignCurrencyTotals({ byCurrency }: { byCurrency: Record<string, string> }) {
-  const foreign = foreignTotals(byCurrency);
-  if (foreign.length === 0) return null;
-
+// Из чего складывается капитал. Одна общая цифра не отвечает на вопрос,
+// изменился портфель или просто пришли деньги на счёт.
+function CapitalParts({ overview }: { overview: Overview }) {
   return (
     <div style={{ margin: "10px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
-      Вне рублёвого итога (пересчёта по курсам пока нет):{" "}
-      {foreign.map(([currency, amount], index) => (
-        <span key={currency}>
-          {index > 0 && ", "}
-          <span style={{ color: "var(--tx-1, inherit)" }}>{formatMoney(amount, currency)}</span>
-        </span>
-      ))}
+      Бумаги <span style={{ color: "var(--tx-1, inherit)" }}>
+        {formatMoney(overview.securities_value, BASE_CURRENCY)}
+      </span>
+      {" · деньги "}
+      <span style={{ color: "var(--tx-1, inherit)" }}>
+        {formatMoney(overview.cash_value, BASE_CURRENCY)}
+      </span>
     </div>
   );
 }
 
-// Совокупный капитал считается только по позициям, для которых есть котировка.
-// Пока оценены не все, сама цифра об этом не говорит ничего — предупреждение
-// должно стоять вплотную к ней и читаться, а не теряться мелким шрифтом.
-function CoverageNotice({ overview }: { overview: Overview }) {
-  const { valued_positions: valued, positions_total: total } = overview;
-  if (total === 0 || valued === total) return null;
+// Недоступное входит в капитал — брокер считает так же. Но распорядиться им
+// нельзя, и знать об этом нужно рядом с самой цифрой: у владельца больше
+// двадцати таких позиций, это заметная доля портфеля.
+function RestrictedNotice({ overview }: { overview: Overview }) {
+  // Плашка имеет смысл только у положительной суммы. Ноль сообщать не о чем, а
+  // отрицательное «недоступно» достижимо у короткой позиции с блокировкой:
+  // обязательство стоит отрицательных денег, и «Недоступно к продаже −1 000 ₽»
+  // читалось бы как ошибка расчёта. Сравнение строки с «0.0000» ловило только
+  // ноль.
+  if (!isPositiveAmount(overview.restricted_value)) return null;
 
   return (
-    <div
-      style={{
-        margin: "10px 0 0", padding: "7px 10px", borderRadius: 8,
-        background: "rgba(232,176,75,0.14)", color: "var(--amber)", fontSize: 13,
-      }}
-    >
-      Часть портфеля не оценена: цены есть только для {valued} позиций из {total}.
-      Остальные в эту сумму не входят.
+    <div style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
+      Недоступно к продаже{" "}
+      <span style={{ color: "var(--amber)" }}>
+        {formatMoney(overview.restricted_value, BASE_CURRENCY)}
+      </span>
+    </div>
+  );
+}
+
+// Совокупный капитал считается только по той части портфеля, которую удалось
+// перевести в рубли. Пока это не весь портфель, сама цифра об этом не говорит
+// ничего — предупреждение должно стоять вплотную к ней, читаться, а не теряться
+// мелким шрифтом, и называть настоящую причину: нет котировок и нет курсов —
+// это разные поломки, и чинятся они по-разному.
+function CoverageNotice({ overview }: { overview: Overview }) {
+  const warning = coverageWarning(overview);
+  if (warning === null) return null;
+
+  const style = {
+    margin: "10px 0 0", padding: "7px 10px", borderRadius: 8, fontSize: 13,
+  } as const;
+
+  if (warning.kind === "rates") {
+    return (
+      <div style={{ ...style, background: "rgba(224,108,108,0.14)", color: "var(--red)" }}>
+        Нет курса к рублю: {warning.currencies.join(", ")}. Всё, что в этих валютах, в
+        сумму не входит — ни бумаги, ни остатки, ни металлы. Курсы подтянутся сами
+        (ЦБ, ежедневно в 12:10 МСК; металлы — с MOEX) или вручную — см. README,
+        «Курсы, цены и оценка капитала». В рублях посчитаны {warning.valued} позиций
+        из {warning.total}.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...style, background: "rgba(232,176,75,0.14)", color: "var(--amber)" }}>
+      Часть портфеля не оценена: цены есть только для {warning.valued} позиций из{" "}
+      {warning.total}. Остальные в эту сумму не входят.
     </div>
   );
 }
@@ -60,14 +87,12 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
 }) {
   return (
     <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>
-        Совокупный капитал
-        {hasForeignCurrency(overview.position_currencies) ? " · рублёвая часть" : ""}
-      </div>
+      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>Совокупный капитал</div>
       <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
         <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />
       </div>
-      <ForeignCurrencyTotals byCurrency={overview.by_currency} />
+      <CapitalParts overview={overview} />
+      <RestrictedNotice overview={overview} />
       <CoverageNotice overview={overview} />
       <button
         onClick={onSync}

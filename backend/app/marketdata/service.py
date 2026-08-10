@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 # Метка источника котировок MOEX в таблице price.
 MOEX_SOURCE = "moex"
 
+# Метка цены, полученной от брокера (GetPortfolio.currentPrice). Заполняется
+# задачей 4; здесь объявлена потому, что от неё зависит приоритет источников
+# при чтении.
+TBANK_SOURCE = "tbank"
+
+# Приоритет при одинаковой дате: биржа важнее брокера. Биржа — независимый
+# источник, брокер — тот самый, с чьим снимком мы сверяемся; оценивать портфель
+# его же числами можно, но только когда своих нет.
+SOURCE_PRIORITY = {MOEX_SOURCE: 0, TBANK_SOURCE: 1}
+_UNKNOWN_SOURCE_PRIORITY = 99
+
 # Ключи — доменные виды инструментов (app/instruments/kinds.py); их же кладёт
 # коннектор при разрешении инструмента. Вид, которого здесь нет (kinds.OTHER,
 # kinds.METAL, kinds.FUTURES), уходит на рынок акций по умолчанию — котировки
@@ -31,48 +42,48 @@ ENGINE_MARKET_BY_KIND = {
 }
 
 
-# MOEX ISS отдаёт котировки в рублях. Для инструмента, номинированного не в
-# рублях, такая цена — не оценка: рублёвое число под знаком доллара выглядит
-# правдой, но ею не является, а пересчёта по курсам в этой фазе нет. Поэтому
-# такие инструменты не запрашиваются у MOEX вовсе и их прежние рублёвые
-# котировки (если успели записаться) не используются при оценке — позиция
-# честно показывается неоценённой и попадает в счётчик покрытия.
-def _priced_in_base_currency(column) -> object:
+# Коды валют номинала в ответах MOEX отличаются от ISO ровно в одном месте:
+# рубль там SUR. Остальные совпадают.
+FACE_UNIT_TO_ISO = {"SUR": BASE_CURRENCY}
+
+
+# У MOEX запрашиваются только инструменты, номинированные в рублях. Дело не в
+# пересчёте — он теперь есть, — а в том, что гонконгских и американских бумаг
+# на MOEX нет вовсе: запрос по ним гарантированно возвращает пустоту и только
+# засоряет журнал предупреждениями. Облигации с валютным номиналом сюда входят:
+# в справочнике брокера они числятся рублёвыми (расчёты по ним рублёвые), а
+# котирует их MOEX — и валюту номинала сообщает сама.
+def _priced_at_moex(column) -> object:
     return func.upper(func.coalesce(column, BASE_CURRENCY)) == BASE_CURRENCY
 
 
-# Код рубля в номиналах MOEX. Облигация с номиналом в другой валюте (замещающая,
-# юаневая) котируется в процентах от этого номинала, а расчёты идут в рублях:
-# пересчитать её без курсов нельзя, а рублёвое число под видом оценки хуже
-# честного «цены нет».
-MOEX_RUBLE_FACE_UNIT = "SUR"
+def _price_in_money(instrument: Instrument, quote: MoexQuote) -> tuple[Decimal, str] | None:
+    """Цена одной бумаги и валюта этой цены.
 
-
-def _price_in_money(instrument: Instrument, quote: MoexQuote) -> Decimal | None:
-    """Цена одной бумаги в валюте инструмента.
-
-    Акции и фонды MOEX котирует прямо в деньгах, облигации — в процентах от
-    номинала. Разница не косметическая: без пересчёта облигация с номиналом
-    1000 ₽ оценивалась в сотню рублей, и облигационная часть портфеля на
-    миллионы показывалась десятками тысяч.
+    Акции и фонды MOEX котирует прямо в деньгах и всегда в рублях. Облигации —
+    в процентах от номинала, и номинал бывает не рублёвым: замещающие и
+    юаневые выпуски. Без пересчёта из процентов облигация с номиналом 1000 ₽
+    оценивалась в сотню рублей.
 
     Накопленный купонный доход в цену не входит: он платится сверх неё и по
-    смыслу ближе к начислению, чем к стоимости бумаги. Учитывать его — отдельная
-    задача вместе с доходностью к погашению."""
+    смыслу ближе к начислению, чем к стоимости бумаги.
+    """
     if quote.price is None:
         return None
     if instrument.kind != kinds.BOND:
-        return quote.price
-    if not quote.face_value or (quote.face_unit or MOEX_RUBLE_FACE_UNIT) != MOEX_RUBLE_FACE_UNIT:
+        return quote.price, BASE_CURRENCY
+    if not quote.face_value:
         return None
-    return money(quote.price / Decimal("100") * quote.face_value)
+    face_unit = (quote.face_unit or "SUR").upper()
+    currency = FACE_UNIT_TO_ISO.get(face_unit, face_unit)
+    return money(quote.price / Decimal("100") * quote.face_value), currency
 
 
 def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> int:
     instruments = session.execute(
         select(Instrument).where(
             Instrument.secid.is_not(None),
-            _priced_in_base_currency(Instrument.currency),
+            _priced_at_moex(Instrument.currency),
         )
     ).scalars().all()
 
@@ -88,14 +99,17 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
             )
             continue
 
-        price = _price_in_money(instrument, quote)
-        if price is None:
+        priced = _price_in_money(instrument, quote)
+        if priced is None:
             continue
+        price, currency = priced
 
         statement = insert(Price).values(
-            instrument_id=instrument.id, on_date=on_date, close=price, source=MOEX_SOURCE
+            instrument_id=instrument.id, on_date=on_date, close=price,
+            currency=currency, source=MOEX_SOURCE,
         ).on_conflict_do_update(
-            index_elements=[Price.instrument_id, Price.on_date], set_={"close": price}
+            index_elements=[Price.instrument_id, Price.on_date, Price.source],
+            set_={"close": price, "currency": currency},
         )
         session.execute(statement)
         updated += 1
@@ -106,44 +120,47 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
 
 @dataclass(frozen=True)
 class LatestPrice:
-    """Последняя известная котировка инструмента вместе с её датой.
-
-    Цена и дата отдаются вместе, одним проходом по таблице цен. Раньше
-    аналитика заводила собственный оконный запрос дат, дословно повторяющий
-    этот, — два одинаковых прохода по всей таблице цен на каждый показ
-    дашборда.
-    """
+    """Последняя пригодная котировка инструмента: цена, её валюта, дата и
+    источник. Всё четыре поля отдаются одним проходом по таблице цен —
+    аналитике нужны все, а раздельные запросы за ними означали бы несколько
+    одинаковых проходов на каждый показ дашборда."""
 
     close: Decimal
     on_date: date
+    currency: str
+    source: str
 
 
 def latest_prices(session: Session) -> dict[int, LatestPrice]:
-    """Последние котировки, пригодные для оценки в базовой валюте.
+    """Самая свежая цена по каждому инструменту.
 
-    Рублёвые котировки MOEX отбрасываются для инструментов, номинированных не в
-    рублях (см. комментарий у refresh_last_prices). Фильтр стоит и здесь, а не
-    только при загрузке: в базе могли остаться котировки, записанные до того,
-    как валюта инструмента была исправлена по справочнику брокера. Котировки из
-    других источников (когда появится курсовой) под это правило не подпадают.
+    Свежесть решает первой, происхождение — вторым: вчерашняя биржевая цена
+    хуже сегодняшней брокерской, потому что вопрос стоит «сколько стоит
+    сейчас». При равной дате выигрывает биржа (SOURCE_PRIORITY).
+
+    Фильтра по валюте здесь больше нет: валюта хранится у самой цены, и
+    пересчёт в рубли делает оценка (app/analytics/valuation.py).
     """
+    priority = case(SOURCE_PRIORITY, value=Price.source, else_=_UNKNOWN_SOURCE_PRIORITY)
     ranked = select(
         Price.instrument_id,
         Price.close,
         Price.on_date,
+        Price.currency,
+        Price.source,
         func.row_number().over(
-            partition_by=Price.instrument_id, order_by=Price.on_date.desc()
+            partition_by=Price.instrument_id,
+            order_by=(Price.on_date.desc(), priority.asc()),
         ).label("rn"),
-    ).join(
-        Instrument, Instrument.id == Price.instrument_id
-    ).where(
-        or_(Price.source != MOEX_SOURCE, _priced_in_base_currency(Instrument.currency))
     ).subquery()
 
     rows = session.execute(
-        select(ranked.c.instrument_id, ranked.c.close, ranked.c.on_date).where(ranked.c.rn == 1)
+        select(
+            ranked.c.instrument_id, ranked.c.close, ranked.c.on_date,
+            ranked.c.currency, ranked.c.source,
+        ).where(ranked.c.rn == 1)
     ).all()
     return {
-        instrument_id: LatestPrice(close=close, on_date=on_date)
-        for instrument_id, close, on_date in rows
+        instrument_id: LatestPrice(close=close, on_date=on_date, currency=currency, source=source)
+        for instrument_id, close, on_date, currency, source in rows
     }

@@ -6,6 +6,8 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import get_settings
 from app.connectors.tbank.connector import TBankConnector
 from app.db import SessionLocal
+from app.marketdata.cbr import CbrClient
+from app.marketdata.fx import refresh_fx_rates, refresh_metal_rates
 from app.marketdata.moex import MoexClient
 from app.marketdata.service import refresh_last_prices
 from app.snapshots.service import take_snapshot
@@ -30,10 +32,37 @@ def job_refresh_prices() -> None:
         logger.info("Обновлено котировок: %s", updated)
 
 
+def job_refresh_fx() -> None:
+    with SessionLocal() as session:
+        today = moscow_today()
+        # Отказ ЦБ не должен мешать курсу золота и наоборот: это разные
+        # источники, и половина курсов лучше, чем ни одного.
+        try:
+            fiat = refresh_fx_rates(session, CbrClient(), today)
+        except Exception:  # noqa: BLE001 — отказ источника не роняет задачу
+            logger.warning("Курсы ЦБ недоступны", exc_info=True)
+            fiat = 0
+        try:
+            metals = refresh_metal_rates(session, MoexClient(), today)
+        except Exception:  # noqa: BLE001
+            logger.warning("Курс металлов с MOEX недоступен", exc_info=True)
+            metals = 0
+        session.commit()
+        logger.info("Курсов обновлено: валют %s, металлов %s", fiat, metals)
+
+
 def job_daily_snapshot() -> None:
     with SessionLocal() as session:
         today = moscow_today()
         refresh_last_prices(session, MoexClient(), today)
+        try:
+            refresh_fx_rates(session, CbrClient(), today)
+        except Exception:  # noqa: BLE001 — снимок важнее свежести курсов
+            logger.warning("Курсы ЦБ недоступны, снимок пойдёт по последним известным", exc_info=True)
+        try:
+            refresh_metal_rates(session, MoexClient(), today)
+        except Exception:  # noqa: BLE001
+            logger.warning("Курс металлов недоступен", exc_info=True)
         snapshot = take_snapshot(session, today)
         session.commit()
         logger.info("Снимок за %s: %s", snapshot.on_date, snapshot.total_value)
@@ -67,6 +96,13 @@ def build_scheduler() -> BackgroundScheduler:
         job_refresh_prices,
         CronTrigger(day_of_week="mon-fri", hour="10-18", minute="*/15"),
         id="refresh_prices",
+    )
+    # Курсы ЦБ на следующий день публикуются днём; 12:10 МСК — время, когда
+    # они уже есть, а до вечернего снимка стоимости ещё далеко.
+    scheduler.add_job(
+        job_refresh_fx,
+        CronTrigger(hour="12", minute="10"),
+        id="refresh_fx",
     )
     scheduler.add_job(
         job_daily_snapshot,

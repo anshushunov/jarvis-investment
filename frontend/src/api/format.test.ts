@@ -6,8 +6,22 @@ import {
   formatMoney,
   formatPercent,
   formatQuantity,
-  hasForeignCurrency,
+  isPositiveAmount,
 } from "./format";
+
+describe("isPositiveAmount", () => {
+  it("отличает ноль и отрицательное от положительного", () => {
+    // Отрицательное «недоступно к продаже» достижимо: короткая позиция с
+    // блокировкой стоит отрицательных денег (см. test_analytics.py,
+    // test_blocked_short_position_does_not_flip_the_sign). Плашке о нём
+    // сообщать нечего — как и о нуле.
+    expect(isPositiveAmount("0.0000")).toBe(false);
+    expect(isPositiveAmount("-0.0000")).toBe(false);
+    expect(isPositiveAmount("-1000.0000")).toBe(false);
+    expect(isPositiveAmount("782.2700")).toBe(true);
+    expect(isPositiveAmount("0.0001")).toBe(true);
+  });
+});
 
 describe("formatMoney", () => {
   it("группирует разряды неразрывными пробелами и добавляет рубль", () => {
@@ -57,19 +71,6 @@ describe("formatMoney", () => {
     expect(formatMoney("10000.4900", BASE_CURRENCY)).toBe("10 000 ₽");
     expect(formatMoney("99999.9900", BASE_CURRENCY)).toBe("100 000 ₽");
     expect(formatMoney("-10000.9900", BASE_CURRENCY)).toBe("−10 001 ₽");
-  });
-});
-
-describe("hasForeignCurrency", () => {
-  it("не ставит оговорку для чисто рублёвого портфеля", () => {
-    expect(hasForeignCurrency([BASE_CURRENCY])).toBe(false);
-    expect(hasForeignCurrency([])).toBe(false);
-  });
-
-  it("ставит оговорку, даже если валютная позиция не оценена", () => {
-    // Ровно этот случай и есть основной: рублёвые котировки MOEX для валютной
-    // бумаги не используются, так что в by_currency её нет — а оговорка нужна.
-    expect(hasForeignCurrency([BASE_CURRENCY, "HKD"])).toBe(true);
   });
 });
 

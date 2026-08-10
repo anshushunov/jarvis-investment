@@ -23,6 +23,45 @@ class BrokerPosition:
     isin: str
     ticker: str | None
     quantity: Decimal
+    # Часть количества, заблокированная брокером или биржей: заморозка после
+    # 2022 года, залог, расчёты по сделке. Это доля от quantity, а не добавка к
+    # нему — проверено на живом API: balance + blocked из GetPositions в
+    # точности равно quantity из GetPortfolio. Ноль, если брокер сведений о
+    # блокировках не даёт.
+    blocked: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class BrokerPrice:
+    """Цена одной бумаги по данным брокера, в валюте бумаги.
+
+    Запасной источник оценки: у брокера есть цена на всё, что у него лежит,
+    включая бумаги, которых нет на MOEX. Независимой такая оценка не является —
+    брокер тот же, с чьим снимком мы сверяемся, — поэтому источник цены
+    хранится вместе с ней и виден на экране.
+    """
+
+    isin: str
+    price: Decimal
+    currency: str
+
+
+@dataclass(frozen=True)
+class BrokerCash:
+    """Денежный остаток счёта в одной валюте.
+
+    `blocked` — часть остатка, недоступная к распоряжению (залог, расчёты по
+    сделке). Хранится отдельно, но входит в `amount`: капитал она не покидает,
+    а вот распорядиться ею нельзя.
+
+    Валютой брокер называет и драгоценные металлы: золото приходит кодом `XAU`
+    и измеряется граммами. Для оценки это такая же валюта, у которой есть курс
+    к рублю, — только берётся он не у ЦБ, а с MOEX.
+    """
+
+    currency: str
+    amount: Decimal
+    blocked: Decimal
 
 
 @dataclass(frozen=True)
@@ -47,6 +86,12 @@ class BrokerInstrument:
     # (комиссия и налог по валютной бумаге приходят в рублях), и та из них, что
     # случайно оказалась первой, определяла валюту инструмента навсегда.
     currency: str | None = None
+    # Доступность операций по данным справочника брокера. Оба флага False
+    # означают, что бумагой нельзя распорядиться; вывод из этого делает домен
+    # (app/instruments/service.py), а не коннектор. None — брокер сведений не
+    # дал: у уже записанных операций этих ключей в payload нет вовсе.
+    buy_available: bool | None = None
+    sell_available: bool | None = None
 
 
 class BrokerConnector(Protocol):
@@ -57,3 +102,7 @@ class BrokerConnector(Protocol):
     def fetch_operations(self, account_external_id: str, since: datetime) -> list[RawOperation]: ...
 
     def fetch_positions(self, account_external_id: str) -> list[BrokerPosition]: ...
+
+    def fetch_prices(self, account_external_id: str) -> list[BrokerPrice]: ...
+
+    def fetch_cash(self, account_external_id: str) -> list[BrokerCash]: ...

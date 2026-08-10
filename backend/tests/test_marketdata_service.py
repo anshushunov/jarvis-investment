@@ -5,7 +5,7 @@ from decimal import Decimal
 import httpx
 
 from app.marketdata.moex import MoexQuote
-from app.marketdata.service import LatestPrice, latest_prices, refresh_last_prices
+from app.marketdata.service import MOEX_SOURCE, TBANK_SOURCE, LatestPrice, latest_prices, refresh_last_prices
 from app.models import Instrument, Price
 
 
@@ -67,20 +67,6 @@ def test_bond_price_is_converted_from_percent_of_face_value(session):
     assert session.query(Price).one().close == Decimal("1001.9000")
 
 
-def test_bond_with_foreign_face_value_is_left_unvalued(session):
-    """Замещающая облигация: номинал в долларах, котировка в процентах, расчёты
-    в рублях. Пересчитать её без курсов нельзя, а рублёвое число под видом
-    оценки хуже честного «цены нет»."""
-    add_bond(session, "RU000A107VV1")
-    client = FakeMoex(
-        {"RU000A107VV1": Decimal("99")},
-        face_values={"RU000A107VV1": (Decimal("1000"), "USD")},
-    )
-
-    assert refresh_last_prices(session, client, date(2026, 3, 12)) == 0
-    assert session.query(Price).count() == 0
-
-
 def test_bond_without_face_value_is_left_unvalued(session):
     add_bond(session, "RU000NOFACE")
     client = FakeMoex({"RU000NOFACE": Decimal("99")})
@@ -109,15 +95,19 @@ def test_second_run_same_day_updates_instead_of_duplicating(session):
 def test_latest_prices_takes_most_recent_date(session):
     instrument = add_instrument(session, "SBER")
     session.add_all([
-        Price(instrument_id=instrument.id, on_date=date(2026, 3, 10), close=Decimal("300"), source="moex"),
-        Price(instrument_id=instrument.id, on_date=date(2026, 3, 12), close=Decimal("314.28"), source="moex"),
+        Price(instrument_id=instrument.id, on_date=date(2026, 3, 10), close=Decimal("300"),
+              currency="RUB", source=MOEX_SOURCE),
+        Price(instrument_id=instrument.id, on_date=date(2026, 3, 12), close=Decimal("314.28"),
+              currency="RUB", source=MOEX_SOURCE),
     ])
     session.flush()
 
-    # Цена и её дата приходят одним проходом: аналитике нужны обе, и раньше
-    # она ради даты делала второй такой же оконный запрос.
+    # Цена, её дата, валюта и источник приходят одним проходом: аналитике
+    # нужны все четыре, и раньше она ради даты делала второй такой же оконный
+    # запрос.
     assert latest_prices(session) == {
-        instrument.id: LatestPrice(close=Decimal("314.2800"), on_date=date(2026, 3, 12))
+        instrument.id: LatestPrice(close=Decimal("314.2800"), on_date=date(2026, 3, 12),
+                                   currency="RUB", source=MOEX_SOURCE)
     }
 
 
@@ -189,37 +179,6 @@ def test_non_ruble_instrument_is_not_requested_from_moex(session):
     assert client.calls == []
 
 
-def test_ruble_price_of_a_non_ruble_instrument_is_not_used_for_valuation(session):
-    """Фильтр стоит не только на загрузке: в базе могли остаться котировки,
-    записанные до того, как валюта инструмента была исправлена по справочнику
-    брокера."""
-    stale = Instrument(isin="KYG875721634", ticker="700", secid="700",
-                       kind="share", currency="HKD")
-    session.add(stale)
-    session.flush()
-    session.add(Price(instrument_id=stale.id, on_date=date(2026, 3, 12),
-                      close=Decimal("300"), source="moex"))
-    session.flush()
-
-    assert latest_prices(session) == {}
-
-
-def test_price_from_another_source_is_kept_for_a_non_ruble_instrument(session):
-    """Правило про рубли — про котировки MOEX, а не про валютные инструменты
-    вообще: курсовой источник, когда он появится, под него не подпадает."""
-    foreign = Instrument(isin="KYG875721634", ticker="700", secid="700",
-                         kind="share", currency="HKD")
-    session.add(foreign)
-    session.flush()
-    session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
-                      close=Decimal("300"), source="manual"))
-    session.flush()
-
-    assert latest_prices(session) == {
-        foreign.id: LatestPrice(close=Decimal("300.0000"), on_date=date(2026, 3, 12))
-    }
-
-
 class BrokenBodyMoex:
     """ISS вернул тело, которое нельзя разобрать как JSON."""
 
@@ -242,3 +201,98 @@ def test_broken_iss_response_body_is_skipped_without_error(session, caplog):
     assert updated == 0
     assert client.calls == ["SBER"]
     assert any("SBER" in record.getMessage() for record in caplog.records)
+
+
+def test_moex_price_of_share_is_in_roubles(session):
+    """MOEX котирует акции и фонды в рублях всегда — валюта цены не зависит от
+    валюты инструмента."""
+    add_instrument(session, "SBER")
+    refresh_last_prices(session, FakeMoex({"SBER": Decimal("314.28")}), date(2026, 3, 12))
+
+    stored = session.query(Price).one()
+    assert stored.currency == "RUB"
+    assert stored.source == MOEX_SOURCE
+
+
+def test_bond_with_foreign_face_value_is_priced_in_that_currency(session):
+    """Замещающая облигация котируется в процентах от номинала, номинал — в
+    юанях. Раньше такая бумага оставалась неоценённой вовсе: пересчитать её без
+    курсов было нельзя, а рублёвое число под видом оценки хуже честного «цены
+    нет». Курсы теперь есть."""
+    add_bond(session, "RU000A1054W1")
+    client = FakeMoex({"RU000A1054W1": Decimal("96.92")},
+                      face_values={"RU000A1054W1": (Decimal("1000"), "CNY")})
+
+    refresh_last_prices(session, client, date(2026, 8, 9))
+
+    stored = session.query(Price).one()
+    assert stored.close == Decimal("969.2000")
+    assert stored.currency == "CNY"
+
+
+def test_two_sources_coexist_for_the_same_day(session):
+    """Ключ уникальности включает источник: цена брокера не затирает биржевую,
+    иначе выбор между ними зависел бы от того, кто записался последним."""
+    instrument = add_instrument(session, "SBER")
+    session.add_all([
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+              close=Decimal("314.28"), currency="RUB", source=MOEX_SOURCE),
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+              close=Decimal("315.00"), currency="RUB", source=TBANK_SOURCE),
+    ])
+    session.flush()
+
+    assert session.query(Price).count() == 2
+
+
+def test_moex_wins_over_broker_on_the_same_day(session):
+    """Биржа — независимый источник, брокер — тот, с кем мы сверяемся. При
+    равной свежести берётся биржевая цена."""
+    instrument = add_instrument(session, "SBER")
+    session.add_all([
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+              close=Decimal("314.28"), currency="RUB", source=MOEX_SOURCE),
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+              close=Decimal("315.00"), currency="RUB", source=TBANK_SOURCE),
+    ])
+    session.flush()
+
+    latest = latest_prices(session)[instrument.id]
+
+    assert latest.close == Decimal("314.28")
+    assert latest.source == MOEX_SOURCE
+
+
+def test_fresher_broker_price_beats_stale_exchange_price(session):
+    """Свежесть важнее происхождения: вчерашняя биржевая цена хуже сегодняшней
+    брокерской, потому что оценка отвечает на вопрос «сколько стоит сейчас»."""
+    instrument = add_instrument(session, "SBER")
+    session.add_all([
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 8),
+              close=Decimal("310.00"), currency="RUB", source=MOEX_SOURCE),
+        Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+              close=Decimal("315.00"), currency="RUB", source=TBANK_SOURCE),
+    ])
+    session.flush()
+
+    latest = latest_prices(session)[instrument.id]
+
+    assert latest.close == Decimal("315.00")
+    assert latest.source == TBANK_SOURCE
+
+
+def test_price_of_foreign_instrument_is_no_longer_filtered_out(session):
+    """Раньше цена инструмента, номинированного не в рубле, отбрасывалась при
+    чтении: пересчитать её было нечем. Теперь валюта хранится у самой цены и
+    пересчёт есть, поэтому отбрасывать нечего."""
+    instrument = Instrument(isin="HK0000009866", ticker="9866", secid="9866",
+                            kind="share", currency="HKD")
+    session.add(instrument)
+    session.flush()
+    session.add(Price(instrument_id=instrument.id, on_date=date(2026, 8, 9),
+                      close=Decimal("36.90"), currency="HKD", source=TBANK_SOURCE))
+    session.flush()
+
+    latest = latest_prices(session)[instrument.id]
+
+    assert latest.currency == "HKD"

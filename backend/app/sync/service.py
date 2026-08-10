@@ -4,11 +4,15 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from app.accounts.cash import store_cash
 from app.connectors.base import BrokerConnector
 from app.ledger.service import append_operations
+from app.marketdata.broker_prices import store_broker_prices
 from app.models import Account, SyncRun
 from app.positions.service import rebuild_positions
+from app.sync.holdings import store_holdings
 from app.sync.reconcile import reconcile_account
+from app.timeutils import moscow_today
 
 # Глубина истории для самой первой синхронизации брокера — когда успешных
 # прогонов ещё не было и опереться не на что.
@@ -127,7 +131,15 @@ def sync_broker(
 
             rebuild_positions(session, account)
 
+            # Цены брокера — запасной источник оценки для того, чего нет на
+            # MOEX. Пишутся под московской календарной датой, той же, под
+            # которой пишутся биржевые котировки и снимок стоимости.
+            store_broker_prices(session, connector.fetch_prices(account.external_id), moscow_today())
+
+            store_cash(session, account, connector.fetch_cash(account.external_id))
+
             broker_positions = connector.fetch_positions(account.external_id)
+            store_holdings(session, account, broker_positions)
             findings = reconcile_account(session, account, broker_positions)
             run.mismatches = len(findings)
 
