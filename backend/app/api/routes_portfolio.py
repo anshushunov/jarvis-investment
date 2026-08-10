@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.accounts.labels import account_label, account_label_by_id
 from app.analytics.service import portfolio_overview, position_rows
-from app.api.schemas import HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
+from app.api.schemas import CashOut, HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
 from app.db import get_session
-from app.models import Account, DailySnapshot, Reconciliation
+from app.models import Account, CashBalance, DailySnapshot, Reconciliation
 from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -28,6 +28,9 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
     }
     return OverviewOut(
         total_value=overview.total_value,
+        securities_value=overview.securities_value,
+        cash_value=overview.cash_value,
+        restricted_value=overview.restricted_value,
         by_asset_class=overview.by_asset_class,
         by_account={
             account_label(accounts[account_id]): value
@@ -36,6 +39,7 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
         by_currency=overview.by_currency,
         position_currencies=overview.position_currencies,
         as_of=overview.as_of,
+        fx_as_of=overview.fx_as_of,
         valued_positions=overview.valued_positions,
         positions_total=overview.positions_total,
     )
@@ -56,6 +60,28 @@ def get_positions(session: Session = Depends(get_session)) -> list[PositionOut]:
             account=account_label(accounts[row.account_id]),
         )
         for row in rows
+    ]
+
+
+@router.get("/portfolio/cash", response_model=list[CashOut])
+def get_cash(session: Session = Depends(get_session)) -> list[CashOut]:
+    balances = session.execute(
+        select(CashBalance).order_by(CashBalance.account_id, CashBalance.currency)
+    ).scalars().all()
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_({b.account_id for b in balances}))
+        ).scalars()
+    }
+    return [
+        CashOut(
+            account=account_label(accounts[balance.account_id]),
+            currency=balance.currency,
+            amount=balance.amount,
+            blocked=balance.blocked,
+        )
+        for balance in balances
     ]
 
 

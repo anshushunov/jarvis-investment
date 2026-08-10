@@ -1,24 +1,33 @@
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 class OverviewOut(BaseModel):
-    # Рублёвая часть портфеля; позиции в других валютах — в by_currency.
+    # Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам ЦБ.
     total_value: Decimal
+    securities_value: Decimal
+    cash_value: Decimal
+    # Часть капитала, которой нельзя распорядиться: заблокированные количества
+    # плюс бумаги, ограниченные в обороте. Входит в total_value.
+    restricted_value: Decimal
     by_asset_class: dict[str, Decimal]
     by_account: dict[str, Decimal]
+    # Итог по каждой валюте в ней самой, без пересчёта.
     by_currency: dict[str, Decimal]
     # Валюты позиций портфеля, включая неоценённые: по ним интерфейс решает,
     # нужна ли оговорка «рублёвая часть».
     position_currencies: list[str]
     as_of: date | None
+    # Дата курсов: обновляются раз в сутки, тогда как котировки — каждые
+    # пятнадцать минут, и несвежесть у них разная.
+    fx_as_of: date | None
     # Покрытие оценкой — числа, а не деньги: сериализуются как есть.
     valued_positions: int
     positions_total: int
 
-    @field_serializer("total_value")
+    @field_serializer("total_value", "securities_value", "cash_value", "restricted_value")
     def serialize_amount(self, value: Decimal) -> str:
         return f"{value:.4f}"
 
@@ -28,6 +37,11 @@ class OverviewOut(BaseModel):
 
 
 class PositionOut(BaseModel):
+    # Собирается разворачиванием PositionRow.__dict__ в routes_portfolio.py —
+    # без forbid опечатка в имени поля или новое поле PositionRow молча
+    # выпадали бы из ответа вместо явной ошибки при сборке.
+    model_config = ConfigDict(extra="forbid")
+
     isin: str | None
     ticker: str | None
     name: str
@@ -43,16 +57,36 @@ class PositionOut(BaseModel):
     # отличалось от настоящего нуля (см. PositionRow в app/analytics/service.py).
     last_price: Decimal | None
     market_value: Decimal | None
+    # Стоимость позиции в рублях; null, когда цена есть, а курса нет.
+    value_base: Decimal | None
+    # Откуда взята цена: "moex" — биржа, "tbank" — сам брокер.
+    price_source: str | None
+    # Заблокированная брокером часть количества.
+    blocked: Decimal
+    # Бумагой нельзя распорядиться вовсе: ни купить, ни продать.
+    restricted: bool
     profit: Decimal | None
     profit_percent: Decimal | None
 
-    @field_serializer("quantity")
+    @field_serializer("quantity", "blocked")
     def serialize_quantity(self, value: Decimal) -> str:
         return f"{value:.8f}"
 
-    @field_serializer("average_price", "last_price", "market_value", "profit", "profit_percent")
+    @field_serializer("average_price", "last_price", "market_value", "value_base",
+                      "profit", "profit_percent")
     def serialize_money(self, value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
+
+
+class CashOut(BaseModel):
+    account: str
+    currency: str
+    amount: Decimal
+    blocked: Decimal
+
+    @field_serializer("amount", "blocked")
+    def serialize_money(self, value: Decimal) -> str:
+        return f"{value:.4f}"
 
 
 class HistoryPointOut(BaseModel):

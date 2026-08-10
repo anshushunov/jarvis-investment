@@ -8,7 +8,16 @@ from app.api.routes_sync import get_tbank_connector
 from app.connectors.base import BrokerAccount
 from app.db import get_session
 from app.main import app
-from app.models import Account, DailySnapshot, Instrument, Position, Price, Reconciliation, SyncRun
+from app.models import (
+    Account,
+    CashBalance,
+    DailySnapshot,
+    Instrument,
+    Position,
+    Price,
+    Reconciliation,
+    SyncRun,
+)
 from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS
 
 
@@ -168,6 +177,47 @@ def test_empty_portfolio_returns_zeroes(client, session):
     payload = client.get("/api/portfolio/overview").json()
     assert payload["total_value"] == "0.0000"
     assert payload["by_asset_class"] == {}
+
+
+def test_overview_exposes_capital_parts(client, session):
+    """Контракт обязан разделять бумаги и деньги: одна общая цифра не даёт
+    понять, отчего капитал изменился."""
+    account, instrument = seed(session)
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("20782.27"), blocked=Decimal("0")))
+    session.flush()
+
+    body = client.get("/api/portfolio/overview").json()
+
+    assert body["securities_value"] == "1500.0000"
+    assert body["cash_value"] == "20782.2700"
+    assert body["total_value"] == "22282.2700"
+    assert body["restricted_value"] == "0.0000"
+
+
+def test_positions_expose_price_source_and_blocked(client, session):
+    """Оценка по цене брокера не независима, и это должно быть видно на экране,
+    а не только в базе."""
+    seed(session)
+
+    body = client.get("/api/portfolio/positions").json()
+
+    assert body[0]["price_source"] in ("moex", "tbank", None)
+    assert "blocked" in body[0]
+    assert "restricted" in body[0]
+    assert "value_base" in body[0]
+
+
+def test_cash_endpoint_lists_balances_per_account_and_currency(client, session):
+    account, _ = seed(session)
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("20782.27"), blocked=Decimal("0")))
+    session.flush()
+
+    body = client.get("/api/portfolio/cash").json()
+
+    assert body == [{"account": "Брокерский (acc-1)", "currency": "RUB",
+                     "amount": "20782.2700", "blocked": "0.0000"}]
 
 
 class RecordingConnector:
