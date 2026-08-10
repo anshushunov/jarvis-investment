@@ -4,6 +4,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerPosition
+from app.instruments import kinds
+from app.instruments.service import apply_reference, secid_from_ticker
 from app.models import Account, BrokerHolding, Instrument
 
 
@@ -40,21 +42,50 @@ def store_holdings(session: Session, account: Account, positions: list[BrokerPos
                 ticker=existing.ticker or item.ticker,
                 quantity=existing.quantity + item.quantity,
                 blocked=existing.blocked + item.blocked,
+                reference=existing.reference or item.reference,
             )
 
-    instrument_ids = {
-        isin: instrument_id
-        for instrument_id, isin in session.execute(
-            select(Instrument.id, Instrument.isin).where(
-                Instrument.isin.in_(merged.keys())
-            )
-        ).all()
+    instruments = {
+        instrument.isin: instrument
+        for instrument in session.execute(
+            select(Instrument).where(Instrument.isin.in_(merged.keys()))
+        ).scalars()
     }
 
     for item in merged.values():
+        instrument = instruments.get(item.isin)
+        if instrument is None and item.reference is not None:
+            # Бумага есть у брокера, но не в нашем справочнике: она попала на
+            # счёт помимо журнала — конвертацией или переводом. Так лежат
+            # HK0000051877 и HK0000123577, обе заблокированы целиком, и обе
+            # безымянны в расхождениях. Заводим из справочных сведений,
+            # разрешённых коннектором по FIGI позиции.
+            instrument = Instrument(
+                isin=item.isin,
+                ticker=item.reference.ticker or item.ticker,
+                secid=secid_from_ticker(item.reference.ticker or item.ticker),
+                kind=item.reference.kind or kinds.OTHER,
+                currency=(item.reference.currency or "RUB").upper(),
+                issuer=item.reference.name,
+                trading_restricted=bool(_restricted_from(item.reference)),
+            )
+            session.add(instrument)
+            session.flush()
+            instruments[item.isin] = instrument
+        elif instrument is not None and item.reference is not None:
+            # Уже известную бумагу справочник тоже освежает: разблокировка —
+            # такое же сообщение брокера, как и блокировка.
+            apply_reference(
+                instrument,
+                item.reference.kind,
+                item.reference.name,
+                (item.reference.currency or "").upper() or None,
+                _restricted_from(item.reference),
+            )
+
         session.add(BrokerHolding(
             account_id=account.id,
-            instrument_id=instrument_ids.get(item.isin),
+            instrument_id=instrument.id if instrument is not None else None,
             isin=item.isin,
             quantity=item.quantity,
             blocked=item.blocked,
@@ -76,3 +107,17 @@ def blocked_by_instrument(session: Session) -> dict[tuple[int, int], Decimal]:
     ).all()
     return {(account_id, instrument_id): blocked
             for account_id, instrument_id, blocked in rows}
+
+
+def _restricted_from(reference) -> bool | None:
+    """Ограничена ли бумага в обороте по справочным сведениям снимка.
+
+    Правило то же, что в app/instruments/service.py: ограничением считается
+    недоступность обеих операций сразу. Один флаг ничего не решает — выпуск,
+    закрытый для покупки, но открытый для продажи, распоряжению поддаётся.
+    Хотя бы один флаг отсутствует — сведений нет, возвращаем None.
+    """
+    buy, sell = reference.buy_available, reference.sell_available
+    if not isinstance(buy, bool) or not isinstance(sell, bool):
+        return None
+    return not buy and not sell

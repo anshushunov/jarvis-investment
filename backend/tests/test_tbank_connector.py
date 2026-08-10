@@ -6,7 +6,7 @@ import httpx
 import respx
 
 from app.accounts.cash import store_cash
-from app.connectors.base import BrokerAccount, BrokerCash, BrokerPosition, BrokerPrice
+from app.connectors.base import BrokerAccount, BrokerCash, BrokerInstrument, BrokerPosition, BrokerPrice
 from app.connectors.tbank.client import INSTRUMENT_LIST_KINDS
 from app.connectors.tbank.connector import TBankConnector
 from app.models import Account, CashBalance, OperationType
@@ -564,7 +564,8 @@ def test_fetch_positions_skips_entries_without_isin():
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
     assert positions == [
-        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"),
+                       reference=BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share"))
     ]
 
 
@@ -593,7 +594,8 @@ def test_fetch_positions_keeps_full_precision_for_fractional_quantity():
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
     assert positions == [
-        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.12345679"))
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.12345679"),
+                       reference=BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share"))
     ]
 
 
@@ -618,7 +620,8 @@ def test_fetch_positions_skips_entry_with_missing_quantity_but_keeps_the_rest():
     positions = TBankConnector(TOKEN).fetch_positions("1000000001")
 
     assert positions == [
-        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"),
+                       reference=BrokerInstrument(isin="RU0007661625", ticker="GAZP", kind="share"))
     ]
 
 
@@ -656,7 +659,8 @@ def test_position_carries_blocked_quantity():
 
     assert positions == [
         BrokerPosition(isin="HK0000123577", ticker="HK0000123577",
-                       quantity=Decimal("92"), blocked=Decimal("92"))
+                       quantity=Decimal("92"), blocked=Decimal("92"),
+                       reference=BrokerInstrument(isin="HK0000123577", ticker="HK0000123577", kind="etf"))
     ]
 
 
@@ -689,7 +693,8 @@ def test_blocked_defaults_to_zero_when_positions_call_unavailable():
 
     assert positions == [
         BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10"),
-                       blocked=Decimal("0"))
+                       blocked=Decimal("0"),
+                       reference=BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share"))
     ]
 
 
@@ -933,7 +938,8 @@ def test_fetch_portfolio_snapshot_is_cached_and_reused_between_positions_and_pri
     prices = connector.fetch_prices("1000000001")
 
     assert positions == [
-        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"),
+                       reference=BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share"))
     ]
     assert prices == [BrokerPrice(isin="RU0009029540", price=Decimal("300.0000"), currency="RUB")]
     assert portfolio_route.call_count == 1  # второй вызов взял закэшированный снимок, не сходил в сеть повторно
@@ -977,11 +983,13 @@ def test_fetch_portfolio_snapshot_is_not_mixed_between_accounts():
     prices_2 = connector.fetch_prices("1000000002")
 
     assert positions_1 == [
-        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"))
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10.00000000"),
+                       reference=BrokerInstrument(isin="RU0009029540", ticker="SBER", kind="share"))
     ]
     assert prices_1 == [BrokerPrice(isin="RU0009029540", price=Decimal("300.0000"), currency="RUB")]
     assert positions_2 == [
-        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"))
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("5.00000000"),
+                       reference=BrokerInstrument(isin="RU0007661625", ticker="GAZP", kind="share"))
     ]
     assert prices_2 == [BrokerPrice(isin="RU0007661625", price=Decimal("150.0000"), currency="RUB")]
     assert portfolio_route.call_count == 2  # по разу на каждый счёт, снимки не перепутаны
@@ -1037,7 +1045,8 @@ def test_bulk_instrument_index_is_built_once_and_reused_across_operations_and_po
     assert len(operations) == 1
     assert operations[0].isin == "RU0009029540"
     assert positions == [
-        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("1.00000000"))
+        BrokerPosition(isin="RU0007661625", ticker="GAZP", quantity=Decimal("1.00000000"),
+                       reference=BrokerInstrument(isin="RU0007661625", ticker="GAZP", kind="share"))
     ]
 
     for kind, route in routes.items():
@@ -1090,7 +1099,8 @@ def test_fallback_to_get_instrument_by_still_works_after_index_is_cached():
     positions = connector.fetch_positions("1000000002")
 
     assert positions == [
-        BrokerPosition(isin="RU000AEXOTIC", ticker="EXOTIC", quantity=Decimal("1.00000000"))
+        BrokerPosition(isin="RU000AEXOTIC", ticker="EXOTIC", quantity=Decimal("1.00000000"),
+                       reference=BrokerInstrument(isin="RU000AEXOTIC", ticker="EXOTIC", kind="other"))
     ]
     for route in routes.values():
         assert route.call_count == 1  # индекс не перестраивался на второй вызов
