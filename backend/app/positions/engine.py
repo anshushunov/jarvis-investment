@@ -6,8 +6,17 @@ from decimal import Decimal
 from app.models import OperationType
 from app.money import money, quantity as q
 
-INCREASING = {OperationType.BUY}
-DECREASING = {OperationType.SELL, OperationType.REDEMPTION}
+INCREASING = {OperationType.BUY, OperationType.TRANSFER_IN}
+DECREASING = {OperationType.SELL, OperationType.REDEMPTION, OperationType.TRANSFER_OUT}
+
+# Операции, которые двигают количество, но не создают закрытой сделки: перевод
+# бумаги наружу — не продажа, выручки у него нет. Считать его продажей значило
+# бы выдумать финансовый результат и испортить налоговую базу.
+WITHOUT_REALIZED = {OperationType.TRANSFER_OUT}
+
+# Операции, приносящие количество без себестоимости: брокер её при переводе не
+# сообщает, а выдумывать нельзя.
+WITHOUT_COST = {OperationType.TRANSFER_IN}
 
 
 @dataclass(frozen=True)
@@ -32,6 +41,10 @@ class OpenLot:
     opened_at: datetime
     price: Decimal
     quantity_left: Decimal
+    # Известна ли себестоимость партии. Ложь у партии, пришедшей переводом:
+    # цена там ноль не потому, что бумага досталась даром, а потому, что
+    # брокер себестоимости не прислал.
+    cost_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,10 @@ class PositionState:
     quantity: Decimal
     average_price: Decimal
     lots: list[OpenLot] = field(default_factory=list)
+    # Истина, когда себестоимость известна по всем партиям. Ложь — средняя цена
+    # и доходность по позиции не показываются вовсе: усреднение с нулём даёт
+    # правдоподобное, но неверное число, которое владелец примет за настоящее.
+    cost_basis_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -188,16 +205,17 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
                 proceeds, cost = unit_price, lot.price
             else:
                 proceeds, cost = lot.price, unit_price
-            realized.append(
-                RealizedSale(
-                    instrument_id=entry.instrument_id,
-                    sold_at=entry.executed_at,
-                    quantity=taken,
-                    proceeds=money(taken * proceeds),
-                    cost=money(taken * cost),
-                    opened_at=lot.opened_at,
+            if entry.op_type not in WITHOUT_REALIZED:
+                realized.append(
+                    RealizedSale(
+                        instrument_id=entry.instrument_id,
+                        sold_at=entry.executed_at,
+                        quantity=taken,
+                        proceeds=money(taken * proceeds),
+                        cost=money(taken * cost),
+                        opened_at=lot.opened_at,
+                    )
                 )
-            )
             lot.quantity_left = q(lot.quantity_left + direction * taken)
             remaining = q(remaining - taken)
             if lot.quantity_left == 0:
@@ -212,6 +230,7 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
                     opened_at=entry.executed_at,
                     price=unit_price,
                     quantity_left=q(direction * remaining),
+                    cost_known=entry.op_type not in WITHOUT_COST,
                 )
             )
 
@@ -223,5 +242,6 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
             quantity=q(sum((lot.quantity_left for lot in open_lots), Decimal("0"))),
             average_price=_average(open_lots),
             lots=open_lots,
+            cost_basis_known=all(lot.cost_known for lot in open_lots),
         )
     return FoldResult(positions=positions, realized=realized, cash=dict(cash))

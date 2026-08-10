@@ -31,6 +31,15 @@ TYPE_MAP = {
     "OPERATION_TYPE_BOND_REPAYMENT_FULL": OperationType.REDEMPTION,
     "OPERATION_TYPE_BOND_REPAYMENT": OperationType.AMORTIZATION,
     "OPERATION_TYPE_BOND_AMORTIZATION": OperationType.AMORTIZATION,
+    # Перевод бумаг: приходят и уходят количеством, себестоимости брокер при
+    # этом не сообщает. Живой случай — 351 бумага РусАгро 19.12.2024, которая
+    # уходила в OTHER и не двигала позицию: сверка показывала 209 против 560.
+    # Написание подтверждено на живом ответе GetOperationsByCursor владельца
+    # (все счета, с 2020-01-01): OPERATION_TYPE_INPUT_SECURITIES встречается,
+    # OPERATION_TYPE_OUTPUT_SECURITIES — ни разу, добавлен по документации
+    # T-Invest API.
+    "OPERATION_TYPE_INPUT_SECURITIES": OperationType.TRANSFER_IN,
+    "OPERATION_TYPE_OUTPUT_SECURITIES": OperationType.TRANSFER_OUT,
 }
 
 EXECUTED = "OPERATION_STATE_EXECUTED"
