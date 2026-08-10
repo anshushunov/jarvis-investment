@@ -413,7 +413,7 @@ def test_unknown_instrument_type_becomes_other_not_share():
 
 
 @respx.mock
-def test_fetch_instrument_reference_is_keyed_by_isin_and_keeps_kind():
+def test_fetch_instruments_by_figi_is_keyed_by_figi_and_keeps_kind():
     """Справочник для разового дозаполнения (app/instruments/backfill.py):
     инструменты, купленные годы назад, в окно обычной синхронизации не попадают
     никогда — привести их в порядок можно только по справочнику целиком."""
@@ -422,98 +422,61 @@ def test_fetch_instrument_reference_is_keyed_by_isin_and_keeps_kind():
                  "isin": "RU0009029540", "name": "Сбер Банк"}],
         Bonds=[{"figi": "BBG00T22WKV5", "ticker": "SU26238RMFS4",
                 "isin": "RU000A1038V6", "name": "ОФЗ 26238"}],
-        # Без ISIN — в справочник по ISIN попасть не может.
+        # Без ISIN, но с FIGI — в справочник по FIGI попадает наравне с прочими.
         Futures=[{"figi": "FUTSI0324000", "ticker": "SiH4", "name": "Si-3.24"}],
     )
 
-    reference = TBankConnector(TOKEN).fetch_instrument_reference()
+    reference = TBankConnector(TOKEN).fetch_instruments_by_figi()
 
-    assert set(reference) == {"RU0009029540", "RU000A1038V6"}
-    assert reference["RU000A1038V6"].kind == "bond"
-    assert reference["RU000A1038V6"].name == "ОФЗ 26238"
-    assert reference["RU0009029540"].kind == "share"
+    assert set(reference) == {"BBG004730N88", "BBG00T22WKV5", "FUTSI0324000"}
+    assert reference["BBG00T22WKV5"].kind == "bond"
+    assert reference["BBG00T22WKV5"].name == "ОФЗ 26238"
+    assert reference["BBG004730N88"].kind == "share"
 
 
 @respx.mock
-def test_fetch_instrument_reference_carries_availability_flags():
+def test_fetch_instruments_by_figi_carries_availability_flags():
     """Признак ограничения в обороте (задача 7) собирается из buyAvailableFlag
     и sellAvailableFlag справочника. Флаги обязаны доехать уже через списочный
-    путь — тот самый, которым fetch_instrument_reference кормит backfill, —
-    а не только через поштучный GetInstrumentBy ниже."""
+    путь — тот самый, которым справочник кормит backfill, — а не только через
+    поштучный GetInstrumentBy ниже."""
     _mock_instrument_lists(
         Shares=[{"figi": "BBG000BJ35N5", "ticker": "9866", "isin": "HK0000009866",
                  "name": "Nio", "currency": "hkd",
                  "buyAvailableFlag": False, "sellAvailableFlag": False}],
     )
 
-    reference = TBankConnector(TOKEN).fetch_instrument_reference()
+    reference = TBankConnector(TOKEN).fetch_instruments_by_figi()
 
-    instrument = reference["HK0000009866"]
+    instrument = reference["BBG000BJ35N5"]
     assert instrument.buy_available is False
     assert instrument.sell_available is False
 
 
 @respx.mock
-def test_fetch_instrument_reference_prefers_the_tradable_board_of_the_same_isin():
-    """Одному ISIN соответствует по записи на каждый режим торгов, и флаги
-    доступности у них разные: основной режим разрешает операции, служебные и
-    внебиржевые доски — нет. Побеждать обязана доступная запись, иначе свободно
-    торгуемая бумага получает ограничение в обороте по случайности порядка
-    ответа. Доступная запись здесь идёт первой, а недоступные — после неё,
-    чтобы «последний выигрывает» тест не прошёл."""
+def test_fetch_instruments_by_figi_keeps_every_board_of_the_same_isin():
+    """Одному ISIN соответствует по записи на каждую площадку, и различаются
+    они и флагами, и валютой: зеркало с рублёвыми расчётами доступно к покупке,
+    сама бумага — нет. Коннектор обязан отдать их все: какая из них относится к
+    бумаге владельца, знает только домен (по FIGI из журнала операций), а
+    схлопывание по ISIN здесь безвозвратно теряет выбор."""
     _mock_instrument_lists(
         Shares=[
-            {"figi": "BBG004730N88", "ticker": "OZON", "isin": "RU000A10CW95",
-             "name": "Озон", "buyAvailableFlag": True, "sellAvailableFlag": True},
-            {"figi": "TCS80A10CW95", "ticker": "RU000A10CW95", "isin": "RU000A10CW95",
-             "name": "Озон", "buyAvailableFlag": False, "sellAvailableFlag": False},
-            {"figi": "SPBXMA10CW95", "ticker": "OZON", "isin": "RU000A10CW95",
-             "name": "Озон", "buyAvailableFlag": False, "sellAvailableFlag": False},
-        ],
-    )
-
-    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["RU000A10CW95"]
-
-    assert instrument.buy_available is True
-    assert instrument.sell_available is True
-
-
-@respx.mock
-def test_fetch_instrument_reference_keeps_restriction_when_every_board_forbids_both():
-    """Обратная сторона того же правила: у бумаги, которую не даёт ни купить,
-    ни продать ни один режим, ограничение обязано сохраниться. Иначе «выбираем
-    самую доступную запись» превратилось бы в «ограничений не бывает»."""
-    _mock_instrument_lists(
-        Shares=[
-            {"figi": "TCS6066G1040", "ticker": "US67066G1040", "isin": "US67066G1040",
-             "name": "NVIDIA", "buyAvailableFlag": False, "sellAvailableFlag": False},
-            {"figi": "SPBXM66G1040", "ticker": "NVDA", "isin": "US67066G1040",
-             "name": "NVIDIA", "buyAvailableFlag": False, "sellAvailableFlag": False},
-        ],
-    )
-
-    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["US67066G1040"]
-
-    assert instrument.buy_available is False
-    assert instrument.sell_available is False
-
-
-@respx.mock
-def test_fetch_instrument_reference_prefers_a_board_with_known_flags():
-    """Запись без флагов не должна вытеснять запись с флагами: «сведений нет»
-    оставило бы признак ограничения в базе прежним, то есть отменило бы работу
-    дозаполнения ради записи, которая ничего не сообщает."""
-    _mock_instrument_lists(
-        Bonds=[
-            {"figi": "TQCB0A10F728", "isin": "RU000A10F728", "name": "Газпром капитал",
+            {"figi": "BBG000BBJQV0", "ticker": "NVDA", "isin": "US67066G1040",
+             "name": "NVIDIA", "currency": "usd",
+             "buyAvailableFlag": False, "sellAvailableFlag": False},
+            {"figi": "TCSC326G1040", "ticker": "NVDA-RM", "isin": "US67066G1040",
+             "name": "NVIDIA", "currency": "rub",
              "buyAvailableFlag": True, "sellAvailableFlag": True},
-            {"figi": "NSD00A10F728", "isin": "RU000A10F728", "name": "Газпром капитал"},
         ],
     )
 
-    instrument = TBankConnector(TOKEN).fetch_instrument_reference()["RU000A10F728"]
+    reference = TBankConnector(TOKEN).fetch_instruments_by_figi()
 
-    assert instrument.buy_available is True
+    assert reference["BBG000BBJQV0"].currency == "USD"
+    assert reference["BBG000BBJQV0"].buy_available is False
+    assert reference["TCSC326G1040"].currency == "RUB"
+    assert reference["TCSC326G1040"].buy_available is True
 
 
 @respx.mock
