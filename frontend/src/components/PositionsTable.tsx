@@ -96,7 +96,11 @@ export function PositionsTable({ rows, error, loading }: {
                   разных валютах выглядели бы сопоставимыми. */}
               <td style={{ textAlign: "left", color: "var(--tx-2)" }}>{row.currency}</td>
               <td>{formatQuantity(row.quantity)}</td>
-              <td>{formatMoney(row.average_price, row.currency)}</td>
+              {/* Средняя подписывается своей валютой, а не валютой котировки:
+                  у замещающей облигации журнал знает рубли, а MOEX котирует её
+                  в долларах, и рублёвое число под знаком доллара завышало
+                  цифру в восемьдесят раз. */}
+              <td>{formatMoney(row.average_price, row.average_price_currency)}</td>
               {/* Нет котировки — прочерк (formatMoney на null), а не «0 ₽»:
                   неизвестная стоимость и нулевая стоимость это разные вещи. */}
               <td>

@@ -51,6 +51,12 @@ class PositionRow:
     currency: str
     quantity: Decimal
     average_price: Decimal
+    # Валюта средней цены — валюта расчётов по бумаге из справочника брокера, и
+    # она не обязана совпадать с `currency` (валютой котировки). У замещающей
+    # облигации справочник говорит «рубли», покупалась она за рубли, а MOEX
+    # котирует её в процентах от валютного номинала — и средняя в рублях
+    # подписывалась знаком доллара.
+    average_price_currency: str
     # None — «оценки нет», и это не то же самое, что ноль: у бумаги без
     # котировки стоимость неизвестна, а не равна нулю. Ноль остаётся законным
     # значением для бумаги, которая действительно ничего не стоит (дефолт).
@@ -145,10 +151,22 @@ def position_rows(session: Session) -> list[PositionRow]:
     for position, instrument, account in _rows(session):
         valued = value_position(position.quantity, prices.get(instrument.id), rates)
         cost = money(position.quantity * position.average_price)
+        # Валюта расчётов по бумаге (справочник брокера) против валюты её
+        # котировки. У замещающей облигации это рубль против доллара или юаня.
+        reference_currency = _currency_of(instrument)
+        price_currency = (valued.currency or reference_currency).upper()
 
-        if valued.value is None:
+        if valued.value is None or price_currency != reference_currency:
             # Не ноль: «0 ₽» и «0,0%» в таблице читаются как «бумага ничего не
             # стоит», хотя на деле котировки просто нет.
+            #
+            # Вторая причина — валюты разошлись: средняя цена из журнала в
+            # рублях, а стоимость позиции в долларах, и вычитание одного из
+            # другого даёт не доходность, а курс. У живого RU000A10CRC4 средняя
+            # 8138,62 ₽ против последней 96,50 $ давала «−98,8 %», хотя 8138/96,5
+            # — это просто 84 рубля за доллар. Неизвестная доходность честнее
+            # уверенного минуса: считать её здесь нечем, для этого нужен курс на
+            # дату каждой операции (фаза 4).
             profit = None
             percent = None
         else:
@@ -168,9 +186,10 @@ def position_rows(session: Session) -> list[PositionRow]:
                 # Валюта строки — валюта цены, а не справочника: у замещающей
                 # облигации справочник брокера говорит «рубли» (расчёты по ней
                 # рублёвые), а котируется она в юанях.
-                currency=valued.currency or _currency_of(instrument),
+                currency=price_currency,
                 quantity=position.quantity,
                 average_price=position.average_price,
+                average_price_currency=reference_currency,
                 last_price=valued.price,
                 market_value=valued.value,
                 value_base=valued.value_base,

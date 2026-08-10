@@ -364,6 +364,48 @@ def test_position_currency_comes_from_its_price_not_from_the_reference(session):
     assert overview.total_value == Decimal("117908.0260")
 
 
+def test_profit_is_unknown_when_average_and_quote_are_in_different_currencies(session):
+    """Живой RU000A10CRC4: замещающая облигация, куплена за рубли (`BUY 56 @
+    8307.18 RUB`), а MOEX котирует её в процентах от долларового номинала —
+    96,4997 $. Вычитание рублёвой себестоимости из долларовой стоимости давало
+    «−98,8 %», хотя 8138,62 / 96,4997 — это курс доллара, а не убыток. Шесть
+    таких позиций и 13,7 % капитала владельца показывались как почти полная
+    потеря. Неизвестная доходность честнее уверенного минуса; стоимость при
+    этом считается как считалась."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="RU000A10CRC4", quantity=Decimal("56"),
+                        price=Decimal("96.4997"), currency="USD",
+                        reference_currency="RUB", kind="bond",
+                        average_price=Decimal("8138.6232"))
+    add_rate(session, "USD", Decimal("82.1665"))
+
+    row = position_rows(session)[0]
+
+    assert (row.profit, row.profit_percent) == (None, None)
+    # Стоимость и её рублёвая оценка от разошедшихся валют не страдают.
+    assert row.market_value == Decimal("5403.9832")
+    assert row.value_base == Decimal("444026.3856")
+    # Средняя подписывается валютой справочника, а не валютой котировки: иначе
+    # 8 138,62 ₽ показывались бы как 8 138,62 $.
+    assert (row.currency, row.average_price_currency) == ("USD", "RUB")
+
+
+def test_profit_is_computed_when_both_currencies_agree(session):
+    """Обычная валютная бумага: и расчёты, и котировка в долларах — доходность
+    считается как прежде, разошедшиеся валюты её не отменяют."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=Decimal("200"), currency="USD",
+                        average_price=Decimal("150"))
+    add_rate(session, "USD", Decimal("82.1665"))
+
+    row = position_rows(session)[0]
+
+    assert row.profit == Decimal("500.0000")
+    assert row.profit_percent == Decimal("33.3333")
+    assert (row.currency, row.average_price_currency) == ("USD", "USD")
+
+
 def test_position_currencies_include_unvalued_positions(session):
     """by_currency отвечает на вопрос «сколько денег в каждой валюте» и
     позицию без котировки не видит вовсе; position_currencies отвечает на
