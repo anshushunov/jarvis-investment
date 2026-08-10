@@ -76,3 +76,19 @@ def test_purchase_only_position_keeps_cost_known():
     result = fold([_entry(OperationType.BUY, "10", price="7")])
 
     assert result.positions[1].cost_basis_known is True
+
+
+def test_transfer_in_closing_a_short_position_does_not_realize_fabricated_profit():
+    """Продажа без остатка открывает короткую позицию (см. test_positions_engine.py:
+    test_selling_more_than_owned_opens_a_short_for_the_excess); закрывающий её
+    TRANSFER_IN идёт без цены, и если считать его как обычную покупку, движок
+    записал бы в realized выручку от продажи против нулевой себестоимости —
+    сфабрикованную прибыль из воздуха, которая испортила бы налоговую базу.
+    Ввод бумаг так же не несёт финансового результата, как и вывод."""
+    result = fold([
+        _entry(OperationType.SELL, "100", price="50", day=1),
+        _entry(OperationType.TRANSFER_IN, "100", day=2),
+    ])
+
+    assert result.realized == []
+    assert result.positions[1].quantity == Decimal("0")
