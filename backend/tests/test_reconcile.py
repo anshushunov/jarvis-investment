@@ -35,6 +35,39 @@ def test_matching_quantities_produce_no_records(session):
     assert session.query(Reconciliation).count() == 0
 
 
+def test_duplicate_isin_from_broker_is_summed_like_the_snapshot(session):
+    """Одна бумага с двух площадок приходит в ответе дважды — живой случай,
+    уронивший store_holdings на паре (1, RU0009029540). Снимок складывает такие
+    записи, а сверка брала последнюю: одно и то же количество у брокера
+    получалось разным в таблице позиций и в баннере расхождений, и вдобавок на
+    ровном месте появлялось ложное «количество не сходится»."""
+    account, instrument = setup(session)
+    add_position(session, account, instrument, "35")
+
+    result = reconcile_account(session, account, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("20")),
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("15")),
+    ])
+
+    assert result == []
+    assert session.query(Reconciliation).count() == 0
+
+
+def test_duplicate_isin_sums_into_the_reported_broker_quantity(session):
+    """А когда расхождение всё-таки есть, у брокера показывается сумма обеих
+    порций, а не последняя из них."""
+    account, instrument = setup(session)
+    add_position(session, account, instrument, "35")
+
+    result = reconcile_account(session, account, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("20")),
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("10")),
+    ])
+
+    assert len(result) == 1
+    assert (result[0].status, result[0].broker_quantity) == ("quantity_mismatch", Decimal("30"))
+
+
 def test_quantity_mismatch_is_recorded(session):
     account, instrument = setup(session)
     add_position(session, account, instrument, "35")

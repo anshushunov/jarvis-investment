@@ -25,23 +25,31 @@ def reconcile_account(
         for position, instrument in rows
         if instrument.isin
     }
-    broker: dict[str, BrokerPosition] = {item.isin: item for item in broker_positions}
+    # Тот же ISIN приходит от брокера дважды, когда бумага лежит на двух
+    # площадках. Количества складываются — ровно как в store_holdings, потому
+    # что это две порции одной бумаги на одном счёте. Одно правило на снимок и
+    # на сверку обязательно: «последняя запись побеждает» давало здесь другое
+    # количество, чем в таблице позиций, и вдобавок выдумывало расхождение с
+    # журналом на ровном месте.
+    broker: dict[str, Decimal] = {}
+    for item in broker_positions:
+        broker[item.isin] = broker.get(item.isin, Decimal("0")) + item.quantity
 
     findings: list[Reconciliation] = []
 
     for isin in sorted(ledger.keys() | broker.keys()):
         position_pair = ledger.get(isin)
-        broker_position = broker.get(isin)
+        at_broker = broker.get(isin)
 
         ledger_qty = position_pair[0].quantity if position_pair else Decimal("0")
-        broker_qty = broker_position.quantity if broker_position else Decimal("0")
+        broker_qty = at_broker if at_broker is not None else Decimal("0")
 
         if abs(ledger_qty - broker_qty) <= TOLERANCE:
             continue
 
         if position_pair is None:
             status = "missing_in_ledger"
-        elif broker_position is None:
+        elif at_broker is None:
             status = "missing_at_broker"
         else:
             status = "quantity_mismatch"
