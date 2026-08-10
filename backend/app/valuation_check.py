@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 # из-за разного порядка округления и разной секунды котировки; проценты — нет.
 TOLERANCE_RATIO = Decimal("0.005")
 
+# Один относительный допуск на крупном счёте слишком щедр: полпроцента от пяти
+# миллионов — это двадцать семь тысяч рублей, которые прошли бы как «ок».
+# Поэтому расхождение обязано укладываться в оба допуска сразу.
+TOLERANCE_ABSOLUTE = money("15000")
+
 
 def main() -> None:
     token = get_settings().tbank_token
@@ -57,10 +62,14 @@ def main() -> None:
                 continue
             theirs = to_money(raw_total)
             diff = ours - theirs
-            verdict = "ок" if abs(diff) <= abs(theirs) * TOLERANCE_RATIO else "РАСХОЖДЕНИЕ"
+            # Процент печатается рядом: без него читатель вынужден делить в уме,
+            # а именно доля отличает шум округления от потерянной бумаги.
+            share = abs(diff) / abs(theirs) * 100 if theirs else Decimal("0")
+            within = abs(diff) <= abs(theirs) * TOLERANCE_RATIO and abs(diff) <= TOLERANCE_ABSOLUTE
             logger.info(
-                "%-28s наш %14s   брокер %14s   разница %12s  %s",
-                account.name, f"{ours:,.2f}", f"{theirs:,.2f}", f"{diff:,.2f}", verdict,
+                "%-28s наш %14s   брокер %14s   разница %12s (%5.2f%%)  %s",
+                account.name, f"{ours:,.2f}", f"{theirs:,.2f}", f"{diff:,.2f}", share,
+                "ок" if within else "РАСХОЖДЕНИЕ",
             )
             total_ours += ours
             total_theirs += theirs
