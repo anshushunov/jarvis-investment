@@ -83,6 +83,82 @@ def test_second_snapshot_does_not_duplicate_and_refreshes_reference(session):
     assert instruments[0].trading_restricted is False
 
 
+def test_merge_of_two_references_keeps_the_first_ones_reference(session):
+    """Две порции одной бумаги на одном счёте (разные FIGI, один ISIN) несут
+    разные справочные сведения — такое бывает, если один из ответов брокера
+    устарел или неполон. Побеждает первая порция по порядку в снимке брокера:
+    это не выбор «по FIGI» (обе уже корректно разрешены по своему FIGI), а
+    произвольный, но детерминированный выбор одной из двух ссылок на одну и
+    ту же бумагу. Тест ловит порядок явно: если поменять
+    `existing.reference or item.reference` местами на `item.reference or
+    existing.reference`, эта проверка провалится, потому что у первой и
+    второй позиции разные issuer/currency/trading_restricted."""
+    account = _account(session)
+
+    first = BrokerPosition(
+        isin="HK0000051877", ticker="3690", quantity=Decimal("50"),
+        blocked=Decimal("50"),
+        reference=BrokerInstrument(isin="HK0000051877", ticker="3690",
+                                   kind="share", name="Meituan First",
+                                   currency="HKD", buy_available=False,
+                                   sell_available=False),
+    )
+    second = BrokerPosition(
+        isin="HK0000051877", ticker="3690", quantity=Decimal("29"),
+        blocked=Decimal("0"),
+        reference=BrokerInstrument(isin="HK0000051877", ticker="3690",
+                                   kind="share", name="Meituan Second",
+                                   currency="USD", buy_available=True,
+                                   sell_available=True),
+    )
+
+    store_holdings(session, account, [first, second])
+
+    instrument = session.execute(
+        select(Instrument).where(Instrument.isin == "HK0000051877")
+    ).scalar_one()
+    assert instrument.issuer == "Meituan First"
+    assert instrument.currency == "HKD"
+    assert instrument.trading_restricted is True
+
+    holding = session.execute(select(BrokerHolding)).scalar_one()
+    assert holding.quantity == Decimal("79")
+    assert holding.blocked == Decimal("50")
+
+
+def test_merge_falls_back_to_the_second_positions_reference_when_the_first_has_none(session):
+    """Первая порция брокером отдана без справочных сведений (reference=None),
+    вторая — со сведениями. Слияние не должно терять единственную доступную
+    ссылку только потому, что она пришла второй."""
+    account = _account(session)
+
+    first = BrokerPosition(
+        isin="HK0000051877", ticker="3690", quantity=Decimal("50"),
+        blocked=Decimal("0"),
+    )
+    second = BrokerPosition(
+        isin="HK0000051877", ticker="3690", quantity=Decimal("29"),
+        blocked=Decimal("29"),
+        reference=BrokerInstrument(isin="HK0000051877", ticker="3690",
+                                   kind="share", name="Meituan Second",
+                                   currency="USD", buy_available=True,
+                                   sell_available=True),
+    )
+
+    store_holdings(session, account, [first, second])
+
+    instrument = session.execute(
+        select(Instrument).where(Instrument.isin == "HK0000051877")
+    ).scalar_one()
+    assert instrument.issuer == "Meituan Second"
+    assert instrument.currency == "USD"
+    assert instrument.trading_restricted is False
+
+    holding = session.execute(select(BrokerHolding)).scalar_one()
+    assert holding.quantity == Decimal("79")
+    assert holding.blocked == Decimal("29")
+
+
 def test_position_without_reference_still_stores_holding(session):
     """Брокер, который справочных сведений не даёт, не должен ронять снимок:
     строка обязана сохраниться, просто без связи с инструментом."""

@@ -1,12 +1,19 @@
 from decimal import Decimal
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerPosition
+from app.db_errors import is_unique_violation
 from app.instruments import kinds
 from app.instruments.service import apply_reference, secid_from_ticker
 from app.models import Account, BrokerHolding, Instrument
+
+# Тот же уникальный индекс, что в app/instruments/service.py — обе точки
+# вставки Instrument конкурируют за один и тот же ISIN, поэтому и имя
+# индекса, с которым сверяется IntegrityError, у них общее.
+_ISIN_UNIQUE_INDEX = "ix_instrument_isin"
 
 
 def store_holdings(session: Session, account: Account, positions: list[BrokerPosition]) -> int:
@@ -42,6 +49,12 @@ def store_holdings(session: Session, account: Account, positions: list[BrokerPos
                 ticker=existing.ticker or item.ticker,
                 quantity=existing.quantity + item.quantity,
                 blocked=existing.blocked + item.blocked,
+                # Обе порции уже корректно разрешены по FIGI каждая для своей
+                # позиции — выбора «по FIGI» здесь нет и не нужно. Побеждает
+                # первая непустая ссылка в порядке следования positions:
+                # existing — это ранее увиденная порция той же бумаги, и её
+                # reference первична, item.reference — только запасной
+                # вариант, если у первой порции справочных сведений не было.
                 reference=existing.reference or item.reference,
             )
 
@@ -60,17 +73,7 @@ def store_holdings(session: Session, account: Account, positions: list[BrokerPos
             # HK0000051877 и HK0000123577, обе заблокированы целиком, и обе
             # безымянны в расхождениях. Заводим из справочных сведений,
             # разрешённых коннектором по FIGI позиции.
-            instrument = Instrument(
-                isin=item.isin,
-                ticker=item.reference.ticker or item.ticker,
-                secid=secid_from_ticker(item.reference.ticker or item.ticker),
-                kind=item.reference.kind or kinds.OTHER,
-                currency=(item.reference.currency or "RUB").upper(),
-                issuer=item.reference.name,
-                trading_restricted=bool(_restricted_from(item.reference)),
-            )
-            session.add(instrument)
-            session.flush()
+            instrument = _insert_instrument_from_reference(session, item)
             instruments[item.isin] = instrument
         elif instrument is not None and item.reference is not None:
             # Уже известную бумагу справочник тоже освежает: разблокировка —
@@ -107,6 +110,52 @@ def blocked_by_instrument(session: Session) -> dict[tuple[int, int], Decimal]:
     ).all()
     return {(account_id, instrument_id): blocked
             for account_id, instrument_id, blocked in rows}
+
+
+def _insert_instrument_from_reference(session: Session, item: BrokerPosition) -> Instrument:
+    """Вставляет новый инструмент по справочным сведениям позиции `item.reference`.
+
+    Тот же приём гонки, что в app/instruments/service.py::_insert_instrument
+    (см. константу _ISIN_UNIQUE_INDEX выше), но не тот же код: там источник —
+    RawOperation из журнала, здесь — BrokerInstrument снимка позиций. Гонка та
+    же самая: агрегатор синхронизирует несколько брокеров, и одна и та же
+    бумага может кросс-листингом одновременно первый раз встретиться в двух
+    параллельных пачках. Побеждает вставка, успевшая раньше; проигравшая ловит
+    нарушение уникального индекса и переиспользует уже вставленную запись,
+    дозаполняя её теми же справочными сведениями через apply_reference —
+    вместо того чтобы уронить всю синхронизацию счёта.
+    """
+    reference = item.reference
+    instrument = Instrument(
+        isin=item.isin,
+        ticker=reference.ticker or item.ticker,
+        secid=secid_from_ticker(reference.ticker or item.ticker),
+        kind=reference.kind or kinds.OTHER,
+        currency=(reference.currency or "RUB").upper(),
+        issuer=reference.name,
+        trading_restricted=bool(_restricted_from(reference)),
+    )
+    try:
+        with session.begin_nested():
+            session.add(instrument)
+            session.flush()
+    except IntegrityError as exc:
+        if not is_unique_violation(exc, _ISIN_UNIQUE_INDEX):
+            raise
+        # SQLAlchemy сам изгоняет instrument из сессии при откате SAVEPOINT —
+        # повторный explicit expunge здесь лишний и падает с InvalidRequestError.
+        winner = session.execute(
+            select(Instrument).where(Instrument.isin == item.isin)
+        ).scalar_one()
+        apply_reference(
+            winner,
+            reference.kind,
+            reference.name,
+            (reference.currency or "").upper() or None,
+            _restricted_from(reference),
+        )
+        return winner
+    return instrument
 
 
 def _restricted_from(reference) -> bool | None:
