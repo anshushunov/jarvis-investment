@@ -271,8 +271,13 @@ def test_0016_downgrade_refuses_when_manual_entries_exist(migrations_engine):
         """))
         connection.commit()
 
-        with pytest.raises(RuntimeError, match="Откат миграции 0016 невозможен"):
+        with pytest.raises(RuntimeError, match="Откат миграции 0016 невозможен") as refusal:
             command.downgrade(config, "base")
+
+        # Совет в отказе обязан быть выполнимым: отмена решения ничего не
+        # удаляет, а порождает новые записи с тем же source='manual' — счётчик
+        # от неё только вырастет.
+        assert "revert" not in str(refusal.value)
 
         connection.rollback()
 
