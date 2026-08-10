@@ -1,3 +1,4 @@
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -239,13 +240,26 @@ def _apply_conversion(
         else:
             share = q(lot.quantity_left * new_quantity / old_quantity)
         distributed = q(distributed + share)
-        open_lots.append(OpenLot(
+        moved = OpenLot(
             instrument_id=entry.instrument_id,
             opened_at=lot.opened_at,
             price=money(lot.quantity_left * lot.price / share) if share else money("0"),
             quantity_left=share,
             cost_known=lot.cost_known,
-        ))
+        )
+        # Место в книге — по дате открытия, а не в хвост. Книга упорядочена по
+        # ней, и весь движок считает open_lots[0] самой старой партией: на этом
+        # стоят и закрытие встречных партий, и RealizedSale.opened_at. У
+        # перенесённой партии дата старая, и если целевая бумага уже была в
+        # портфеле, хвост поставил бы её в очередь последней — продажа закрыла
+        # бы не ту партию, завысив себестоимость и спрятав трёхлетнюю льготу.
+        # bisect_right, а не left: при равных датах партия, уже лежавшая в
+        # книге, остаётся впереди, а сами перенесённые партии сохраняют свой
+        # порядок между собой.
+        open_lots.insert(
+            bisect_right(open_lots, moved.opened_at, key=lambda item: item.opened_at),
+            moved,
+        )
     touched.add(entry.instrument_id)
 
 

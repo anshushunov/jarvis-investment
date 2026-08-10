@@ -155,6 +155,90 @@ def test_two_conversions_at_the_same_instant_do_not_mix():
     assert result.positions[4].lots[0].price == Decimal("5")
 
 
+def test_conversion_into_an_existing_position_keeps_fifo_order():
+    """Целевая бумага уже лежит в портфеле — перенесённая партия старше её.
+
+    Движок повсюду считает `open_lots[0]` самой старой партией: на этом стоит
+    и закрытие встречных партий, и `RealizedSale.opened_at`. Если положить
+    перенесённую партию в хвост, продажа закроет не ту: себестоимость окажется
+    завышенной, а трёхлетняя льгота по бумаге 2021 года не будет видна вовсе.
+    """
+    result = fold([
+        LedgerEntry(op_type=OperationType.BUY,
+                    executed_at=datetime(2021, 1, 10, tzinfo=timezone.utc),
+                    instrument_id=OLD, quantity=Decimal("10"),
+                    price=Decimal("100"), amount=Decimal("0"), fee=Decimal("0")),
+        LedgerEntry(op_type=OperationType.BUY,
+                    executed_at=datetime(2025, 2, 5, tzinfo=timezone.utc),
+                    instrument_id=NEW, quantity=Decimal("10"),
+                    price=Decimal("500"), amount=Decimal("0"), fee=Decimal("0")),
+        _out("10"), _in("10"),
+        LedgerEntry(op_type=OperationType.SELL,
+                    executed_at=datetime(2026, 4, 2, tzinfo=timezone.utc),
+                    instrument_id=NEW, quantity=Decimal("10"),
+                    price=Decimal("600"), amount=Decimal("0"), fee=Decimal("0")),
+    ])
+
+    assert len(result.realized) == 1
+    sale = result.realized[0]
+    # Закрылась партия 2021 года, пришедшая конвертацией, а не покупка 2025-го.
+    assert sale.opened_at == datetime(2021, 1, 10, tzinfo=timezone.utc)
+    assert sale.cost == Decimal("1000")
+    assert sale.proceeds == Decimal("6000")
+    # В книге осталась покупка 2025 года целиком.
+    left = result.positions[NEW].lots
+    assert [(lot.opened_at.year, lot.quantity_left) for lot in left] == [
+        (2025, Decimal("10"))
+    ]
+
+
+def test_conversion_keeps_the_order_of_transferred_lots_on_equal_dates():
+    """Партии с равными датами не перескакивают друг через друга.
+
+    Перенесённые партии сохраняют свой порядок между собой, а уже лежавшая в
+    книге партия той же даты остаётся впереди: она попала в книгу раньше.
+    """
+    same_day = datetime(2024, 5, 1, tzinfo=timezone.utc)
+    result = fold([
+        LedgerEntry(op_type=OperationType.BUY, executed_at=same_day,
+                    instrument_id=NEW, quantity=Decimal("1"), price=Decimal("7"),
+                    amount=Decimal("0"), fee=Decimal("0")),
+        LedgerEntry(op_type=OperationType.BUY, executed_at=same_day,
+                    instrument_id=OLD, quantity=Decimal("1"), price=Decimal("11"),
+                    amount=Decimal("0"), fee=Decimal("0")),
+        LedgerEntry(op_type=OperationType.BUY, executed_at=same_day,
+                    instrument_id=OLD, quantity=Decimal("1"), price=Decimal("13"),
+                    amount=Decimal("0"), fee=Decimal("0")),
+        _out("2"), _in("2"),
+    ])
+
+    assert [lot.price for lot in result.positions[NEW].lots] == [
+        Decimal("7"), Decimal("11"), Decimal("13")
+    ]
+
+
+def test_conversion_without_link_id_is_an_error():
+    """Без link_id связать стороны нечем: карман достался бы чужому решению."""
+    orphan = LedgerEntry(
+        op_type=OperationType.CONVERSION_OUT, executed_at=WHEN,
+        instrument_id=OLD, quantity=Decimal("10"), price=Decimal("0"),
+        amount=Decimal("0"), fee=Decimal("0"),
+    )
+
+    with pytest.raises(ConversionError, match="нет link_id"):
+        fold([_buy(OLD, "10", "100", day=1), orphan])
+
+
+def test_conversion_out_without_in_does_not_lose_the_shares():
+    """Карман, оставшийся невостребованным, — это пропавшие бумаги.
+
+    Промолчать значит вычесть бумаги из старой позиции и не добавить ни в
+    какую другую: портфель молча похудеет на всю конвертированную бумагу.
+    """
+    with pytest.raises(ConversionError, match="невостребованными"):
+        fold([_buy(OLD, "10", "100", day=1), _out("10")])
+
+
 def test_adjustment_adds_quantity_with_unknown_cost():
     entry = LedgerEntry(
         op_type=OperationType.ADJUSTMENT, executed_at=WHEN, instrument_id=OLD,
