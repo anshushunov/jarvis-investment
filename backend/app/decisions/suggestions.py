@@ -9,6 +9,7 @@
 остаётся только решение владельца, и отклонённое глушит повторный показ.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -29,7 +30,7 @@ class Suggestion:
     # оседают именно так — у живой пары это верно с обеих сторон. Признак
     # усиливающий: сам по себе гипотезу не создаёт, но показывается владельцу.
     blocked_fully: bool
-    # Кандидатов с такой же величиной больше одного. Выбирать за владельца
+    # У пары есть конкуренты — с любой из двух сторон. Выбирать за владельца
     # нельзя: в фазе 2a «правдоподобный» выбор стоил ошибок на миллионы.
     ambiguous: bool
 
@@ -106,25 +107,30 @@ def suggestions_for_account(session: Session, account_id: int) -> dict[str, list
     rejected = _rejected_pairs(session, account_id)
     blocked = _fully_blocked(session, account_id)
 
-    result: dict[str, list[Suggestion]] = {}
-    for from_isin, from_quantity in surplus:
-        matches = [
-            (to_isin, to_quantity)
-            for to_isin, to_quantity in shortage
-            if to_quantity == from_quantity and (from_isin, to_isin) not in rejected
-        ]
-        if not matches:
-            continue
+    pairs = [
+        (from_isin, from_quantity, to_isin, to_quantity)
+        for from_isin, from_quantity in surplus
+        for to_isin, to_quantity in shortage
+        if to_quantity == from_quantity and (from_isin, to_isin) not in rejected
+    ]
 
-        ambiguous = len(matches) > 1
-        for to_isin, to_quantity in matches:
-            suggestion = Suggestion(
-                from_isin=from_isin, from_quantity=from_quantity,
-                to_isin=to_isin, to_quantity=to_quantity,
-                blocked_fully=to_isin in blocked,
-                ambiguous=ambiguous,
-            )
-            result.setdefault(from_isin, []).append(suggestion)
-            result.setdefault(to_isin, []).append(suggestion)
+    # Конкуренция считается с обеих сторон. Одной стороны мало: два излишка по
+    # 10 и одна недостача 10 дают каждому излишку ровно по одной гипотезе, и
+    # каждая из них выглядела бы достоверной — панель предзаполнила бы форму
+    # сама, а подтверждение обеих зачислило бы одну и ту же недостачу дважды.
+    # Неоднозначна и та пара, у которой конкурент есть только у бумаги-получателя.
+    rivals_of_source = Counter(pair[0] for pair in pairs)
+    rivals_of_target = Counter(pair[2] for pair in pairs)
+
+    result: dict[str, list[Suggestion]] = {}
+    for from_isin, from_quantity, to_isin, to_quantity in pairs:
+        suggestion = Suggestion(
+            from_isin=from_isin, from_quantity=from_quantity,
+            to_isin=to_isin, to_quantity=to_quantity,
+            blocked_fully=to_isin in blocked,
+            ambiguous=rivals_of_source[from_isin] > 1 or rivals_of_target[to_isin] > 1,
+        )
+        result.setdefault(from_isin, []).append(suggestion)
+        result.setdefault(to_isin, []).append(suggestion)
 
     return result

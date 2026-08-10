@@ -93,6 +93,29 @@ def test_two_candidates_with_equal_quantity_are_both_offered_as_ambiguous(sessio
     assert all(s.ambiguous for s in offered)
 
 
+def test_two_sources_competing_for_one_target_are_ambiguous_too(session):
+    """Зеркальная неоднозначность: два излишка претендуют на одну недостачу.
+
+    Считать конкурентов только со стороны излишка мало. Два излишка по 10 (AA и
+    BB) и одна недостача 10 (SS) дают каждому из AA и BB ровно по одной
+    гипотезе — и без этой проверки обе считались бы достоверными: панель
+    предзаполнит форму сама, владелец подтвердит обе, и SS зачислится дважды.
+    Бумага одна, претендента два, выбирать обязан владелец.
+    """
+    account = _account(session)
+    _finding(session, account, "AA0000000001", "10", "0", "missing_at_broker")
+    _finding(session, account, "BB0000000001", "10", "0", "missing_at_broker")
+    _finding(session, account, "SS0000000001", "0", "10", "missing_in_ledger")
+
+    result = suggestions_for_account(session, account.id)
+
+    assert [s.ambiguous for s in result["AA0000000001"]] == [True]
+    assert [s.ambiguous for s in result["BB0000000001"]] == [True]
+    # Строка недостачи показывает обоих претендентов — разбор открывают с любой
+    # из сторон, и видеть владелец должен одно и то же.
+    assert {s.from_isin for s in result["SS0000000001"]} == {"AA0000000001", "BB0000000001"}
+
+
 def test_empty_isin_is_not_offered(session):
     """Строку без ISIN нечем подписать в словаре результата и не с чем сверять.
 
