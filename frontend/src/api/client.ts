@@ -70,6 +70,18 @@ export interface HistoryPoint {
   total_value: string;
 }
 
+export interface Suggestion {
+  from_isin: string;
+  from_quantity: string;
+  to_isin: string;
+  to_quantity: string;
+  // Бумага-получатель заблокирована у брокера целиком: конвертации часто
+  // оседают именно так. Признак усиливающий, сам по себе гипотезу не создаёт.
+  blocked_fully: boolean;
+  // Кандидатов с такой же величиной несколько — выбирает владелец.
+  ambiguous: boolean;
+}
+
 export interface ReconciliationRow {
   isin: string | null;
   status: string;
@@ -78,6 +90,34 @@ export interface ReconciliationRow {
   // Подпись счёта, к которому относится расхождение (сверка считается по
   // каждому счёту отдельно — один ISIN может дать две строки на двух счетах).
   account: string;
+  suggestions: Suggestion[];
+}
+
+export interface DecisionInput {
+  account: string;
+  kind: "CONVERSION" | "ADJUSTMENT" | "ACCEPTED_AS_IS";
+  status: "CONFIRMED" | "REJECTED";
+  from_isin?: string | null;
+  from_quantity?: string | null;
+  to_isin?: string | null;
+  to_quantity?: string | null;
+  cost_basis?: string | null;
+  effective_at: string;
+  note: string;
+}
+
+export interface Decision {
+  id: number;
+  account: string;
+  kind: string;
+  status: string;
+  from_isin: string | null;
+  from_quantity: string | null;
+  to_isin: string | null;
+  to_quantity: string | null;
+  effective_at: string;
+  note: string;
+  reverts_id: number | null;
 }
 
 export interface CashRow {
@@ -129,4 +169,11 @@ export const api = {
   history: (days = 90) => request<HistoryPoint[]>(`/portfolio/history?days=${days}`),
   reconciliations: () => request<ReconciliationRow[]>("/reconciliations"),
   syncTbank: () => request<SyncRunResult[]>("/sync/tbank", { method: "POST" }),
+  decisions: () => request<Decision[]>("/decisions"),
+  createDecision: (body: DecisionInput) =>
+    request<Decision>("/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

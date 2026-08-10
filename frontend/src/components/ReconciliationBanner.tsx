@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { formatQuantity } from "../api/format";
+import { api } from "../api/client";
 import type { ReconciliationRow } from "../api/client";
+import { formatQuantity } from "../api/format";
+import { DecisionPanel } from "./DecisionPanel";
 
 const TEXT: Record<string, string> = {
   quantity_mismatch: "количество не совпадает",
@@ -34,6 +37,7 @@ export function ReconciliationBanner({ rows, error }: { rows: ReconciliationRow[
 // нашла.
 function ReconciliationSummary({ rows }: { rows: ReconciliationRow[] }) {
   const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
 
   return (
     <div className="card" style={{ borderColor: "rgba(232,176,75,0.45)", background: "rgba(232,176,75,0.08)" }}>
@@ -64,14 +68,52 @@ function ReconciliationSummary({ rows }: { rows: ReconciliationRow[] }) {
             <div key={`${row.account}-${row.isin}-${index}`} style={{ fontSize: 13, color: "var(--tx-2)", padding: "3px 0" }}>
               {row.account} · {row.isin}: {TEXT[row.status] ?? row.status} — в журнале {formatQuantity(row.ledger_quantity)},
               у брокера {formatQuantity(row.broker_quantity)}
+              {" "}
+              <button
+                type="button"
+                onClick={() => setOpen(open === `${row.account}-${row.isin}` ? null : `${row.account}-${row.isin}`)}
+                style={{ background: "none", border: "none", padding: 0, cursor: "pointer",
+                         color: "var(--amber)", font: "inherit", textDecoration: "underline" }}
+              >
+                разобрать
+              </button>
+              {row.suggestions.length > 0 && (
+                <span title="Система нашла подходящую пару" style={{ marginLeft: 4 }}>💡</span>
+              )}
+              {open === `${row.account}-${row.isin}` && (
+                <DecisionPanel row={row} onDone={() => setOpen(null)} />
+              )}
             </div>
           ))}
           <div style={{ fontSize: 12, color: "var(--tx-2)", marginTop: 8 }}>
             Позиции не исправлены автоматически: за этим обычно стоят корпоративные действия —
             конвертации расписок, смены ISIN, дробления. Брокер не присылает их отдельной операцией.
           </div>
+          <DecisionLog />
         </div>
       )}
+    </div>
+  );
+}
+
+// Решения не исчезают вместе с расхождением, которое они закрыли: пояснение
+// владельца — единственный источник ответа на вопрос «откуда это количество».
+function DecisionLog() {
+  const decisions = useQuery({ queryKey: ["decisions"], queryFn: api.decisions });
+
+  if (!decisions.data || decisions.data.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+      <div style={{ fontSize: 12, color: "var(--tx-2)", marginBottom: 4 }}>
+        Уже разобрано: {decisions.data.length}
+      </div>
+      {decisions.data.map((decision) => (
+        <div key={decision.id} style={{ fontSize: 12, color: "var(--tx-2)", padding: "2px 0" }}>
+          {decision.account} · {decision.from_isin ?? "—"} → {decision.to_isin ?? "—"}
+          {decision.status === "REVERTED" && " (отменено)"} — {decision.note}
+        </div>
+      ))}
     </div>
   );
 }
