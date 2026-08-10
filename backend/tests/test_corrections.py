@@ -17,7 +17,8 @@ from sqlalchemy import select
 
 from app.ledger.schemas import RawOperation
 from app.ledger.service import append_operations
-from app.models import Account, OperationType, Transaction
+from app.models import Account, OperationType, Position, Transaction
+from app.positions.service import rebuild_positions
 
 
 def _account(session) -> Account:
@@ -28,26 +29,28 @@ def _account(session) -> Account:
     return account
 
 
-def _operation(quantity: str, amount: str, price: str = "100") -> RawOperation:
-    return RawOperation(
-        external_id="op-1", op_type="BUY",
-        executed_at=datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc),
-        isin="RU0009029540", ticker="SBER", quantity=Decimal(quantity),
-        price=Decimal(price), amount=Decimal(amount), currency="RUB",
-        fee=Decimal("0"), payload={},
-    )
+def _operation(quantity: str, amount: str, price: str = "100",
+               op_type: str = "BUY") -> RawOperation:
+    return _operation_with_id("op-1", quantity, amount, price, op_type)
 
 
-def _operation_with_id(external_id: str, quantity: str, amount: str, price: str = "100") -> RawOperation:
+def _operation_with_id(external_id: str, quantity: str, amount: str,
+                       price: str = "100", op_type: str = "BUY") -> RawOperation:
     """Как _operation, но с произвольным external_id — нужна там, где в одном
     батче должна оказаться операция op-1 и независимая от неё новая операция."""
     return RawOperation(
-        external_id=external_id, op_type="BUY",
+        external_id=external_id, op_type=op_type,
         executed_at=datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc),
         isin="RU0009029540", ticker="SBER", quantity=Decimal(quantity),
         price=Decimal(price), amount=Decimal(amount), currency="RUB",
         fee=Decimal("0"), payload={},
     )
+
+
+def _correction(session) -> Transaction:
+    return session.execute(
+        select(Transaction).where(Transaction.op_type == OperationType.ADJUSTMENT)
+    ).scalar_one()
 
 
 def test_identical_repeat_is_still_skipped_silently(session):
@@ -199,3 +202,81 @@ def test_second_change_of_already_corrected_operation_does_not_crash_the_batch(s
         select(Transaction).where(Transaction.op_type == OperationType.ADJUSTMENT)
     ).scalars().all()
     assert len(corrections) == 1  # только первая корректировка дожила до конца
+
+
+def test_changed_sell_is_corrected_in_the_direction_of_the_sale(session):
+    """Доисполнилась продажа, а не покупка: было записано 12, брокер отдал 100.
+
+    Количество в журнале беззнаковое, направление задаёт тип операции. У
+    корректировки тип ADJUSTMENT, а его направление движок берёт из знака
+    количества (app/positions/engine.py) — значит корректировка продажи обязана
+    нести минус. С сырой разностью +88 движок открывал бы партию на 88 бумаг по
+    цене продажи: позиция после покупки 200 и продажи 100 выходила бы 276
+    вместо 100, да ещё с ценой продажи в качестве себестоимости.
+    """
+    account = _account(session)
+    append_operations(session, account, "tbank", [
+        _operation_with_id("buy-1", "200", "-20000", op_type="BUY"),
+    ])
+    append_operations(session, account, "tbank", [_operation("12", "1200", price="120", op_type="SELL")])
+
+    result = append_operations(session, account, "tbank", [
+        _operation("100", "10000", price="120", op_type="SELL"),
+    ])
+
+    assert result.corrected == 1
+    assert _correction(session).quantity == Decimal("-88")
+
+    rebuild_positions(session, account)
+    position = session.execute(select(Position)).scalars().one()
+    assert position.quantity == Decimal("100.00000000")
+
+
+def test_changed_transfer_out_is_corrected_in_its_own_direction(session):
+    """То же правило у второго уменьшающего типа: вывод бумаг.
+
+    Проверяется не тот же путь ещё раз, а то, что направление берётся из общего
+    множества DECREASING, а не перечислено где-то списком из одной продажи.
+    """
+    account = _account(session)
+    append_operations(session, account, "tbank", [
+        _operation_with_id("buy-1", "200", "-20000", op_type="BUY"),
+    ])
+    append_operations(session, account, "tbank", [
+        _operation("12", "0", price="0", op_type="TRANSFER_OUT"),
+    ])
+
+    result = append_operations(session, account, "tbank", [
+        _operation("100", "0", price="0", op_type="TRANSFER_OUT"),
+    ])
+
+    assert result.corrected == 1
+    assert _correction(session).quantity == Decimal("-88")
+
+    rebuild_positions(session, account)
+    position = session.execute(select(Position)).scalars().one()
+    assert position.quantity == Decimal("100.00000000")
+
+
+def test_corrected_sell_is_not_corrected_again_on_the_next_sync(session):
+    """Уже учтённая правка продажи не переписывается на каждой синхронизации.
+
+    Сумма записанного по операции считается со знаком: продажа 12 плюс поправка
+    −88 дают −100, ровно столько же несёт присланная продажа 100. Складывать
+    беззнаковое количество продажи со знаковым количеством поправки нельзя —
+    получилось бы −76 против 100, и корректировка писалась бы заново каждый раз
+    (а точнее, падала бы в конфликт по external_id с записью в журнал ошибок).
+    """
+    account = _account(session)
+    append_operations(session, account, "tbank", [_operation("12", "1200", price="120", op_type="SELL")])
+    append_operations(session, account, "tbank", [_operation("100", "10000", price="120", op_type="SELL")])
+
+    result = append_operations(session, account, "tbank", [
+        _operation("100", "10000", price="120", op_type="SELL"),
+    ])
+
+    assert result.corrected == 0
+    corrections = session.execute(
+        select(Transaction).where(Transaction.op_type == OperationType.ADJUSTMENT)
+    ).scalars().all()
+    assert len(corrections) == 1

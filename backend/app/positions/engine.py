@@ -36,6 +36,53 @@ WITHOUT_COST = {OperationType.TRANSFER_IN}
 CONVERSION = {OperationType.CONVERSION_OUT, OperationType.CONVERSION_IN}
 
 
+def _sign(value: Decimal) -> int:
+    return (value > 0) - (value < 0)
+
+
+# ── Соглашение о знаке количества ────────────────────────────────────────────
+#
+# Количество в журнале беззнаковое, направление задаёт тип операции. У
+# ADJUSTMENT типа-направления нет: он один на поправку в обе стороны, и
+# направление несёт знак самого количества. Правило это домен обязан хранить в
+# одном месте: производителей записей ADJUSTMENT двое — служба решений
+# (app/decisions/service.py) и корректировка изменённой брокером операции
+# (app/ledger/service.py), — и стоило одному из них проставить знак самому, как
+# доисполненная продажа превращалась в покупку: разность +88 по продаже
+# открывала партию на 88 бумаг по цене продажи. Обе функции ниже и есть это
+# единственное место; ставить минус где-то ещё нельзя.
+
+
+def signed_quantity(op_type: OperationType, quantity: Decimal) -> Decimal:
+    """Количество со знаком, в каком операция двигает позицию.
+
+    Плюс — приход, минус — расход, ноль — операция количество не двигает вовсе
+    (деньги, комиссия, налог; сюда же попадает и всё, что не перечислено в
+    INCREASING/DECREASING). У ADJUSTMENT знак уже в количестве, и трогать его
+    нельзя — это и есть его направление.
+
+    Стороны конвертации сюда не входят: они не открывают и не закрывают партии
+    по своему количеству, а переносят чужие (см. CONVERSION и _apply_conversion).
+    """
+    if op_type is OperationType.ADJUSTMENT:
+        return quantity
+    if op_type in INCREASING:
+        return quantity
+    if op_type in DECREASING:
+        return -quantity
+    return Decimal("0")
+
+
+def decreasing_adjustment(quantity: Decimal) -> Decimal:
+    """Знаковое количество поправки, списывающей `quantity` бумаг.
+
+    Владелец задаёт количество списания положительным (так же его отдаёт и
+    интерфейс), а знак ставится здесь — в том же месте, где записано само
+    соглашение, а не в службе решений.
+    """
+    return -abs(quantity)
+
+
 class ConversionError(RuntimeError):
     """Стороны конвертации не сошлись. Это порча данных, а не редкий случай:
     молча открыть партию с нулевой ценой значит подарить владельцу выдуманную
@@ -155,10 +202,6 @@ class FoldResult:
     positions: dict[int, PositionState]
     realized: list[RealizedSale]
     cash: dict[str, Decimal]
-
-
-def _sign(value: Decimal) -> int:
-    return (value > 0) - (value < 0)
 
 
 def _average(lots: list[OpenLot]) -> Decimal:
@@ -597,22 +640,18 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
 
         effect = _effect_of(effects, entry)
 
-        if entry.op_type is OperationType.ADJUSTMENT:
-            # Направление по знаку количества: поправка бывает в обе стороны, и
-            # тип операции у них общий. Нулевая поправка (брокер изменил только
-            # сумму) количество не трогает вовсе.
-            if entry.quantity == 0:
-                continue
-            direction = 1 if entry.quantity > 0 else -1
-        elif entry.op_type in INCREASING:
-            direction = 1
-        elif entry.op_type in DECREASING:
-            direction = -1
-        else:
-            continue
+        # Направление — из общего соглашения о знаке (signed_quantity), а не из
+        # разбора типов на месте: то же правило читают производители записей
+        # ADJUSTMENT, и разъехаться им нельзя.
+        direction = _sign(signed_quantity(entry.op_type, entry.quantity))
 
-        if entry.quantity == 0:
-            if entry.op_type is OperationType.REDEMPTION:
+        if direction == 0:
+            # Ноль означает одно из двух: тип количество не двигает (деньги,
+            # комиссия) либо количество нулевое — например, поправка, которой
+            # брокер изменил одну только сумму. Единственное исключение —
+            # полное погашение: оно приходит без количества и закрывает выпуск
+            # целиком.
+            if entry.quantity == 0 and entry.op_type is OperationType.REDEMPTION:
                 _close_whole_position(lots, touched, realized, entry)
             continue
 

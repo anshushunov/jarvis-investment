@@ -21,7 +21,7 @@ from app.models import (
 )
 from app.models.ledger_decision import DecisionKind, DecisionStatus
 from app.money import money, quantity as q
-from app.positions.engine import DECREASING, ConversionError, ReversalError
+from app.positions.engine import DECREASING, ConversionError, ReversalError, decreasing_adjustment
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_from_snapshot
 
@@ -67,9 +67,10 @@ def _validate_quantities(decision: LedgerDecision, *, has_from: bool, has_to: bo
     бумаг, себестоимость исчезала, и позиция при этом оставалась помеченной как
     «себестоимость известна».
 
-    Списывающая сторона задаётся положительным количеством: минус ставит сама
-    служба при порождении записи журнала (см. _generate_entries), а
-    отрицательное значение от владельца сработало бы в обратную сторону.
+    Списывающая сторона задаётся положительным количеством: минус ставится при
+    порождении записи журнала общим правилом о знаке (app/positions/engine.py,
+    decreasing_adjustment; см. _generate_entries), а отрицательное значение от
+    владельца сработало бы в обратную сторону.
     """
     sides = []
     if has_from:
@@ -152,8 +153,14 @@ def _generate_entries(session: Session, decision: LedgerDecision) -> None:
             session.add(_entry(decision, "in", OperationType.ADJUSTMENT,
                                decision.to_instrument_id, decision.to_quantity, price))
         else:
+            # Знак списания ставит не служба: соглашение о знаке у ADJUSTMENT
+            # записано в одном месте (app/positions/engine.py), и второй его
+            # производитель — корректировка изменённой брокером операции —
+            # читает оттуда же. Разъехавшись, эти два правила стоили позиции в
+            # 276 бумаг вместо 100.
             session.add(_entry(decision, "out", OperationType.ADJUSTMENT,
-                               decision.from_instrument_id, -decision.from_quantity, "0"))
+                               decision.from_instrument_id,
+                               decreasing_adjustment(decision.from_quantity), "0"))
 
     session.flush()
 
@@ -202,8 +209,16 @@ def _blocking_decisions(session: Session, original: LedgerDecision) -> list[Ledg
     первое решение оказывается неотменяемым навсегда. Исключение — решение,
     чей CONVERSION_OUT черпал ту самую бумагу, которую зачислило отменяемое:
     эта запись осталась в журнале на своей, более поздней дате и по-прежнему
-    требует бумаги в книге. Сами зеркальные записи ничего не черпают — они
-    раскручивают чужой след, — поэтому зеркала из проверки исключены всегда.
+    требует бумаги в книге.
+
+    Зеркало исключается из проверки вместе с погашенным им решением, а не само
+    по себе: погашенной пару видно только тогда, когда в окно попали обе её
+    половины. Зеркало решения, принятого раньше отменяемого, в окно приносит
+    лишь себя — отменяемого им решения среди более поздних нет, погашение
+    остаётся неопознанным, и такое зеркало считается мешающим. Отказ выходит
+    строже необходимого (свои записи зеркало не черпает, а раскручивает чужой
+    след), но в сторону безопасности; см. попутный долг фазы 2b про
+    неотменяемые цепочки.
     """
     instruments = {original.from_instrument_id, original.to_instrument_id} - {None}
     if not instruments:
