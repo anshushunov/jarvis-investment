@@ -1,8 +1,8 @@
 from decimal import Decimal
 
 from app.connectors.base import BrokerPosition
-from app.models import Account, Instrument, Position, Reconciliation
-from app.sync.reconcile import reconcile_account
+from app.models import Account, BrokerHolding, Instrument, Position, Reconciliation
+from app.sync.reconcile import reconcile_account, reconcile_from_snapshot
 
 
 def setup(session) -> tuple[Account, Instrument]:
@@ -136,6 +136,46 @@ def test_tiny_difference_below_threshold_is_ignored(session):
     ])
 
     assert result == []
+
+
+def test_reconcile_from_snapshot_reads_the_stored_holdings(session):
+    """Сверка после решения владельца считается по сохранённому снимку, а не
+    походом к брокеру: частота запросов у T-Invest API ограничена."""
+    account, instrument = setup(session)
+    add_position(session, account, instrument, "35")
+    session.add(BrokerHolding(account_id=account.id, instrument_id=instrument.id,
+                              isin="RU0009029540", quantity=Decimal("40"),
+                              blocked=Decimal("0")))
+    session.flush()
+
+    result = reconcile_from_snapshot(session, account)
+
+    assert [(f.status, f.broker_quantity) for f in result] == [
+        ("quantity_mismatch", Decimal("40"))
+    ]
+
+
+def test_empty_snapshot_is_not_taken_for_an_empty_broker(session):
+    """Снимка нет — расхождения не пересчитываются вовсе.
+
+    reconcile_account сначала стирает прежние расхождения счёта, а потом
+    выписывает missing_at_broker на каждую позицию журнала. Счёт, чья
+    синхронизация упала, не дойдя до store_holdings, получал бы после первого же
+    решения владельца полный набор выдуманных расхождений.
+    """
+    account, instrument = setup(session)
+    add_position(session, account, instrument, "35")
+    reconcile_account(session, account, [
+        BrokerPosition(isin="RU0009029540", ticker="SBER", quantity=Decimal("40"))
+    ])
+
+    result = reconcile_from_snapshot(session, account)
+
+    assert result == []
+    findings = session.query(Reconciliation).all()
+    assert [(f.status, f.broker_quantity) for f in findings] == [
+        ("quantity_mismatch", Decimal("40"))
+    ]
 
 
 def test_reconcile_does_not_touch_other_accounts_findings(session):

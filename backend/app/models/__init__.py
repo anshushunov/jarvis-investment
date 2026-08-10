@@ -6,6 +6,7 @@ from app.models.fx_rate import FxRate
 from app.models.instrument import Instrument
 from app.models.ledger_decision import (
     DECISION_PAYLOAD_KEY,
+    DECISION_REVERTS_PAYLOAD_KEY,
     DecisionKind,
     DecisionStatus,
     LedgerDecision,
@@ -23,6 +24,7 @@ __all__ = [
     "BrokerHolding",
     "CashBalance",
     "DECISION_PAYLOAD_KEY",
+    "DECISION_REVERTS_PAYLOAD_KEY",
     "DailySnapshot",
     "DecisionKind",
     "DecisionStatus",

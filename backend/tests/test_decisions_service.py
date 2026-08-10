@@ -32,6 +32,42 @@ def _instrument(session, isin: str) -> Instrument:
     return instrument
 
 
+def _buy(session, account, isin: str, quantity: str, price: str, when: datetime,
+         external_id: str = "1") -> None:
+    from app.ledger.schemas import RawOperation
+    from app.ledger.service import append_operations
+
+    append_operations(session, account, "tbank", [RawOperation(
+        external_id=external_id, op_type="BUY", executed_at=when,
+        isin=isin, ticker=isin[:4], quantity=Decimal(quantity),
+        price=Decimal(price), amount=-Decimal(quantity) * Decimal(price),
+        currency="RUB", fee=Decimal("0"), payload={},
+    )])
+
+
+def _book(session, account) -> dict[int, list[tuple]]:
+    """Книга открытых партий счёта: количество, цена, дата открытия и признак
+    известной себестоимости по каждой партии.
+
+    Таблица позиций этого не хранит — в ней только итог по бумаге, — поэтому
+    сравнить состояние до решения и после его отмены можно только здесь. А
+    сравнивать надо именно партии: количества сходятся и тогда, когда отмена
+    вернула чужие даты и чужую себестоимость.
+    """
+    from app.positions.engine import fold
+    from app.positions.service import _entries
+
+    result = fold(_entries(session, account), currency=account.currency)
+    return {
+        instrument_id: [
+            (lot.quantity_left, lot.price, lot.opened_at, lot.cost_known)
+            for lot in state.lots
+        ]
+        for instrument_id, state in result.positions.items()
+        if state.lots
+    }
+
+
 def test_conversion_decision_round_trip(session):
     account = _account(session)
     old = _instrument(session, "HK0000310034")
@@ -180,6 +216,7 @@ def test_revert_returns_positions_to_the_previous_state(session):
         price=Decimal("120"), amount=Decimal("-9480"), currency="HKD",
         fee=Decimal("0"), payload={},
     )])
+    before = _book(session, account)
 
     decision = record_decision(session, LedgerDecision(
         account_id=account.id, kind=DecisionKind.CONVERSION,
@@ -198,6 +235,189 @@ def test_revert_returns_positions_to_the_previous_state(session):
         for p in session.execute(select(Position)).scalars()
     }
     assert positions == {old.id: Decimal("79")}
+    # Не только количества: книга партий обязана совпасть с прежней целиком.
+    assert _book(session, account) == before
+
+
+def test_revert_restores_the_lot_book_of_a_non_empty_target(session):
+    """Целевая бумага уже была в портфеле — отмена не должна их перепутать.
+
+    Живой разбор: 79 бумаг по 120, купленные в 2024-м, конвертируются в бумагу,
+    где уже лежат 79 по 10 от 2020 года. Отмена, выраженная встречной
+    конвертацией, снимала бы с целевой бумаги самые старые партии — то есть
+    чужие: количества сходились, а себестоимость и даты открытия менялись
+    бумагами местами, и трёхлетняя льгота доставалась не той бумаге.
+    """
+    from app.decisions.service import record_decision, revert_decision
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc), external_id="1")
+    _buy(session, account, "HK0000051877", "79", "10",
+         datetime(2020, 1, 1, tzinfo=timezone.utc), external_id="2")
+    before = _book(session, account)
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=old.id, from_quantity=Decimal("79"),
+        to_instrument_id=new.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Конвертация гонконгского ETF", proposed={},
+    ))
+    revert_decision(session, decision.id, note="Ошибся бумагой")
+
+    assert _book(session, account) == before
+    # То же по существу, но явным текстом: своя себестоимость у каждой бумаги.
+    assert [(lot[0], lot[1], lot[2].year) for lot in _book(session, account)[old.id]] == [
+        (Decimal("79"), Decimal("120"), 2024)
+    ]
+    assert [(lot[0], lot[1], lot[2].year) for lot in _book(session, account)[new.id]] == [
+        (Decimal("79"), Decimal("10"), 2020)
+    ]
+
+
+def test_revert_of_an_adjustment_keeps_the_old_broker_lot(session):
+    """Отмена поправки-зачисления не должна съедать старую партию брокера.
+
+    Зеркальная поправка — списание, а оно закрывает партии с головы книги, где
+    лежит самая старая. Так после отмены выживала партия отменённого решения:
+    100 бумаг оставались, но по цене поправки и с её датой.
+    """
+    from app.decisions.service import record_decision, revert_decision
+    from app.models import Position
+    from sqlalchemy import select
+
+    account = _account(session)
+    instrument = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "RU000A107UL4", "100", "50",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+    before = _book(session, account)
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.ADJUSTMENT,
+        status=DecisionStatus.CONFIRMED,
+        to_instrument_id=instrument.id, to_quantity=Decimal("1012"),
+        cost_basis=Decimal("40000"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Редомициляция ТКС", proposed={},
+    ))
+    revert_decision(session, decision.id, note="Поправка оказалась лишней")
+
+    assert _book(session, account) == before
+    position = session.execute(select(Position)).scalar_one()
+    assert position.quantity == Decimal("100")
+    assert position.average_price == Decimal("50")
+    assert position.cost_basis_known is True
+
+
+def test_revert_of_a_write_off_restores_the_cost_basis(session):
+    """Отмена списания возвращает себестоимость, а не стирает её.
+
+    Зеркальная поправка приходит без цены, а ноль в поправке означает
+    «себестоимость неизвестна»: позиция после отмены переставала показывать
+    среднюю цену и доходность вовсе, хотя владелец всего лишь передумал.
+    """
+    from app.decisions.service import record_decision, revert_decision
+    from app.models import Position
+    from sqlalchemy import select
+
+    account = _account(session)
+    instrument = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "RU000A107UL4", "100", "50",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+    before = _book(session, account)
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.ADJUSTMENT,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=instrument.id, from_quantity=Decimal("40"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Сорок бумаг в журнале лишние", proposed={},
+    ))
+    assert session.execute(select(Position)).scalar_one().quantity == Decimal("60")
+
+    revert_decision(session, decision.id, note="Списание оказалось ошибкой")
+
+    assert _book(session, account) == before
+    position = session.execute(select(Position)).scalar_one()
+    assert position.quantity == Decimal("100")
+    assert position.average_price == Decimal("50")
+    assert position.cost_basis_known is True
+
+
+def test_reverting_a_revert_is_refused(session):
+    """Отменить отмену нельзя: своего следа в книге партий она не оставляет.
+
+    Раньше это уходило в движок и падало там на «не нашла следа» уже после того,
+    как зеркальное решение записалось в сессию.
+    """
+    from app.decisions.service import DecisionError, record_decision, revert_decision
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=old.id, from_quantity=Decimal("79"),
+        to_instrument_id=new.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Конвертация", proposed={},
+    ))
+    mirror = revert_decision(session, decision.id, note="Ошибся бумагой")
+
+    with pytest.raises(DecisionError, match="отменять отмену нельзя"):
+        revert_decision(session, mirror.id, note="И снова передумал")
+
+
+def test_revert_is_refused_when_a_later_decision_touches_the_same_papers(session):
+    """Отменить решение, поверх которого лежит более позднее, нельзя.
+
+    Партий, которые открыло первое решение, в книге уже нет — они ушли во
+    вторую конвертацию. Отказ обязан назвать настоящую причину: раньше владелец
+    получал ошибку движка про «количество в решении» и правил не то.
+    """
+    from app.decisions.service import DecisionError, record_decision, revert_decision
+
+    account = _account(session)
+    first = _instrument(session, "HK0000310034")
+    second = _instrument(session, "HK0000051877")
+    third = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    earlier = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=first.id, from_quantity=Decimal("79"),
+        to_instrument_id=second.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Первая конвертация", proposed={},
+    ))
+    later = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=second.id, from_quantity=Decimal("79"),
+        to_instrument_id=third.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        note="Вторая конвертация", proposed={},
+    ))
+
+    with pytest.raises(DecisionError, match=f"более поздние решения по тем же бумагам \\({later.id}\\)"):
+        revert_decision(session, earlier.id, note="Передумал")
+
+    assert session.get(LedgerDecision, earlier.id).status is DecisionStatus.CONFIRMED
 
 
 @pytest.mark.parametrize("from_quantity, to_quantity", [

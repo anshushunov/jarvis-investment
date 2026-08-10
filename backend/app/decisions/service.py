@@ -8,11 +8,12 @@ append-only, поэтому создаётся зеркальное решени
 import hashlib
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
     DECISION_PAYLOAD_KEY,
+    DECISION_REVERTS_PAYLOAD_KEY,
     Account,
     LedgerDecision,
     OperationType,
@@ -86,6 +87,21 @@ def _dedup_key(decision_id: int, leg: str) -> str:
     return hashlib.sha256(f"{SOURCE}|{decision_id}|{leg}".encode()).hexdigest()
 
 
+def _payload(decision: LedgerDecision) -> dict:
+    """Связи порождённой записи: со своим решением и с отменяемым.
+
+    У записи отмены количество и цена описательные — книгу партий движок
+    восстанавливает по следу отменяемого решения, а не по ним (см.
+    app/positions/engine.py, _revert_decision). Себестоимость съеденной партии
+    здесь и не вычислить: какие именно партии закрыло списание, знает только
+    FIFO внутри движка.
+    """
+    payload = {DECISION_PAYLOAD_KEY: decision.id}
+    if decision.reverts_id is not None:
+        payload[DECISION_REVERTS_PAYLOAD_KEY] = decision.reverts_id
+    return payload
+
+
 def _entry(
     decision: LedgerDecision, leg: str, op_type: OperationType,
     instrument_id: int, quantity, price,
@@ -105,7 +121,7 @@ def _entry(
         dedup_key=_dedup_key(decision.id, leg),
         # decision_id связывает две стороны конвертации: движок достаёт его в
         # LedgerEntry.link_id (app/positions/service.py).
-        payload={DECISION_PAYLOAD_KEY: decision.id},
+        payload=_payload(decision),
     )
 
 
@@ -157,11 +173,47 @@ def record_decision(session: Session, decision: LedgerDecision) -> LedgerDecisio
     return decision
 
 
+def _later_decisions_on_the_same_papers(
+    session: Session, original: LedgerDecision
+) -> list[LedgerDecision]:
+    """Подтверждённые решения этого счёта, принятые позже и по тем же бумагам.
+
+    Отмена раскручивает след решения — те самые партии, которые оно открыло.
+    Если поверх легло ещё одно решение, этих партий в книге уже нет: они ушли в
+    следующую конвертацию. Отказ обязан назвать настоящую причину, иначе
+    владелец читает про «количество в решении» (так падал движок) и правит не
+    то.
+    """
+    instruments = {original.from_instrument_id, original.to_instrument_id} - {None}
+    if not instruments:
+        return []
+
+    statement = (
+        select(LedgerDecision)
+        .where(
+            LedgerDecision.account_id == original.account_id,
+            LedgerDecision.id > original.id,
+            LedgerDecision.status == DecisionStatus.CONFIRMED,
+            or_(
+                LedgerDecision.from_instrument_id.in_(instruments),
+                LedgerDecision.to_instrument_id.in_(instruments),
+            ),
+        )
+        .order_by(LedgerDecision.id)
+    )
+    return list(session.execute(statement).scalars())
+
+
 def revert_decision(session: Session, decision_id: int, note: str) -> LedgerDecision:
     """Отменяет решение зеркальным.
 
     Ни решение, ни порождённые им записи не удаляются: журнал append-only, и
     правка задним числом стёрла бы след того, что владелец однажды решил иначе.
+
+    Зеркальные записи несут ссылку на отменяемое решение, и движок по ней
+    возвращает книгу партий ровно к прежнему виду: снимает те самые партии,
+    которые решение открыло, и возвращает те самые, которые оно сняло, — с их
+    датами открытия, ценами и признаком известной себестоимости.
     """
     original = session.get(LedgerDecision, decision_id)
     if original is None:
@@ -170,6 +222,24 @@ def revert_decision(session: Session, decision_id: int, note: str) -> LedgerDeci
         raise DecisionError(
             f"Отменить можно только подтверждённое решение, а это — "
             f"{original.status.value}."
+        )
+
+    if original.reverts_id is not None:
+        raise DecisionError(
+            f"Решение {original.id} само отменяет решение {original.reverts_id}: "
+            "отменять отмену нельзя — своего следа в книге партий она не "
+            "оставляет, и раскручивать было бы нечего. Запишите вместо этого "
+            "новое решение."
+        )
+
+    later = _later_decisions_on_the_same_papers(session, original)
+    if later:
+        numbers = ", ".join(str(decision.id) for decision in later)
+        raise DecisionError(
+            f"Поверх решения {original.id} лежат более поздние решения по тем же "
+            f"бумагам ({numbers}): партий, которые оно открыло, в книге уже нет, "
+            "и отмена вернула бы чужие даты и чужую себестоимость. Сначала "
+            "отмените более поздние решения."
         )
 
     mirror = LedgerDecision(

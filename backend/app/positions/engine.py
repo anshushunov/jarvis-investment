@@ -1,6 +1,6 @@
 from bisect import bisect_right
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -42,6 +42,17 @@ class ConversionError(RuntimeError):
     доходность и неверную налоговую базу."""
 
 
+class ReversalError(RuntimeError):
+    """Отмена решения не может вернуть книгу партий к прежнему виду.
+
+    Отмена адресная: она снимает те самые партии, которые открыло отменяемое
+    решение, и возвращает те самые, которые оно сняло. Если этих партий в книге
+    больше нет, промолчать нельзя — отмена сняла бы чужие партии, с чужой
+    себестоимостью и чужой датой открытия, и трёхлетняя льгота досталась бы не
+    той бумаге.
+    """
+
+
 @dataclass(frozen=True)
 class LedgerEntry:
     op_type: OperationType
@@ -54,6 +65,17 @@ class LedgerEntry:
     # Идентификатор решения владельца, связывающий две стороны конвертации
     # (payload.decision_id порождённых записей). None у всего остального.
     link_id: int | None = None
+    # Идентификатор отменяемого решения (payload.reverts_decision_id). Запись с
+    # ним не двигает количество по своим цене и количеству, а раскручивает след
+    # названного решения: количество и цена у неё описательные, для чтения
+    # журнала человеком.
+    reverts_link_id: int | None = None
+    # Номер строки в журнале (transaction.id). Задаёт порядок применения
+    # записей, порождённых решениями владельца, внутри одного мгновения: отмена
+    # обязана лечь после отменяемого решения, а вторая конвертация — после
+    # первой, отдавшей ей бумагу. У операций брокера порядок внутри мгновения
+    # задаётся не им, а смыслом операции (см. sort_key в fold).
+    row_id: int | None = None
 
 
 @dataclass
@@ -93,6 +115,39 @@ class PositionState:
     # и доходность по позиции не показываются вовсе: усреднение с нулём даёт
     # правдоподобное, но неверное число, которое владелец примет за настоящее.
     cost_basis_known: bool = True
+
+
+@dataclass
+class DecisionEffect:
+    """След решения владельца в книге партий: что оно открыло и что сняло.
+
+    Нужен для адресной отмены. Отмена, выраженная просто встречной операцией,
+    партий не знает, а угадывает их по FIFO — и промахивается. На живом примере:
+    79 бумаг по 120, купленные в 2024-м, конвертируются в бумагу, где уже лежат
+    79 по 10 от 2020 года. Зеркальный CONVERSION_OUT снял бы с целевой бумаги
+    самые старые партии, то есть чужие: количества после отмены сходятся, а
+    себестоимость и даты открытия меняются бумагами местами — трёхлетняя льгота
+    достаётся не той бумаге. То же у поправки: зеркальное списание съедало бы
+    старую брокерскую партию, оставляя в книге партию отменённого решения.
+    """
+
+    # Партии, открытые решением: сам объект в книге и количество, каким его
+    # открыли. Количество нужно отдельно — партию могли частично закрыть
+    # позднейшие продажи, и тогда отменять уже поздно.
+    created: dict[int, list[tuple[OpenLot, Decimal]]] = field(default_factory=dict)
+    # Партии, снятые решением, — копии с исходными датой, ценой и признаком
+    # известной себестоимости. Отмена возвращает их в книгу как есть.
+    removed: dict[int, list[OpenLot]] = field(default_factory=dict)
+    # Закрытые сделки, порождённые решением: конвертация, погасившая короткую
+    # позицию, даёт настоящий финансовый результат, и отмена обязана убрать его
+    # из налоговой базы вместе с самой конвертацией.
+    realized: list[RealizedSale] = field(default_factory=list)
+
+    def record_created(self, instrument_id: int, lot: OpenLot) -> None:
+        self.created.setdefault(instrument_id, []).append((lot, lot.quantity_left))
+
+    def record_removed(self, instrument_id: int, lot: OpenLot) -> None:
+        self.removed.setdefault(instrument_id, []).append(replace(lot))
 
 
 @dataclass(frozen=True)
@@ -160,10 +215,110 @@ def _close_whole_position(
     touched.add(entry.instrument_id)
 
 
+def _effect_of(effects: dict[int, DecisionEffect], entry: LedgerEntry) -> DecisionEffect | None:
+    """След решения, которому принадлежит запись.
+
+    None у записей брокера (решения за ними нет) и у записей отмены: отмена
+    собственного следа не оставляет, поэтому отменить отмену нельзя — попытка
+    упрётся в понятный отказ, а не в порчу книги.
+    """
+    if entry.link_id is None or entry.reverts_link_id is not None:
+        return None
+    return effects.setdefault(entry.link_id, DecisionEffect())
+
+
+def _restore_lot(open_lots: list[OpenLot], lot: OpenLot) -> None:
+    """Возвращает в книгу партию, снятую отменяемым решением.
+
+    Если остаток той же партии всё ещё в книге — совпали дата открытия, цена,
+    признак себестоимости и направление, — количество складывается обратно, а
+    не ложится второй строкой: списание 40 бумаг из партии в 100 и его отмена
+    обязаны оставить ровно ту партию в 100, что была до решения. Партии с
+    одинаковыми датой, ценой и признаком себестоимости неразличимы и для FIFO,
+    и для налога, так что склейка ничего не теряет.
+    """
+    for existing in open_lots:
+        if (
+            existing.opened_at == lot.opened_at
+            and existing.price == lot.price
+            and existing.cost_known == lot.cost_known
+            and _sign(existing.quantity_left) == _sign(lot.quantity_left)
+        ):
+            existing.quantity_left = q(existing.quantity_left + lot.quantity_left)
+            return
+
+    open_lots.insert(
+        bisect_right(open_lots, lot.opened_at, key=lambda item: item.opened_at),
+        replace(lot),
+    )
+
+
+def _revert_decision(
+    lots: dict[int, list[OpenLot]],
+    effects: dict[int, DecisionEffect],
+    touched: set[int],
+    realized: list[RealizedSale],
+    entry: LedgerEntry,
+) -> None:
+    """Раскручивает по своей бумаге ровно то, что сделало отменяемое решение.
+
+    Отмена адресная, а не «ещё одна операция в обратную сторону»: она убирает из
+    книги те самые партии, которые решение открыло, и возвращает те самые,
+    которые оно сняло, — с их исходными датами, ценами и признаком известной
+    себестоимости. Количество и цена самой записи отмены при этом ни на что не
+    влияют: они описательные, чтобы журнал читался человеком.
+
+    Каждая сторона отмены отвечает за свою бумагу, поэтому пара зеркальных
+    записей конвертации раскручивает след ровно один раз: одна снимает
+    открытое, другая возвращает снятое.
+    """
+    effect = effects.get(entry.reverts_link_id)
+    if effect is None:
+        raise ReversalError(
+            f"Отмена решения {entry.reverts_link_id} не нашла его следа в "
+            "журнале: записей отменяемого решения нет, они идут позже или это "
+            "попытка отменить саму отмену. Подобрать партии наугад нельзя — "
+            "вернулись бы чужие даты и чужая себестоимость."
+        )
+
+    instrument_id = entry.instrument_id
+    open_lots = lots.setdefault(instrument_id, [])
+
+    for lot, opened_with in effect.created.get(instrument_id, []):
+        # По тождеству объекта, а не по равенству полей: одинаковых по виду
+        # партий в книге бывает несколько, и снять надо именно ту.
+        position = next((index for index, item in enumerate(open_lots) if item is lot), None)
+        if position is None or lot.quantity_left != opened_with:
+            raise ReversalError(
+                f"Партии, открытые решением {entry.reverts_link_id} по бумаге "
+                f"{instrument_id}, уже израсходованы позднейшими операциями — "
+                "отменять поздно. Иначе отмена сняла бы чужие партии, с чужой "
+                "себестоимостью и чужой датой открытия."
+            )
+        open_lots.pop(position)
+
+    for lot in effect.removed.get(instrument_id, []):
+        _restore_lot(open_lots, lot)
+
+    # Финансовый результат, порождённый отменяемым решением, уходит вместе с
+    # ним: сделки, которой больше нет, в налоговой базе быть не должно.
+    for sale in effect.realized:
+        if sale.instrument_id != instrument_id:
+            continue
+        for index, item in enumerate(realized):
+            if item is sale:
+                del realized[index]
+                break
+
+    touched.add(instrument_id)
+
+
 def _apply_conversion(
     lots: dict[int, list[OpenLot]],
     pockets: dict[int, list[OpenLot]],
+    effects: dict[int, DecisionEffect],
     touched: set[int],
+    realized: list[RealizedSale],
     entry: LedgerEntry,
 ) -> None:
     """Переносит открытые партии между бумагами при корпоративном действии.
@@ -182,6 +337,21 @@ def _apply_conversion(
             "связать её со второй стороной нечем. Записи конвертации "
             "порождаются решением владельца и обязаны нести payload.decision_id."
         )
+
+    # Защищаться обязан и сам движок, а не только служба решений: производитель
+    # записей может оказаться другой. CONVERSION_IN с нулём — потеря молчаливая
+    # и оттого худшая из всех: снятые партии разложились бы на ноль бумаг,
+    # себестоимость исчезла бы, а позиция осталась бы помеченной как
+    # «себестоимость известна» — портфель выглядел бы достоверным и был бы
+    # неверен.
+    if entry.quantity <= 0:
+        raise ConversionError(
+            f"У стороны конвертации {entry.op_type.value} количество "
+            f"{entry.quantity}: перенести нулевое или отрицательное количество "
+            "нельзя. Проверьте количество в решении владельца."
+        )
+
+    effect = _effect_of(effects, entry)
 
     if entry.op_type is OperationType.CONVERSION_OUT:
         open_lots = lots.get(entry.instrument_id, [])
@@ -206,6 +376,10 @@ def _apply_conversion(
             remaining = q(remaining - taken)
             if lot.quantity_left == 0:
                 open_lots.pop(0)
+
+        if effect is not None:
+            for taken_lot in taken_lots:
+                effect.record_removed(entry.instrument_id, taken_lot)
 
         pockets[entry.link_id] = taken_lots
         touched.add(entry.instrument_id)
@@ -247,6 +421,18 @@ def _apply_conversion(
             quantity_left=share,
             cost_known=lot.cost_known,
         )
+        # Сначала гасим встречные короткие партии целевой бумаги. Без этого в
+        # книге оказывались партии разного знака сразу — инвариант «в книге
+        # одного инструмента разнонаправленных партий не бывает» (см. _average
+        # и fold) нарушался молча: продажа без остатка в тот же миг, что и
+        # конвертация, оставляла +79 по 120 рядом с −79 по 200, финансовый
+        # результат в 6320 в налоговую базу не попадал вовсе, а средняя цена
+        # считалась по модулю количества и выходила 160.
+        left = _close_short_lots(open_lots, moved, entry, realized, effect)
+        if left <= 0:
+            continue
+        moved.quantity_left = left
+
         # Место в книге — по дате открытия, а не в хвост. Книга упорядочена по
         # ней, и весь движок считает open_lots[0] самой старой партией: на этом
         # стоят и закрытие встречных партий, и RealizedSale.opened_at. У
@@ -260,7 +446,47 @@ def _apply_conversion(
             bisect_right(open_lots, moved.opened_at, key=lambda item: item.opened_at),
             moved,
         )
+        if effect is not None:
+            effect.record_created(entry.instrument_id, moved)
     touched.add(entry.instrument_id)
+
+
+def _close_short_lots(
+    open_lots: list[OpenLot],
+    incoming: OpenLot,
+    entry: LedgerEntry,
+    realized: list[RealizedSale],
+    effect: DecisionEffect | None,
+) -> Decimal:
+    """Гасит короткие партии бумаги перенесённой партией. Возвращает остаток.
+
+    Короткую позицию закрывают пришедшие бумаги: выручка — цена, по которой их
+    продали без остатка, себестоимость — цена перенесённой партии. Сама
+    конвертация финансового результата не несёт, но закрытие короткой позиции
+    несёт: бумага действительно ушла покупателю, и разница цен — настоящая
+    прибыль владельца.
+    """
+    remaining = incoming.quantity_left
+    while remaining > 0 and open_lots and open_lots[0].quantity_left < 0:
+        short = open_lots[0]
+        taken = min(-short.quantity_left, remaining)
+        sale = RealizedSale(
+            instrument_id=entry.instrument_id,
+            sold_at=entry.executed_at,
+            quantity=taken,
+            proceeds=money(taken * short.price),
+            cost=money(taken * incoming.price),
+            opened_at=short.opened_at,
+        )
+        realized.append(sale)
+        if effect is not None:
+            effect.realized.append(sale)
+            effect.record_removed(entry.instrument_id, replace(short, quantity_left=q(-taken)))
+        short.quantity_left = q(short.quantity_left + taken)
+        remaining = q(remaining - taken)
+        if short.quantity_left == 0:
+            open_lots.pop(0)
+    return remaining
 
 
 def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
@@ -280,7 +506,13 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
 
     Встречная операция сначала закрывает противоположные партии по FIFO и
     только остатком открывает новые, поэтому в книге одного инструмента
-    никогда не лежат разнонаправленные партии.
+    никогда не лежат разнонаправленные партии. Это верно и для приходящей
+    стороны конвертации: перенесённая партия сначала гасит короткие.
+
+    Записи, порождённые решением владельца, оставляют след — какие партии
+    решение открыло и какие сняло (DecisionEffect). Запись отмены раскручивает
+    именно его, а не подбирает партии встречной операцией по FIFO: иначе отмена
+    возвращает верные количества с чужими датами и чужой себестоимостью.
 
     Суммы знаковые с точки зрения счёта: покупки отрицательные, продажи и
     дивиденды положительные. Комиссия вычитается отдельно и в amount не входит.
@@ -295,18 +527,30 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     # черпать из общего кармана.
     pockets: dict[int, list[OpenLot]] = {}
 
-    # Порядок внутри одного мгновения. Покупка раньше продажи — чтобы не
-    # возникало мнимого разворота позиции. CONVERSION_OUT строго раньше
-    # CONVERSION_IN: иначе карман пуст и себестоимость теряется. IN идёт
-    # последним, потому что снятые партии должны быть уже в кармане.
-    #
-    # Решения владельца одного мгновения разбираются по одному целиком, в
-    # порядке возрастания link_id (идентификатора решения, а он растёт вместе с
-    # порядком, в котором владелец решения принимал). Общий порядок «сначала все
-    # OUT, потом все IN» ломался на отмене: зеркальное решение несёт ту же дату
-    # события, и его CONVERSION_OUT снимал бы бумагу раньше, чем CONVERSION_IN
-    # отменяемого решения её зачислил, — конвертация падала бы с «списывает
-    # больше, чем открыто». Записи без решения (link_id None) идут первыми: они
+    # След каждого решения владельца: что оно открыло и что сняло. По нему
+    # работает адресная отмена (см. DecisionEffect и _revert_decision).
+    effects: dict[int, DecisionEffect] = {}
+
+    # Порядок применения решений владельца внутри одного мгновения — тот, в
+    # каком их записи легли в журнал (transaction.id). Решения применяются одно
+    # за другим, и каждое следующее опирается на книгу, оставленную предыдущим:
+    # отмена обязана лечь после отменяемого решения, а конвертация Y→Z — после
+    # конвертации X→Y, отдавшей ей бумагу. Порядок берётся из строк журнала, а
+    # не из идентификаторов решений: импорт решений с заданными номерами тогда
+    # ничего не сломает. Группа — решение целиком, чтобы внутри него порядок
+    # сторон задавал priority, а не случайность нумерации строк.
+    group_order: dict[int, int] = {}
+    for entry in entries:
+        if entry.link_id is None:
+            continue
+        row = entry.row_id or 0
+        if entry.link_id not in group_order or row < group_order[entry.link_id]:
+            group_order[entry.link_id] = row
+
+    # Порядок внутри одной группы. Покупка раньше продажи — чтобы не возникало
+    # мнимого разворота позиции. CONVERSION_OUT строго раньше CONVERSION_IN:
+    # иначе карман пуст и себестоимость теряется. IN идёт последним, потому что
+    # снятые партии должны быть уже в кармане. Операции брокера — группа 0: они
     # и раньше стояли перед конвертациями по приоритету.
     def sort_key(entry):
         if entry.op_type in INCREASING:
@@ -317,7 +561,8 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
             priority = 3
         else:
             priority = 1
-        return (entry.executed_at, entry.link_id or 0, priority)
+        group = 0 if entry.link_id is None else group_order[entry.link_id]
+        return (entry.executed_at, group, priority)
 
     for entry in sorted(entries, key=sort_key):
         cash[currency] = money(cash[currency] + entry.amount - entry.fee)
@@ -325,9 +570,18 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
         if entry.instrument_id is None:
             continue
 
-        if entry.op_type in CONVERSION:
-            _apply_conversion(lots, pockets, touched, entry)
+        # Запись отмены не двигает количество по своим цене и количеству: она
+        # раскручивает след названного решения — те самые партии, с их датами и
+        # себестоимостью.
+        if entry.reverts_link_id is not None:
+            _revert_decision(lots, effects, touched, realized, entry)
             continue
+
+        if entry.op_type in CONVERSION:
+            _apply_conversion(lots, pockets, effects, touched, realized, entry)
+            continue
+
+        effect = _effect_of(effects, entry)
 
         if entry.op_type is OperationType.ADJUSTMENT:
             # Направление по знаку количества: поправка бывает в обе стороны, и
@@ -372,15 +626,27 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
             else:
                 proceeds, cost = lot.price, unit_price
             if entry.op_type not in WITHOUT_REALIZED:
-                realized.append(
-                    RealizedSale(
-                        instrument_id=entry.instrument_id,
-                        sold_at=entry.executed_at,
-                        quantity=taken,
-                        proceeds=money(taken * proceeds),
-                        cost=money(taken * cost),
-                        opened_at=lot.opened_at,
-                    )
+                sale = RealizedSale(
+                    instrument_id=entry.instrument_id,
+                    sold_at=entry.executed_at,
+                    quantity=taken,
+                    proceeds=money(taken * proceeds),
+                    cost=money(taken * cost),
+                    opened_at=lot.opened_at,
+                )
+                realized.append(sale)
+                if effect is not None:
+                    effect.realized.append(sale)
+            # Съеденная часть встречной партии — след решения: отмена вернёт её
+            # с исходными датой, ценой и признаком себестоимости. Без этого
+            # отмена списания стирала бы себестоимость: зеркальная поправка
+            # открывала бы партию по цене ноль, а ноль в поправке означает
+            # «неизвестно», и позиция переставала показывать среднюю и
+            # доходность вовсе.
+            if effect is not None:
+                effect.record_removed(
+                    entry.instrument_id,
+                    replace(lot, quantity_left=q(_sign(lot.quantity_left) * taken)),
                 )
             lot.quantity_left = q(lot.quantity_left + direction * taken)
             remaining = q(remaining - taken)
@@ -390,26 +656,27 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
         # Что не пошло на закрытие встречных партий — открывает новую в
         # направлении самой операции.
         if remaining > 0:
-            open_lots.append(
-                OpenLot(
-                    instrument_id=entry.instrument_id,
-                    opened_at=entry.executed_at,
-                    price=unit_price,
-                    quantity_left=q(direction * remaining),
-                    # Себестоимость положительной поправки берётся из цены
-                    # записи: record_decision кладёт туда cost_basis /
-                    # to_quantity, а при неизвестной себестоимости — ноль. Ноль
-                    # в цене поправки означает ровно «неизвестно», поэтому
-                    # ADJUSTMENT нельзя записать в WITHOUT_COST целиком: иначе
-                    # поправка с указанной владельцем себестоимостью тоже
-                    # помечалась бы неизвестной.
-                    cost_known=(
-                        unit_price != 0
-                        if entry.op_type is OperationType.ADJUSTMENT
-                        else entry.op_type not in WITHOUT_COST
-                    ),
-                )
+            opened = OpenLot(
+                instrument_id=entry.instrument_id,
+                opened_at=entry.executed_at,
+                price=unit_price,
+                quantity_left=q(direction * remaining),
+                # Себестоимость положительной поправки берётся из цены
+                # записи: record_decision кладёт туда cost_basis /
+                # to_quantity, а при неизвестной себестоимости — ноль. Ноль
+                # в цене поправки означает ровно «неизвестно», поэтому
+                # ADJUSTMENT нельзя записать в WITHOUT_COST целиком: иначе
+                # поправка с указанной владельцем себестоимостью тоже
+                # помечалась бы неизвестной.
+                cost_known=(
+                    unit_price != 0
+                    if entry.op_type is OperationType.ADJUSTMENT
+                    else entry.op_type not in WITHOUT_COST
+                ),
             )
+            open_lots.append(opened)
+            if effect is not None:
+                effect.record_created(entry.instrument_id, opened)
 
     if pockets:
         raise ConversionError(

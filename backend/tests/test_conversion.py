@@ -12,7 +12,7 @@ from decimal import Decimal
 import pytest
 
 from app.models import OperationType
-from app.positions.engine import ConversionError, LedgerEntry, fold
+from app.positions.engine import ConversionError, LedgerEntry, ReversalError, fold
 
 OLD, NEW = 1, 2
 WHEN = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -27,19 +27,39 @@ def _buy(instrument_id: int, quantity: str, price: str, day: int) -> LedgerEntry
     )
 
 
-def _out(quantity: str, link_id: int = 7) -> LedgerEntry:
+def _out(quantity: str, link_id: int = 7, row_id: int | None = None) -> LedgerEntry:
     return LedgerEntry(
         op_type=OperationType.CONVERSION_OUT, executed_at=WHEN,
         instrument_id=OLD, quantity=Decimal(quantity), price=Decimal("0"),
-        amount=Decimal("0"), fee=Decimal("0"), link_id=link_id,
+        amount=Decimal("0"), fee=Decimal("0"), link_id=link_id, row_id=row_id,
     )
 
 
-def _in(quantity: str, link_id: int = 7) -> LedgerEntry:
+def _in(quantity: str, link_id: int = 7, row_id: int | None = None) -> LedgerEntry:
     return LedgerEntry(
         op_type=OperationType.CONVERSION_IN, executed_at=WHEN,
         instrument_id=NEW, quantity=Decimal(quantity), price=Decimal("0"),
-        amount=Decimal("0"), fee=Decimal("0"), link_id=link_id,
+        amount=Decimal("0"), fee=Decimal("0"), link_id=link_id, row_id=row_id,
+    )
+
+
+def _revert(op_type: OperationType, instrument_id: int, quantity: str,
+            reverts: int, row_id: int) -> LedgerEntry:
+    """Сторона зеркального решения: она называет отменяемое решение, а её
+    собственные количество и цена описательные — книгу восстанавливает движок
+    по следу названного решения."""
+    return LedgerEntry(
+        op_type=op_type, executed_at=WHEN, instrument_id=instrument_id,
+        quantity=Decimal(quantity), price=Decimal("0"), amount=Decimal("0"),
+        fee=Decimal("0"), link_id=99, reverts_link_id=reverts, row_id=row_id,
+    )
+
+
+def _sell(instrument_id: int, quantity: str, price: str) -> LedgerEntry:
+    return LedgerEntry(
+        op_type=OperationType.SELL, executed_at=WHEN, instrument_id=instrument_id,
+        quantity=Decimal(quantity), price=Decimal(price),
+        amount=Decimal(quantity) * Decimal(price), fee=Decimal("0"),
     )
 
 
@@ -161,24 +181,136 @@ def test_reverting_conversion_at_the_same_instant_runs_after_the_one_it_reverts(
     Общий порядок «сначала все OUT одного мгновения, потом все IN» снимал бы
     бумагу у зеркальной стороны раньше, чем исходная её зачислит: конвертация
     падала бы с «списывает больше, чем открыто». Решения разбираются по одному
-    целиком, в порядке link_id, поэтому партия проходит круг и возвращается той
-    же — с прежней ценой и прежней датой открытия.
+    целиком, в порядке появления их записей в журнале, поэтому партия проходит
+    круг и возвращается той же — с прежней ценой и прежней датой открытия.
     """
     result = fold([
         _buy(OLD, "79", "120", day=1),
-        _out("79", link_id=1), _in("79", link_id=1),
-        LedgerEntry(op_type=OperationType.CONVERSION_OUT, executed_at=WHEN,
-                    instrument_id=NEW, quantity=Decimal("79"), price=Decimal("0"),
-                    amount=Decimal("0"), fee=Decimal("0"), link_id=2),
-        LedgerEntry(op_type=OperationType.CONVERSION_IN, executed_at=WHEN,
-                    instrument_id=OLD, quantity=Decimal("79"), price=Decimal("0"),
-                    amount=Decimal("0"), fee=Decimal("0"), link_id=2),
+        _out("79", row_id=1), _in("79", row_id=2),
+        _revert(OperationType.CONVERSION_OUT, NEW, "79", reverts=7, row_id=3),
+        _revert(OperationType.CONVERSION_IN, OLD, "79", reverts=7, row_id=4),
     ])
 
     assert result.positions[NEW].quantity == 0
     assert result.positions[OLD].quantity == Decimal("79")
     assert result.positions[OLD].lots[0].opened_at.day == 1
     assert result.positions[OLD].lots[0].price == Decimal("120")
+
+
+def test_reverting_a_conversion_puts_back_the_very_same_lots():
+    """Отмена возвращает те самые партии, а не просто те же количества.
+
+    Целевая бумага уже была в портфеле — 79 штук по 10 от 2020 года. Отмена,
+    выраженная встречной конвертацией, сняла бы с неё по FIFO именно их:
+    количества сходятся, а себестоимость и даты открытия меняются бумагами
+    местами, и трёхлетняя льгота приписывается не той бумаге.
+    """
+    older = LedgerEntry(
+        op_type=OperationType.BUY,
+        executed_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        instrument_id=NEW, quantity=Decimal("79"), price=Decimal("10"),
+        amount=Decimal("0"), fee=Decimal("0"),
+    )
+
+    result = fold([
+        _buy(OLD, "79", "120", day=10), older,
+        _out("79", row_id=1), _in("79", row_id=2),
+        _revert(OperationType.CONVERSION_OUT, NEW, "79", reverts=7, row_id=3),
+        _revert(OperationType.CONVERSION_IN, OLD, "79", reverts=7, row_id=4),
+    ])
+
+    assert [(lot.quantity_left, lot.price, lot.opened_at.year)
+            for lot in result.positions[OLD].lots] == [(Decimal("79"), Decimal("120"), 2024)]
+    assert [(lot.quantity_left, lot.price, lot.opened_at.year)
+            for lot in result.positions[NEW].lots] == [(Decimal("79"), Decimal("10"), 2020)]
+
+
+def test_reverting_a_conversion_whose_lots_are_already_sold_is_an_error():
+    """Партии, открытые решением, успели уйти в продажу — отменять поздно.
+
+    Промолчать значит снять чужие партии: с чужой себестоимостью и чужой датой
+    открытия.
+    """
+    later_sale = LedgerEntry(
+        op_type=OperationType.SELL,
+        executed_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        instrument_id=NEW, quantity=Decimal("40"), price=Decimal("200"),
+        amount=Decimal("8000"), fee=Decimal("0"),
+    )
+
+    with pytest.raises(ReversalError, match="уже израсходованы"):
+        fold([
+            _buy(OLD, "79", "120", day=10),
+            _out("79", row_id=1), _in("79", row_id=2),
+            later_sale,
+            LedgerEntry(op_type=OperationType.CONVERSION_OUT,
+                        executed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                        instrument_id=NEW, quantity=Decimal("79"),
+                        price=Decimal("0"), amount=Decimal("0"), fee=Decimal("0"),
+                        link_id=99, reverts_link_id=7, row_id=4),
+        ])
+
+
+def test_conversion_in_with_zero_quantity_is_an_error():
+    """Ноль на приходящей стороне — потеря молчаливая и оттого худшая.
+
+    Снятые партии разложились бы на ноль бумаг: 79 бумаг исчезают,
+    себестоимость уничтожена, а признак «себестоимость известна» остаётся
+    истинным — портфель выглядит достоверным и при этом неверен.
+    """
+    with pytest.raises(ConversionError, match="перенести нулевое"):
+        fold([_buy(OLD, "79", "120", day=1), _out("79"), _in("0")])
+
+
+def test_conversion_in_closes_a_short_position():
+    """Приходящая партия сначала гасит короткую позицию целевой бумаги.
+
+    Иначе в книге лежат партии разного знака сразу (+79 по 120 и −79 по 200):
+    инвариант «разнонаправленных партий в одной книге не бывает» нарушен,
+    6320 прибыли в налоговую базу не попадают вовсе, а средняя цена считается
+    по модулю количества и выходит 160 — число правдоподобное и неверное.
+    """
+    result = fold([
+        _buy(OLD, "79", "120", day=10),
+        _sell(NEW, "79", "200"),
+        _out("79", row_id=1), _in("79", row_id=2),
+    ])
+
+    assert result.positions[NEW].lots == []
+    assert result.positions[NEW].quantity == 0
+    assert len(result.realized) == 1
+    sale = result.realized[0]
+    assert (sale.proceeds, sale.cost) == (Decimal("15800"), Decimal("9480"))
+
+
+def test_reverting_a_conversion_takes_back_its_realized_sale():
+    """Отмена убирает и финансовый результат, порождённый конвертацией.
+
+    Сделки, которой больше нет, в налоговой базе быть не должно, а короткая
+    позиция обязана вернуться в книгу такой, какой была.
+    """
+    result = fold([
+        _buy(OLD, "79", "120", day=10),
+        _sell(NEW, "79", "200"),
+        _out("79", row_id=1), _in("79", row_id=2),
+        _revert(OperationType.CONVERSION_OUT, NEW, "79", reverts=7, row_id=3),
+        _revert(OperationType.CONVERSION_IN, OLD, "79", reverts=7, row_id=4),
+    ])
+
+    assert result.realized == []
+    assert result.positions[OLD].quantity == Decimal("79")
+    assert [(lot.quantity_left, lot.price) for lot in result.positions[NEW].lots] == [
+        (Decimal("-79"), Decimal("200"))
+    ]
+
+
+def test_reverting_a_decision_without_a_trace_is_an_error():
+    """Отменять нечего: записей отменяемого решения в журнале нет."""
+    with pytest.raises(ReversalError, match="не нашла его следа"):
+        fold([
+            _buy(OLD, "79", "120", day=1),
+            _revert(OperationType.CONVERSION_OUT, OLD, "79", reverts=7, row_id=1),
+        ])
 
 
 def test_conversion_into_an_existing_position_keeps_fifo_order():

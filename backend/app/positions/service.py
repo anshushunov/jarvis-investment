@@ -1,7 +1,13 @@
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models import DECISION_PAYLOAD_KEY, Account, Position, Transaction
+from app.models import (
+    DECISION_PAYLOAD_KEY,
+    DECISION_REVERTS_PAYLOAD_KEY,
+    Account,
+    Position,
+    Transaction,
+)
 from app.positions.engine import LedgerEntry, fold
 
 
@@ -23,6 +29,12 @@ def _entries(session: Session, account: Account) -> list[LedgerEntry]:
             # процента записей журнала не окупается. Ключ — общая константа со
             # службой решений, которая его туда кладёт.
             link_id=(tx.payload or {}).get(DECISION_PAYLOAD_KEY),
+            # Идентификатор отменяемого решения: по нему движок раскручивает
+            # ровно те партии, которые то решение тронуло.
+            reverts_link_id=(tx.payload or {}).get(DECISION_REVERTS_PAYLOAD_KEY),
+            # Порядок применения решений внутри одного мгновения берётся из
+            # номера строки журнала: отмена обязана лечь после отменяемого.
+            row_id=tx.id,
         )
         for tx in transactions
     ]
