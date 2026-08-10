@@ -36,6 +36,14 @@ class OperationType(StrEnum):
     ADJUSTMENT = "ADJUSTMENT"
 
 
+# Ключ, под которым корректирующая запись (op_type=ADJUSTMENT, см. ниже) хранит
+# в payload id исправляемой ею записи. По аналогии с DECISION_PAYLOAD_KEY в
+# app/models/ledger_decision.py — та же причина: строка задаётся в одном месте
+# (app/ledger/service.py, _correction_for) и должна читаться оттуда же, а не
+# дублироваться литералом там, где её понадобится найти.
+CORRECTS_TRANSACTION_ID_PAYLOAD_KEY = "corrects_transaction_id"
+
+
 class Transaction(Base):
     __tablename__ = "transaction"
     __table_args__ = (
