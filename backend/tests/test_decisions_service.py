@@ -45,6 +45,19 @@ def _buy(session, account, isin: str, quantity: str, price: str, when: datetime,
     )])
 
 
+def _sell(session, account, isin: str, quantity: str, price: str, when: datetime,
+          external_id: str = "s1") -> None:
+    from app.ledger.schemas import RawOperation
+    from app.ledger.service import append_operations
+
+    append_operations(session, account, "tbank", [RawOperation(
+        external_id=external_id, op_type="SELL", executed_at=when,
+        isin=isin, ticker=isin[:4], quantity=Decimal(quantity),
+        price=Decimal(price), amount=Decimal(quantity) * Decimal(price),
+        currency="RUB", fee=Decimal("0"), payload={},
+    )])
+
+
 def _book(session, account) -> dict[int, list[tuple]]:
     """Книга открытых партий счёта: количество, цена, дата открытия и признак
     известной себестоимости по каждой партии.
@@ -351,6 +364,160 @@ def test_revert_of_a_write_off_restores_the_cost_basis(session):
     assert position.cost_basis_known is True
 
 
+def test_revert_is_refused_when_the_paper_was_traded_afterwards(session):
+    """Бумагу, зачисленную решением, успели продать — отменять нельзя.
+
+    Движок такого не заметит: зеркальные записи несут дату отменяемого решения и
+    ложатся в журнал раньше позднейшей продажи, поэтому отмена проходит, а
+    продажа остаётся висеть в пустоте. Итог прогона до правки: 79 бумаг вернулись
+    в исходную бумагу, а по целевой осталась короткая позиция −40 по 200, и
+    реальная продажа на 8000 исчезла из налоговой базы вовсе.
+    """
+    from app.decisions.service import DecisionError, record_decision, revert_decision
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=old.id, from_quantity=Decimal("79"),
+        to_instrument_id=new.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Конвертация", proposed={},
+    ))
+    _sell(session, account, "HK0000051877", "40", "200",
+          datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+    with pytest.raises(DecisionError, match="были операции"):
+        revert_decision(session, decision.id, note="Ошибся бумагой")
+
+    assert session.get(LedgerDecision, decision.id).status is DecisionStatus.CONFIRMED
+
+
+def test_split_recorded_as_conversion_into_the_same_paper_is_revertable(session):
+    """Сплит записан конвертацией бумаги в саму себя — и отменяется.
+
+    Обе стороны зеркального решения указывают на один инструмент, и след по нему
+    раскручивается ровно один раз: второй проход отказывал, ссылаясь на
+    израсходованные партии, то есть не на ту причину.
+    """
+    from app.decisions.service import record_decision, revert_decision
+    from app.models import Position
+    from sqlalchemy import select
+
+    account = _account(session)
+    instrument = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "RU000A107UL4", "100", "50",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+    before = _book(session, account)
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=instrument.id, from_quantity=Decimal("100"),
+        to_instrument_id=instrument.id, to_quantity=Decimal("200"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Сплит один к двум", proposed={},
+    ))
+
+    split = session.execute(select(Position)).scalar_one()
+    assert (split.quantity, split.average_price) == (Decimal("200"), Decimal("25"))
+    # Дата открытия пережила сплит: трёхлетняя льгота считается от неё.
+    assert _book(session, account)[instrument.id][0][2] == datetime(2024, 5, 1, tzinfo=timezone.utc)
+
+    revert_decision(session, decision.id, note="Сплита не было")
+
+    assert _book(session, account) == before
+    restored = session.execute(select(Position)).scalar_one()
+    assert (restored.quantity, restored.average_price) == (Decimal("100"), Decimal("50"))
+
+
+def test_failed_record_leaves_neither_decision_nor_entries(session):
+    """Отказ движка не должен оставить в сессии половину записанного.
+
+    Решение и порождённые им записи ложатся в сессию раньше, чем движок
+    добирается до пересборки. Закоммить такое значит получить счёт, позиции
+    которого не сворачиваются больше никогда: журнал append-only, и починить
+    его можно было бы только правкой базы.
+    """
+    from app.decisions.service import DecisionError, record_decision
+    from app.models import Transaction
+    from sqlalchemy import select
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "10", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    with pytest.raises(DecisionError, match="не сходится с журналом"):
+        record_decision(session, LedgerDecision(
+            account_id=account.id, kind=DecisionKind.CONVERSION,
+            status=DecisionStatus.CONFIRMED,
+            from_instrument_id=old.id, from_quantity=Decimal("79"),
+            to_instrument_id=new.id, to_quantity=Decimal("79"),
+            effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            note="Бумаг столько нет", proposed={},
+        ))
+
+    assert session.execute(select(LedgerDecision)).scalars().all() == []
+    manual = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalars().all()
+    assert manual == []
+
+
+def test_failed_revert_leaves_the_original_decision_intact(session, monkeypatch):
+    """То же для отмены: отказ движка не оставляет зеркала и статуса REVERTED.
+
+    Отказ подменён на шве пересборки: сквозь службу движок здесь уже не уронить —
+    все известные способы закрыты проверками до записи, — но предохранитель
+    обязан работать и для тех, что найдутся позже.
+    """
+    import app.decisions.service as decisions
+    from app.decisions.service import DecisionError, record_decision, revert_decision
+    from app.models import Transaction
+    from app.positions.engine import ReversalError
+    from sqlalchemy import select
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=old.id, from_quantity=Decimal("79"),
+        to_instrument_id=new.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Конвертация", proposed={},
+    ))
+
+    def boom(*args, **kwargs):
+        raise ReversalError("движок отказал")
+
+    monkeypatch.setattr(decisions, "rebuild_after_decision", boom)
+
+    with pytest.raises(DecisionError, match="не сходится с журналом"):
+        revert_decision(session, decision.id, note="Ошибся бумагой")
+
+    assert session.get(LedgerDecision, decision.id).status is DecisionStatus.CONFIRMED
+    assert session.execute(select(LedgerDecision)).scalars().all() == [decision]
+    manual = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalars().all()
+    assert len(manual) == 2
+
+
 def test_reverting_a_revert_is_refused(session):
     """Отменить отмену нельзя: своего следа в книге партий она не оставляет.
 
@@ -416,6 +583,94 @@ def test_revert_is_refused_when_a_later_decision_touches_the_same_papers(session
 
     with pytest.raises(DecisionError, match=f"более поздние решения по тем же бумагам \\({later.id}\\)"):
         revert_decision(session, earlier.id, note="Передумал")
+
+    assert session.get(LedgerDecision, earlier.id).status is DecisionStatus.CONFIRMED
+
+
+def test_revert_unblocks_once_the_independent_later_decision_is_reverted(session):
+    """Отменённое решение больше не держит предыдущее.
+
+    Пара «решение и его отмена» друг друга гасит и следа в книге не оставляет.
+    Пока она считалась помехой, первое решение оказывалось неотменяемым
+    навсегда: зеркало — тоже подтверждённое решение по тем же бумагам, и
+    совет «сначала отмените более поздние» вёл по кругу.
+    """
+    from app.decisions.service import record_decision, revert_decision
+
+    account = _account(session)
+    source = _instrument(session, "HK0000310034")
+    target = _instrument(session, "HK0000051877")
+    other = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc), external_id="1")
+    _buy(session, account, "RU000A107UL4", "50", "10",
+         datetime(2024, 5, 1, tzinfo=timezone.utc), external_id="2")
+    before = _book(session, account)
+
+    earlier = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=source.id, from_quantity=Decimal("79"),
+        to_instrument_id=target.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Первая конвертация", proposed={},
+    ))
+    # Вторая конвертация приходит в ту же бумагу, но черпает из другой —
+    # на бумаги первой она не опирается.
+    independent = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=other.id, from_quantity=Decimal("50"),
+        to_instrument_id=target.id, to_quantity=Decimal("50"),
+        effective_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        note="Вторая конвертация", proposed={},
+    ))
+
+    revert_decision(session, independent.id, note="Вторая была ошибкой")
+    revert_decision(session, earlier.id, note="И первая тоже")
+
+    assert _book(session, account) == before
+
+
+def test_a_dependent_later_decision_keeps_blocking_after_its_own_revert(session):
+    """А решение, черпавшее из зачисленной бумаги, держит и после своей отмены.
+
+    Его CONVERSION_OUT остался в журнале на своей, более поздней дате и
+    по-прежнему требует эти бумаги в книге: отмена первого решения вырвала бы у
+    него опору, и свернуть журнал стало бы нельзя вовсе.
+    """
+    from app.decisions.service import DecisionError, record_decision, revert_decision
+
+    account = _account(session)
+    first = _instrument(session, "HK0000310034")
+    second = _instrument(session, "HK0000051877")
+    third = _instrument(session, "RU000A107UL4")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    earlier = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=first.id, from_quantity=Decimal("79"),
+        to_instrument_id=second.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Первая конвертация", proposed={},
+    ))
+    dependent = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=second.id, from_quantity=Decimal("79"),
+        to_instrument_id=third.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        note="Вторая конвертация", proposed={},
+    ))
+
+    revert_decision(session, dependent.id, note="Вторая была ошибкой")
+
+    with pytest.raises(DecisionError, match=f"\\({dependent.id}\\)"):
+        revert_decision(session, earlier.id, note="И первая тоже")
 
     assert session.get(LedgerDecision, earlier.id).status is DecisionStatus.CONFIRMED
 

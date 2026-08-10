@@ -256,6 +256,7 @@ def _restore_lot(open_lots: list[OpenLot], lot: OpenLot) -> None:
 def _revert_decision(
     lots: dict[int, list[OpenLot]],
     effects: dict[int, DecisionEffect],
+    undone: set[tuple[int, int]],
     touched: set[int],
     realized: list[RealizedSale],
     entry: LedgerEntry,
@@ -270,8 +271,17 @@ def _revert_decision(
 
     Каждая сторона отмены отвечает за свою бумагу, поэтому пара зеркальных
     записей конвертации раскручивает след ровно один раз: одна снимает
-    открытое, другая возвращает снятое.
+    открытое, другая возвращает снятое. Кроме случая, когда бумага у сторон
+    одна и та же: так записывают сплит и консолидацию (100 бумаг превращаются в
+    200 тех же). Тогда обе стороны отмены указывают на один инструмент, и след
+    по нему раскручивается только первой из них — второй проход не нашёл бы уже
+    снятой партии и отказал бы, сославшись на израсходованные партии, то есть
+    не на ту причину.
     """
+    if (entry.reverts_link_id, entry.instrument_id) in undone:
+        touched.add(entry.instrument_id)
+        return
+
     effect = effects.get(entry.reverts_link_id)
     if effect is None:
         raise ReversalError(
@@ -310,6 +320,7 @@ def _revert_decision(
                 del realized[index]
                 break
 
+    undone.add((entry.reverts_link_id, instrument_id))
     touched.add(instrument_id)
 
 
@@ -530,6 +541,9 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     # След каждого решения владельца: что оно открыло и что сняло. По нему
     # работает адресная отмена (см. DecisionEffect и _revert_decision).
     effects: dict[int, DecisionEffect] = {}
+    # Уже раскрученные пары «отменяемое решение, бумага»: у конвертации бумаги
+    # в саму себя обе стороны отмены указывают на один инструмент.
+    undone: set[tuple[int, int]] = set()
 
     # Порядок применения решений владельца внутри одного мгновения — тот, в
     # каком их записи легли в журнал (transaction.id). Решения применяются одно
@@ -574,7 +588,7 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
         # раскручивает след названного решения — те самые партии, с их датами и
         # себестоимостью.
         if entry.reverts_link_id is not None:
-            _revert_decision(lots, effects, touched, realized, entry)
+            _revert_decision(lots, effects, undone, touched, realized, entry)
             continue
 
         if entry.op_type in CONVERSION:

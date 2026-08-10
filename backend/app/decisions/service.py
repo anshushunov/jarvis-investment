@@ -8,7 +8,7 @@ append-only, поэтому создаётся зеркальное решени
 import hashlib
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.models.ledger_decision import DecisionKind, DecisionStatus
 from app.money import money, quantity as q
+from app.positions.engine import ConversionError, ReversalError
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_from_snapshot
 
@@ -165,24 +166,44 @@ def rebuild_after_decision(session: Session, account: Account) -> None:
 
 def record_decision(session: Session, decision: LedgerDecision) -> LedgerDecision:
     _validate(decision)
-    session.add(decision)
-    session.flush()
 
-    _generate_entries(session, decision)
-    rebuild_after_decision(session, session.get(Account, decision.account_id))
+    # Всё под общим SAVEPOINT: движок отказывает уже после того, как решение и
+    # порождённые им записи легли в сессию, и без отката вызывающий закоммитил
+    # бы журнал, который потом не сворачивается. Чинить такое пришлось бы
+    # правкой базы — журнал append-only.
+    try:
+        with session.begin_nested():
+            session.add(decision)
+            session.flush()
+            _generate_entries(session, decision)
+            rebuild_after_decision(session, session.get(Account, decision.account_id))
+    except (ConversionError, ReversalError) as error:
+        raise DecisionError(
+            f"Решение не сходится с журналом операций: {error} Ни решение, ни "
+            "записи журнала не сохранены."
+        ) from error
     return decision
 
 
-def _later_decisions_on_the_same_papers(
-    session: Session, original: LedgerDecision
-) -> list[LedgerDecision]:
-    """Подтверждённые решения этого счёта, принятые позже и по тем же бумагам.
+def _blocking_decisions(session: Session, original: LedgerDecision) -> list[LedgerDecision]:
+    """Более поздние решения того же счёта, мешающие отменить это.
 
     Отмена раскручивает след решения — те самые партии, которые оно открыло.
     Если поверх легло ещё одно решение, этих партий в книге уже нет: они ушли в
     следующую конвертацию. Отказ обязан назвать настоящую причину, иначе
     владелец читает про «количество в решении» (так падал движок) и правит не
     то.
+
+    «Позже» — по паре (время создания, номер): номер один растёт вместе с
+    порядком принятия решений только пока их создаёт эта служба, а время
+    создания переживает и импорт.
+
+    Пара «решение и его отмена» друг друга гасит и мешать не должна — иначе
+    первое решение оказывается неотменяемым навсегда. Исключение — решение,
+    чей CONVERSION_OUT черпал ту самую бумагу, которую зачислило отменяемое:
+    эта запись осталась в журнале на своей, более поздней дате и по-прежнему
+    требует бумаги в книге. Сами зеркальные записи ничего не черпают — они
+    раскручивают чужой след, — поэтому зеркала из проверки исключены всегда.
     """
     instruments = {original.from_instrument_id, original.to_instrument_id} - {None}
     if not instruments:
@@ -192,14 +213,70 @@ def _later_decisions_on_the_same_papers(
         select(LedgerDecision)
         .where(
             LedgerDecision.account_id == original.account_id,
-            LedgerDecision.id > original.id,
-            LedgerDecision.status == DecisionStatus.CONFIRMED,
+            LedgerDecision.id != original.id,
+            or_(
+                LedgerDecision.created_at > original.created_at,
+                and_(
+                    LedgerDecision.created_at == original.created_at,
+                    LedgerDecision.id > original.id,
+                ),
+            ),
             or_(
                 LedgerDecision.from_instrument_id.in_(instruments),
                 LedgerDecision.to_instrument_id.in_(instruments),
             ),
         )
-        .order_by(LedgerDecision.id)
+        .order_by(LedgerDecision.created_at, LedgerDecision.id)
+    )
+    later = list(session.execute(statement).scalars())
+    reverted = {item.id for item in later if item.status is DecisionStatus.REVERTED}
+
+    blocking = []
+    for decision in later:
+        # Отклонённое решение записей журнала не порождало — мешать нечему.
+        if decision.status is DecisionStatus.REJECTED:
+            continue
+        cancelled = decision.status is DecisionStatus.REVERTED or decision.reverts_id in reverted
+        if cancelled and (
+            decision.reverts_id is not None
+            or decision.from_instrument_id != original.to_instrument_id
+        ):
+            continue
+        blocking.append(decision)
+    return blocking
+
+
+def _operations_after(session: Session, original: LedgerDecision) -> list[Transaction]:
+    """Операции брокера по зачисленной решением бумаге после даты события.
+
+    Отмена убирает партии, которые решение открыло. Если после этой даты бумагу
+    успели продать, история становится противоречивой: по отменённой версии
+    событий этих бумаг не существовало вовсе. Промолчать нельзя, и упасть уже
+    некуда — движок такого не заметит: зеркальные записи несут дату отменяемого
+    решения и ложатся в журнал раньше позднейшей продажи. На живом разборе
+    выходило, что реальная продажа 40 бумаг на 8000 исчезала из налоговой базы,
+    а в портфеле оставалась короткая позиция, которой нет у брокера.
+
+    Записи, порождённые решениями, здесь не считаются: их разбирает
+    _blocking_decisions, а погасившая себя пара «решение и его отмена» следа в
+    книге не оставляет.
+
+    Бумага, с которой решение только списывало, не проверяется: возврат снятых
+    партий ни с чем не спорит — они просто ложатся обратно в книгу, а всё, что
+    случилось позже, считается поверх них как считалось.
+    """
+    if original.to_instrument_id is None:
+        return []
+
+    statement = (
+        select(Transaction)
+        .where(
+            Transaction.account_id == original.account_id,
+            Transaction.instrument_id == original.to_instrument_id,
+            Transaction.executed_at > original.effective_at,
+            Transaction.source != SOURCE,
+        )
+        .order_by(Transaction.executed_at)
     )
     return list(session.execute(statement).scalars())
 
@@ -232,14 +309,27 @@ def revert_decision(session: Session, decision_id: int, note: str) -> LedgerDeci
             "новое решение."
         )
 
-    later = _later_decisions_on_the_same_papers(session, original)
-    if later:
-        numbers = ", ".join(str(decision.id) for decision in later)
+    blocking = _blocking_decisions(session, original)
+    if blocking:
+        numbers = ", ".join(str(decision.id) for decision in blocking)
         raise DecisionError(
             f"Поверх решения {original.id} лежат более поздние решения по тем же "
-            f"бумагам ({numbers}): партий, которые оно открыло, в книге уже нет, "
-            "и отмена вернула бы чужие даты и чужую себестоимость. Сначала "
-            "отмените более поздние решения."
+            f"бумагам ({numbers}): они опираются на бумаги, которые оно "
+            "зачислило, и отмена вырвала бы у них опору. Пока эти записи в "
+            "журнале, отменить это решение нельзя — приведите позиции новым "
+            "решением."
+        )
+
+    traded = _operations_after(session, original)
+    if traded:
+        raise DecisionError(
+            f"После даты решения {original.id} по зачисленной им бумаге были "
+            f"операции ({len(traded)}), самая ранняя — "
+            f"{traded[0].op_type.value} от {traded[0].executed_at:%d.%m.%Y}. "
+            "Отмена убрала бы бумаги, которых по её версии событий не было бы "
+            "вовсе: финансовый результат этих операций исчез бы из налоговой "
+            "базы, а в портфеле осталась бы короткая позиция, которой нет у "
+            "брокера. Приведите позиции новым решением."
         )
 
     mirror = LedgerDecision(
@@ -258,14 +348,24 @@ def revert_decision(session: Session, decision_id: int, note: str) -> LedgerDeci
         reverts_id=original.id,
     )
     _validate(mirror)
-    session.add(mirror)
-    session.flush()
 
-    _generate_entries(session, mirror)
-    original.status = DecisionStatus.REVERTED
-    session.flush()
-
-    rebuild_after_decision(session, session.get(Account, original.account_id))
+    # Всё под общим SAVEPOINT — по той же причине, что и в record_decision:
+    # отказ движка не должен оставить в сессии зеркальное решение, две записи
+    # журнала и исходное решение в статусе REVERTED. Закоммить такое вызывающий
+    # получил бы счёт, позиции которого не пересобираются больше никогда.
+    try:
+        with session.begin_nested():
+            session.add(mirror)
+            session.flush()
+            _generate_entries(session, mirror)
+            original.status = DecisionStatus.REVERTED
+            session.flush()
+            rebuild_after_decision(session, session.get(Account, original.account_id))
+    except (ConversionError, ReversalError) as error:
+        raise DecisionError(
+            f"Отмена решения {original.id} не сходится с журналом: {error} Ни "
+            "зеркальное решение, ни записи журнала не сохранены."
+        ) from error
     return mirror
 
 
