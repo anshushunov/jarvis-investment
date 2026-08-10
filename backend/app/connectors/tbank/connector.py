@@ -270,12 +270,6 @@ class TBankConnector:
         if payload is None:
             return []
 
-        blocked_by_currency: dict[str, Decimal] = {}
-        for item in payload.get("blocked") or []:
-            currency = (item.get("currency") or "").upper()
-            if currency:
-                blocked_by_currency[currency] = to_money(item)
-
         # Валюта в money изредка повторяется (в т.ч. в разном регистре —
         # 'rub' и 'RUB' нормализуются в одну и ту же валюту). Дубль
         # складываем, а не берём последний: у cash_balance уникальный ключ
@@ -285,12 +279,22 @@ class TBankConnector:
         # теряет деньги молча: обе записи брокер прислал как часть остатка,
         # отбросить любую из них значило бы занизить капитал без всякого
         # признака этого в данных.
-        money_by_currency: dict[str, Decimal] = {}
-        for item in payload.get("money") or []:
-            currency = (item.get("currency") or "").upper()
-            if not currency:
-                continue
-            money_by_currency[currency] = money_by_currency.get(currency, money("0")) + to_money(item)
+        #
+        # Оба массива сводятся одинаково: blocked — такой же список записей по
+        # валютам, и дубль в нём точно так же реален. «Последний побеждает»
+        # занижал бы недоступную часть (rub 300 плюс rub 200 давали 200 вместо
+        # 500) — ошибка тише денежной, но того же рода.
+        def sum_by_currency(items: list[dict] | None) -> dict[str, Decimal]:
+            totals: dict[str, Decimal] = {}
+            for item in items or []:
+                currency = (item.get("currency") or "").upper()
+                if not currency:
+                    continue
+                totals[currency] = totals.get(currency, money("0")) + to_money(item)
+            return totals
+
+        blocked_by_currency = sum_by_currency(payload.get("blocked"))
+        money_by_currency = sum_by_currency(payload.get("money"))
 
         # Итог — объединение валют money и blocked, а не проход только по
         # money: валюта, которая целиком зарезервирована, может не попасть в
@@ -299,17 +303,17 @@ class TBankConnector:
         # что цикл раньше видел только money.
         balances: list[BrokerCash] = []
         for currency in sorted(set(money_by_currency) | set(blocked_by_currency)):
+            blocked = blocked_by_currency.get(currency, money("0"))
+            # Валюты нет в money вовсе — значит распоряжаемой суммы в ней нет, а
+            # весь остаток зарезервирован. По соглашению «blocked — часть
+            # amount» (см. докстринг BrokerCash) остаток в этом случае равен
+            # блокировке, а не нулю: ноль означал бы, что денег в этой валюте
+            # нет, и они молча выпали бы из капитала — ровно то, ради чего
+            # объединение валют money и blocked здесь и заведено.
             balances.append(BrokerCash(
                 currency=currency,
-                amount=money_by_currency.get(currency, money("0")),
-                # Ноль amount при ненулевом blocked — не нарушение соглашения
-                # «blocked — часть amount» (см. докстринг BrokerCash), а его
-                # крайний случай: money и blocked — два независимых массива
-                # ответа брокера, и money не обязана перечислять валюту, для
-                # которой распоряжаемой суммы нет вовсе. Подставить сюда сам
-                # blocked вместо нуля значило бы придумать за брокера число,
-                # которого он в money не прислал.
-                blocked=blocked_by_currency.get(currency, money("0")),
+                amount=money_by_currency.get(currency, blocked),
+                blocked=blocked,
             ))
         return balances
 

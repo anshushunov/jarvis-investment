@@ -804,9 +804,13 @@ def test_fetch_cash_returns_empty_when_account_has_no_positions_endpoint():
 @respx.mock
 def test_fetch_cash_keeps_currency_blocked_only_without_money_entry():
     """Валюта, вся сумма которой зарезервирована, может отсутствовать в money
-    целиком: money отвечает за распоряжаемую сумму, а не за факт наличия
-    валюты. Если собирать итог проходом только по money, такая валюта — и
-    реальные деньги владельца в ней — молча пропадёт из капитала."""
+    целиком. Если собирать итог проходом только по money, такая валюта — и
+    реальные деньги владельца в ней — молча пропадёт из капитала.
+
+    Остаток в ней равен блокировке, а не нулю: по соглашению `blocked` — часть
+    `amount` (см. докстринг BrokerCash), и раз распоряжаемой суммы нет вовсе,
+    весь остаток и есть заблокированное. Ноль сохранил бы валюту в списке, но
+    деньги из капитала всё равно бы выпали."""
     respx.post(f"{OPERATIONS}/GetPositions").mock(
         return_value=httpx.Response(200, json={
             "money": [{"currency": "rub", "units": "100", "nano": 0}],
@@ -819,7 +823,28 @@ def test_fetch_cash_keeps_currency_blocked_only_without_money_entry():
 
     assert cash == [
         BrokerCash(currency="RUB", amount=Decimal("100.0000"), blocked=Decimal("0")),
-        BrokerCash(currency="USD", amount=Decimal("0"), blocked=Decimal("20.0000")),
+        BrokerCash(currency="USD", amount=Decimal("20.0000"), blocked=Decimal("20.0000")),
+    ]
+
+
+@respx.mock
+def test_fetch_cash_sums_duplicate_currency_in_blocked_too():
+    """Дубль валюты в blocked сводится так же, как в money. «Последний
+    побеждает» здесь занижал недоступную часть: rub 300 плюс rub 200 давали
+    200 вместо 500 — деньги на месте, а «недоступно к продаже» врёт."""
+    respx.post(f"{OPERATIONS}/GetPositions").mock(
+        return_value=httpx.Response(200, json={
+            "money": [{"currency": "rub", "units": "1000", "nano": 0}],
+            "blocked": [
+                {"currency": "rub", "units": "300", "nano": 0},
+                {"currency": "RUB", "units": "200", "nano": 0},
+            ],
+            "securities": [],
+        })
+    )
+
+    assert TBankConnector(TOKEN).fetch_cash("1000000001") == [
+        BrokerCash(currency="RUB", amount=Decimal("1000.0000"), blocked=Decimal("500.0000"))
     ]
 
 

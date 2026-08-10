@@ -291,7 +291,14 @@ def portfolio_overview(session: Session) -> Overview:
             # (см. BrokerCash), поэтому cash_total от неё не меняется.
             blocked_amount = blocked_cash.get(account_id, {}).get(currency)
             if blocked_amount is not None:
-                blocked_in_base = to_base(blocked_amount, currency, rates)
+                # Обрезка остатком — та же защита, что и у бумаг выше: соглашение
+                # «blocked — часть amount» держится на слове брокера, проверить
+                # его на живом счёте пока нечем (у владельца блокировок нет ни в
+                # одной валюте). Пришли бы данные иначе — «недоступно» вышло бы
+                # больше самого капитала, а такая цифра не объясняется ничем.
+                # Отрицательный остаток — долг, блокировать в нём нечего.
+                capped = max(money("0"), min(blocked_amount, amount))
+                blocked_in_base = to_base(capped, currency, rates)
                 if blocked_in_base is not None:
                     restricted_value = money(restricted_value + blocked_in_base)
 

@@ -1,6 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from app.accounts.cash import store_cash
 from app.analytics.service import portfolio_overview, position_rows
 from app.connectors.base import BrokerCash, BrokerPosition
@@ -726,6 +728,40 @@ def test_blocked_cash_without_a_rate_is_not_counted_as_restricted(session):
     assert overview.total_value == Decimal("0.0000")
     assert overview.restricted_value == Decimal("0.0000")
     assert overview.by_currency["USD"] == Decimal("500.0000")
+
+
+@pytest.mark.parametrize(
+    ("amount", "blocked"),
+    [
+        # Обычный случай: часть остатка зарезервирована.
+        (Decimal("1000"), Decimal("300")),
+        # Заблокировано ровно всё.
+        (Decimal("1000"), Decimal("1000")),
+        # Соглашение «blocked — часть amount» нарушено брокером: блокировка
+        # больше остатка. Проверить настоящую семантику на живом счёте пока
+        # нечем — у владельца blocked нулевой во всех девяти строках.
+        (Decimal("1000"), Decimal("5000")),
+        # Крайний случай того же нарушения: остатка нет вовсе, блокировка есть.
+        (Decimal("0"), Decimal("500")),
+        # Долг по счёту: блокировать в отрицательном остатке нечего.
+        (Decimal("-3571.34"), Decimal("100")),
+    ],
+)
+def test_restricted_cash_never_exceeds_the_balance_it_belongs_to(session, amount, blocked):
+    """«Недоступно к продаже» не может быть больше самого капитала: цифра,
+    которая больше целого, не объясняется ничем и подрывает доверие ко всей
+    сводке. Опереться на честность брокера здесь нельзя — соглашение о
+    `blocked` держится на докстринге, а не на проверенных данных.
+
+    Верхняя граница — капитал, но не ниже нуля: у счёта с долгом капитал
+    отрицательный, а недоступного на нём нет вовсе, и «недоступно −3 571 ₽»
+    было бы бессмыслицей худшей, чем ноль."""
+    account = add_account(session)
+    store_cash(session, account, [BrokerCash(currency="RUB", amount=amount, blocked=blocked)])
+
+    overview = portfolio_overview(session)
+
+    assert Decimal("0") <= overview.restricted_value <= max(overview.total_value, Decimal("0"))
 
 
 def test_restriction_and_blocking_are_not_added_up(session):
