@@ -60,16 +60,13 @@ export function PortfolioPage() {
             syncResult={sync.data ?? null}
             syncErrorMessage={sync.isError ? (sync.error as Error).message : null}
           />
-          <CashCard rows={cash.data ?? []} error={cashError} />
+          <CashCard rows={cash.data ?? []} error={cashError} loading={cash.isPending} />
         </div>
         <ValueChart points={history.data ?? []} error={historyError} loading={history.isPending} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
-        <AllocationChart
-          data={overview.data!.by_asset_class}
-          positionCurrencies={overview.data!.position_currencies}
-        />
+        <AllocationChart data={overview.data!.by_asset_class} />
         <PositionsTable rows={positions.data ?? []} error={positionsError} loading={positions.isPending} />
       </div>
     </div>

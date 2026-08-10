@@ -6,7 +6,6 @@ import {
   formatMoney,
   formatPercent,
   formatQuantity,
-  hasForeignCurrency,
 } from "./format";
 
 describe("formatMoney", () => {
@@ -57,19 +56,6 @@ describe("formatMoney", () => {
     expect(formatMoney("10000.4900", BASE_CURRENCY)).toBe("10 000 ₽");
     expect(formatMoney("99999.9900", BASE_CURRENCY)).toBe("100 000 ₽");
     expect(formatMoney("-10000.9900", BASE_CURRENCY)).toBe("−10 001 ₽");
-  });
-});
-
-describe("hasForeignCurrency", () => {
-  it("не ставит оговорку для чисто рублёвого портфеля", () => {
-    expect(hasForeignCurrency([BASE_CURRENCY])).toBe(false);
-    expect(hasForeignCurrency([])).toBe(false);
-  });
-
-  it("ставит оговорку, даже если валютная позиция не оценена", () => {
-    // Ровно этот случай и есть основной: рублёвые котировки MOEX для валютной
-    // бумаги не используются, так что в by_currency её нет — а оговорка нужна.
-    expect(hasForeignCurrency([BASE_CURRENCY, "HKD"])).toBe(true);
   });
 });
 

@@ -8,7 +8,9 @@ const NBSP = " ";
 
 // Базовая валюта портфеля: в ней считается совокупный капитал и все разбивки
 // (см. BASE_CURRENCY в backend/app/analytics/service.py). Позиции в других
-// валютах в этот итог не входят и показываются собственными итогами.
+// валютах пересчитываются в неё по курсу ЦБ и входят в итог наравне с
+// рублёвыми; by_currency при этом — отдельный итог по каждой валюте в ней
+// самой, без пересчёта.
 export const BASE_CURRENCY = "RUB";
 
 // Знак валюты для тех, что реально встречаются в портфеле. Незнакомый код
@@ -30,14 +32,6 @@ const CURRENCY_SIGN: Record<string, string> = {
 
 export function currencySign(currency: string): string {
   return CURRENCY_SIGN[currency.toUpperCase()] ?? currency.toUpperCase();
-}
-
-// Единственное правило на весь интерфейс: оговорка «рублёвая часть» ставится
-// тогда и только тогда, когда в портфеле есть позиции не в базовой валюте —
-// оценённые или нет. Раньше карточка сводки и кольцевая диаграмма решали это
-// по-разному, и на одном экране оговорка то была, то нет.
-export function hasForeignCurrency(positionCurrencies: string[]): boolean {
-  return positionCurrencies.some((currency) => currency !== BASE_CURRENCY);
 }
 
 function group(value: string): string {
