@@ -391,6 +391,30 @@ def test_backfill_falls_back_to_isin_when_the_board_is_unknown(session):
     assert stored.trading_restricted is False
 
 
+def test_backfill_fallback_prefers_a_board_with_known_flags(session):
+    """Та же запасная ветка, но про запись без флагов (ранг 0 в
+    _availability_rank): она не должна вытеснять запись с флагами. «Сведений
+    нет» оставило бы признак ограничения прежним, то есть отменило бы работу
+    дозаполнения ради записи, которая не сообщает ничего.
+
+    Запись без флагов идёт первой, а запрещающая — второй, и обе одинаково
+    «недоступны» на глаз: без отдельного ранга для «сведений нет» первая
+    осталась бы победителем при равенстве, и ограничение не проставилось бы."""
+    session.add(Instrument(isin="RU000A10F728", ticker="RU000A10F728",
+                           secid="RU000A10F728", kind="bond", currency="RUB"))
+    session.flush()
+
+    backfill_instruments(session, {
+        "NSD00A10F728": BrokerInstrument(isin="RU000A10F728", ticker="RU000A10F728",
+                                         kind="bond", name="Газпром капитал"),
+        "A5300A10F728": BrokerInstrument(isin="RU000A10F728", ticker="RU000A10F728",
+                                         kind="bond", name="Газпром капитал",
+                                         buy_available=False, sell_available=False),
+    })
+
+    assert session.query(Instrument).filter_by(isin="RU000A10F728").one().trading_restricted is True
+
+
 def test_backfill_does_not_erase_known_kind_with_unknown(session):
     """Поштучный справочник может не знать экзотический инструмент и ответить
     видом «прочее» — терять из-за этого уже установленный вид незачем."""
