@@ -18,6 +18,10 @@ def _entries(session: Session, account: Account) -> list[LedgerEntry]:
             price=tx.price,
             amount=tx.amount,
             fee=tx.fee,
+            # Идентификатор решения владельца: связывает две стороны
+            # конвертации. Лежит в payload, потому что колонка ради доли
+            # процента записей журнала не окупается.
+            link_id=(tx.payload or {}).get("decision_id"),
         )
         for tx in transactions
     ]

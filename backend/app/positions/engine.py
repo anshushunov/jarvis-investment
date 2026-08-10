@@ -17,11 +17,28 @@ DECREASING = {OperationType.SELL, OperationType.REDEMPTION, OperationType.TRANSF
 # realized выручку от продажи против нулевой себестоимости — сфабрикованную
 # прибыль из воздуха. Считать перевод сделкой в любую сторону значило бы
 # выдумать финансовый результат и испортить налоговую базу.
-WITHOUT_REALIZED = {OperationType.TRANSFER_OUT, OperationType.TRANSFER_IN}
+# ADJUSTMENT здесь по той же причине: ручная поправка количества — это
+# исправление учёта, а не сделка с рынком, выручки у неё нет.
+WITHOUT_REALIZED = {
+    OperationType.TRANSFER_OUT,
+    OperationType.TRANSFER_IN,
+    OperationType.ADJUSTMENT,
+}
 
 # Операции, приносящие количество без себестоимости: брокер её при переводе не
 # сообщает, а выдумывать нельзя.
 WITHOUT_COST = {OperationType.TRANSFER_IN}
+
+# Стороны конвертации. В INCREASING/DECREASING они не входят: их обработка
+# отдельная — количество не открывает и не закрывает партии по цене операции,
+# а переносит уже существующие партии из одной бумаги в другую.
+CONVERSION = {OperationType.CONVERSION_OUT, OperationType.CONVERSION_IN}
+
+
+class ConversionError(RuntimeError):
+    """Стороны конвертации не сошлись. Это порча данных, а не редкий случай:
+    молча открыть партию с нулевой ценой значит подарить владельцу выдуманную
+    доходность и неверную налоговую базу."""
 
 
 @dataclass(frozen=True)
@@ -33,6 +50,9 @@ class LedgerEntry:
     price: Decimal
     amount: Decimal
     fee: Decimal
+    # Идентификатор решения владельца, связывающий две стороны конвертации
+    # (payload.decision_id порождённых записей). None у всего остального.
+    link_id: int | None = None
 
 
 @dataclass
@@ -139,6 +159,96 @@ def _close_whole_position(
     touched.add(entry.instrument_id)
 
 
+def _apply_conversion(
+    lots: dict[int, list[OpenLot]],
+    pockets: dict[int, list[OpenLot]],
+    touched: set[int],
+    entry: LedgerEntry,
+) -> None:
+    """Переносит открытые партии между бумагами при корпоративном действии.
+
+    `CONVERSION_OUT` снимает партии по FIFO на указанное количество и кладёт их
+    в карман под ключом `link_id`. `CONVERSION_IN` достаёт карман и
+    раскладывает партии на новое количество: доля каждой партии сохраняется,
+    суммарная себестоимость тоже, дата открытия переезжает как есть.
+
+    Дата — не формальность. Трёхлетняя льгота по НДФЛ считается от неё, и
+    свернуть партии в одну на дату конвертации значит сжечь льготу владельцу.
+    """
+    if entry.link_id is None:
+        raise ConversionError(
+            f"У стороны конвертации {entry.op_type.value} нет link_id: "
+            "связать её со второй стороной нечем. Записи конвертации "
+            "порождаются решением владельца и обязаны нести payload.decision_id."
+        )
+
+    if entry.op_type is OperationType.CONVERSION_OUT:
+        open_lots = lots.get(entry.instrument_id, [])
+        available = q(sum((lot.quantity_left for lot in open_lots), Decimal("0")))
+        if available < entry.quantity:
+            raise ConversionError(
+                f"Конвертация списывает {entry.quantity} бумаг инструмента "
+                f"{entry.instrument_id}, это больше, чем открыто ({available}). "
+                "Проверьте количество в решении владельца."
+            )
+
+        taken_lots: list[OpenLot] = []
+        remaining = q(entry.quantity)
+        while remaining > 0:
+            lot = open_lots[0]
+            taken = min(lot.quantity_left, remaining)
+            taken_lots.append(OpenLot(
+                instrument_id=entry.instrument_id, opened_at=lot.opened_at,
+                price=lot.price, quantity_left=taken, cost_known=lot.cost_known,
+            ))
+            lot.quantity_left = q(lot.quantity_left - taken)
+            remaining = q(remaining - taken)
+            if lot.quantity_left == 0:
+                open_lots.pop(0)
+
+        pockets[entry.link_id] = taken_lots
+        touched.add(entry.instrument_id)
+        return
+
+    taken_lots = pockets.pop(entry.link_id, None)
+    if not taken_lots:
+        raise ConversionError(
+            f"CONVERSION_IN для решения {entry.link_id} не нашёл снятых партий: "
+            "парного CONVERSION_OUT в журнале нет или он идёт позже. "
+            "Открыть партию с нулевой ценой нельзя — это выдумало бы "
+            "себестоимость и доходность."
+        )
+
+    old_quantity = q(sum((lot.quantity_left for lot in taken_lots), Decimal("0")))
+    new_quantity = q(entry.quantity)
+    open_lots = lots.setdefault(entry.instrument_id, [])
+    distributed = Decimal("0")
+    for index, lot in enumerate(taken_lots):
+        # Доля партии в новом количестве та же, что была в старом; цена
+        # меняется обратно пропорционально, поэтому себестоимость партии
+        # (количество × цена) остаётся прежней с точностью до округления цены
+        # до четырёх знаков: точное равенство сумм недостижимо в принципе —
+        # 40000 / 1012 конечной десятичной дробью не записывается. Расхождение
+        # ограничено половиной последнего знака цены на бумагу.
+        if index == len(taken_lots) - 1:
+            # Последней партии достаётся весь остаток количества. Иначе
+            # округление долей до восьми знаков теряет или добавляет бумагу
+            # (три партии по одной штуке в десять бумаг дают 3.33333333 × 3 =
+            # 9.99999999), и позиция навсегда расходится со снимком брокера.
+            share = q(new_quantity - distributed)
+        else:
+            share = q(lot.quantity_left * new_quantity / old_quantity)
+        distributed = q(distributed + share)
+        open_lots.append(OpenLot(
+            instrument_id=entry.instrument_id,
+            opened_at=lot.opened_at,
+            price=money(lot.quantity_left * lot.price / share) if share else money("0"),
+            quantity_left=share,
+            cost_known=lot.cost_known,
+        ))
+    touched.add(entry.instrument_id)
+
+
 def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     """Сворачивает журнал в позиции и закрытые сделки по FIFO.
 
@@ -166,10 +276,24 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     realized: list[RealizedSale] = []
     cash: dict[str, Decimal] = defaultdict(lambda: money("0"))
 
-    # Sort by timestamp, then by operation type (INCREASING before DECREASING)
+    # Партии, снятые CONVERSION_OUT и ждущие своего CONVERSION_IN. Ключ —
+    # link_id решения: два разных корпоративных действия одной датой не должны
+    # черпать из общего кармана.
+    pockets: dict[int, list[OpenLot]] = {}
+
+    # Порядок внутри одного мгновения. Покупка раньше продажи — чтобы не
+    # возникало мнимого разворота позиции. CONVERSION_OUT строго раньше
+    # CONVERSION_IN: иначе карман пуст и себестоимость теряется. IN идёт
+    # последним, потому что снятые партии должны быть уже в кармане.
     def sort_key(entry):
-        # Lower value for INCREASING (processed first), higher for others
-        priority = 0 if entry.op_type in INCREASING else 1
+        if entry.op_type in INCREASING:
+            priority = 0
+        elif entry.op_type is OperationType.CONVERSION_OUT:
+            priority = 2
+        elif entry.op_type is OperationType.CONVERSION_IN:
+            priority = 3
+        else:
+            priority = 1
         return (entry.executed_at, priority)
 
     for entry in sorted(entries, key=sort_key):
@@ -178,7 +302,18 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
         if entry.instrument_id is None:
             continue
 
-        if entry.op_type in INCREASING:
+        if entry.op_type in CONVERSION:
+            _apply_conversion(lots, pockets, touched, entry)
+            continue
+
+        if entry.op_type is OperationType.ADJUSTMENT:
+            # Направление по знаку количества: поправка бывает в обе стороны, и
+            # тип операции у них общий. Нулевая поправка (брокер изменил только
+            # сумму) количество не трогает вовсе.
+            if entry.quantity == 0:
+                continue
+            direction = 1 if entry.quantity > 0 else -1
+        elif entry.op_type in INCREASING:
             direction = 1
         elif entry.op_type in DECREASING:
             direction = -1
@@ -193,7 +328,10 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
         open_lots = lots.setdefault(entry.instrument_id, [])
         touched.add(entry.instrument_id)
 
-        remaining = q(entry.quantity)
+        # По модулю: у отрицательной поправки количество меньше нуля, а
+        # remaining в цикле FIFO обязан быть положительным — направление уже
+        # снято отдельно в direction.
+        remaining = q(abs(entry.quantity))
         unit_price = money(entry.price)
 
         # Сначала гасим встречные партии: продажа закрывает длинные, покупка
@@ -235,9 +373,27 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
                     opened_at=entry.executed_at,
                     price=unit_price,
                     quantity_left=q(direction * remaining),
-                    cost_known=entry.op_type not in WITHOUT_COST,
+                    # Себестоимость положительной поправки берётся из цены
+                    # записи: record_decision кладёт туда cost_basis /
+                    # to_quantity, а при неизвестной себестоимости — ноль. Ноль
+                    # в цене поправки означает ровно «неизвестно», поэтому
+                    # ADJUSTMENT нельзя записать в WITHOUT_COST целиком: иначе
+                    # поправка с указанной владельцем себестоимостью тоже
+                    # помечалась бы неизвестной.
+                    cost_known=(
+                        unit_price != 0
+                        if entry.op_type is OperationType.ADJUSTMENT
+                        else entry.op_type not in WITHOUT_COST
+                    ),
                 )
             )
+
+    if pockets:
+        raise ConversionError(
+            f"Партии, снятые конвертациями {sorted(pockets)}, остались "
+            "невостребованными: у них нет парного CONVERSION_IN. Бумаги "
+            "исчезли бы из портфеля бесследно."
+        )
 
     positions = {}
     for instrument_id in touched:
