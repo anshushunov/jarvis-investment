@@ -156,6 +156,31 @@ describe("DecisionPanel", () => {
     expect(body.to_quantity).toBe("5");
   });
 
+  it("отклонение требует подтверждения и предупреждает о необратимости", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({
+      id: 3, account: "Инвестиционный", kind: "CONVERSION", status: "REJECTED",
+      from_isin: "HK0000310034", from_quantity: "79.00000000",
+      to_isin: "HK0000051877", to_quantity: "79.00000000",
+      effective_at: "2026-01-01T00:00:00Z", note: "не связаны", reverts_id: null,
+    }));
+    renderPanel(WITH_SUGGESTION);
+
+    await user.type(screen.getByLabelText(/пояснение/i), "не связаны");
+    await user.click(screen.getByRole("button", { name: /это не конвертация/i }));
+
+    // Первый клик ничего не отправляет: отклонение глушит пару навсегда, а
+    // отменить отклонённое решение служба не даёт — цена ошибочного клика
+    // слишком велика, чтобы принимать его без подтверждения.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/необратимо/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /отклонить навсегда/i }));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(requestBody(fetchSpy).status).toBe("REJECTED");
+  });
+
   it("списывающая корректировка уходит на бэкенд ровно одной стороной", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({

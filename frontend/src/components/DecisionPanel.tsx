@@ -49,6 +49,11 @@ export function DecisionPanel({ row, onDone }: {
   const [effectiveAt, setEffectiveAt] = useState(today());
   const [note, setNote] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
+  // Отклонение спрашивается дважды: оно необратимо. Отклонённая пара глушится
+  // навсегда (backend/app/decisions/suggestions.py, _rejected_pairs), а отмену
+  // служба даёт только подтверждённым решениям — один ошибочный клик, и
+  // гипотеза больше никогда не предложится.
+  const [rejecting, setRejecting] = useState(false);
 
   const submit = useMutation({
     mutationFn: (body: DecisionInput) => api.createDecision(body),
@@ -286,16 +291,37 @@ export function DecisionPanel({ row, onDone }: {
         </div>
       )}
 
+      {rejecting && (
+        <div style={{ color: "var(--amber)", fontSize: 12, marginBottom: 6 }}>
+          Отклонение необратимо: эту пару система больше не предложит никогда, а
+          отменить отклонённое решение нельзя — отмена рассчитана только на
+          подтверждённые. Если сомневаетесь, закройте разбор и вернитесь к нему
+          позже.
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 8 }}>
         <button type="button" onClick={() => confirm("CONFIRMED")}
                 disabled={submit.isPending}>
           {submit.isPending ? "Отправляем…" : "Подтвердить"}
         </button>
-        {selectedSuggestion && (
-          <button type="button" onClick={() => confirm("REJECTED")}
+        {selectedSuggestion && !rejecting && (
+          <button type="button" onClick={() => setRejecting(true)}
                   disabled={submit.isPending}>
             Это не конвертация
           </button>
+        )}
+        {selectedSuggestion && rejecting && (
+          <>
+            <button type="button" onClick={() => confirm("REJECTED")}
+                    disabled={submit.isPending}>
+              Отклонить навсегда
+            </button>
+            <button type="button" onClick={() => setRejecting(false)}
+                    disabled={submit.isPending}>
+              Передумал
+            </button>
+          </>
         )}
         <button type="button" onClick={onDone} disabled={submit.isPending}>
           Отмена

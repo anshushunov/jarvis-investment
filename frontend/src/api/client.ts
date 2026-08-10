@@ -176,4 +176,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // Отмена адресная: бэкенд снимает те самые партии, которые открыло
+  // отменяемое решение. Пояснение обязательно, как и при записи, — иначе через
+  // год причину отмены не восстановит никто (бэкенд отвергнет запрос без него).
+  // Возвращается зеркальное решение, а не отменённое: журнал append-only.
+  revertDecision: (id: number, note: string) =>
+    request<Decision>(`/decisions/${id}/revert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
 };
