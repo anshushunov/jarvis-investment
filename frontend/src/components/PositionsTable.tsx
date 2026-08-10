@@ -2,6 +2,31 @@ import { formatMoney, formatQuantity } from "../api/format";
 import { ChangeValue } from "./MoneyValue";
 import type { PositionRow } from "../api/client";
 
+// Цена брокера — не независимая оценка: тот же источник, с чьим снимком мы
+// сверяемся. Молча показывать её наравне с биржевой нельзя.
+function PriceSourceMark({ source }: { source: string | null }) {
+  if (source !== "tbank") return null;
+  return (
+    <span title="Цена от брокера, не с биржи" style={{ color: "var(--tx-2)", marginLeft: 4 }}>
+      ·бр
+    </span>
+  );
+}
+
+// Ограничение бумаги и блокировка количества — разные причины недоступности, и
+// обе встречаются по отдельности. Значок один, подсказка разная: владельцу
+// важно, можно ли распорядиться, но при разборе расхождений важно и почему.
+function RestrictedMark({ restricted, blocked }: { restricted: boolean; blocked: string }) {
+  const blockedQuantity = Number.parseFloat(blocked);
+  if (!restricted && blockedQuantity === 0) return null;
+
+  const title = restricted
+    ? "Ни купить, ни продать: бумага ограничена в обороте"
+    : `Заблокировано брокером: ${formatQuantity(blocked)} шт.`;
+
+  return <span title={title} style={{ color: "var(--amber)", marginLeft: 4 }}>🔒</span>;
+}
+
 export function PositionsTable({ rows, error, loading }: {
   rows: PositionRow[];
   error: string | null;
@@ -57,7 +82,10 @@ export function PositionsTable({ rows, error, loading }: {
             // бэкенда стабилен.
             <tr key={`${row.isin}-${row.account}-${index}`} style={{ borderTop: "1px solid var(--line)", textAlign: "right" }}>
               <td style={{ textAlign: "left", padding: "9px 0" }}>
-                <div>{row.ticker ?? "—"}</div>
+                <div>
+                  {row.ticker ?? "—"}
+                  <RestrictedMark restricted={row.restricted} blocked={row.blocked} />
+                </div>
                 <div style={{ color: "var(--tx-2)", fontSize: 11.5 }}>{row.name}</div>
               </td>
               {/* Счёт: при пяти счетах одного брокера один тикер давал
@@ -71,7 +99,10 @@ export function PositionsTable({ rows, error, loading }: {
               <td>{formatMoney(row.average_price, row.currency)}</td>
               {/* Нет котировки — прочерк (formatMoney на null), а не «0 ₽»:
                   неизвестная стоимость и нулевая стоимость это разные вещи. */}
-              <td>{formatMoney(row.last_price, row.currency)}</td>
+              <td>
+                {formatMoney(row.last_price, row.currency)}
+                <PriceSourceMark source={row.price_source} />
+              </td>
               <td>{formatMoney(row.market_value, row.currency)}</td>
               <td><ChangeValue percent={row.profit_percent} /></td>
             </tr>

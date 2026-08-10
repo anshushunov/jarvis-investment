@@ -1,4 +1,4 @@
-import { BASE_CURRENCY, formatMoney, hasForeignCurrency } from "../api/format";
+import { BASE_CURRENCY, formatMoney } from "../api/format";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -7,26 +7,34 @@ const STATUS_LABEL: Record<string, string> = {
   failed: "ошибка синхронизации",
 };
 
-function foreignTotals(byCurrency: Record<string, string>): [string, string][] {
-  return Object.entries(byCurrency).filter(([currency]) => currency !== BASE_CURRENCY);
-}
-
-// Позиции в валютах, отличных от рубля, в совокупный капитал не входят:
-// пересчёта по курсам пока нет, а складывать разные деньги под знаком рубля
-// нельзя. Показываем их отдельным итогом по каждой валюте.
-function ForeignCurrencyTotals({ byCurrency }: { byCurrency: Record<string, string> }) {
-  const foreign = foreignTotals(byCurrency);
-  if (foreign.length === 0) return null;
-
+// Из чего складывается капитал. Одна общая цифра не отвечает на вопрос,
+// изменился портфель или просто пришли деньги на счёт.
+function CapitalParts({ overview }: { overview: Overview }) {
   return (
     <div style={{ margin: "10px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
-      Вне рублёвого итога (пересчёта по курсам пока нет):{" "}
-      {foreign.map(([currency, amount], index) => (
-        <span key={currency}>
-          {index > 0 && ", "}
-          <span style={{ color: "var(--tx-1, inherit)" }}>{formatMoney(amount, currency)}</span>
-        </span>
-      ))}
+      Бумаги <span style={{ color: "var(--tx-1, inherit)" }}>
+        {formatMoney(overview.securities_value, BASE_CURRENCY)}
+      </span>
+      {" · деньги "}
+      <span style={{ color: "var(--tx-1, inherit)" }}>
+        {formatMoney(overview.cash_value, BASE_CURRENCY)}
+      </span>
+    </div>
+  );
+}
+
+// Недоступное входит в капитал — брокер считает так же. Но распорядиться им
+// нельзя, и знать об этом нужно рядом с самой цифрой: у владельца больше
+// двадцати таких позиций, это заметная доля портфеля.
+function RestrictedNotice({ overview }: { overview: Overview }) {
+  if (overview.restricted_value === "0.0000") return null;
+
+  return (
+    <div style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
+      Недоступно к продаже{" "}
+      <span style={{ color: "var(--amber)" }}>
+        {formatMoney(overview.restricted_value, BASE_CURRENCY)}
+      </span>
     </div>
   );
 }
@@ -60,14 +68,12 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
 }) {
   return (
     <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>
-        Совокупный капитал
-        {hasForeignCurrency(overview.position_currencies) ? " · рублёвая часть" : ""}
-      </div>
+      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>Совокупный капитал</div>
       <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
         <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />
       </div>
-      <ForeignCurrencyTotals byCurrency={overview.by_currency} />
+      <CapitalParts overview={overview} />
+      <RestrictedNotice overview={overview} />
       <CoverageNotice overview={overview} />
       <button
         onClick={onSync}

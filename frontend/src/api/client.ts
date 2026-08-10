@@ -2,21 +2,22 @@
 const BASE = "http://localhost:8001/api";
 
 export interface Overview {
-  // Рублёвая часть портфеля: позиции в других валютах сюда не входят, пока нет
-  // пересчёта по курсам. Их итоги — в by_currency.
+  // Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам ЦБ.
   total_value: string;
+  securities_value: string;
+  cash_value: string;
+  // Часть капитала, которой нельзя распорядиться: заблокированные количества
+  // плюс бумаги, ограниченные в обороте. Входит в total_value.
+  restricted_value: string;
   by_asset_class: Record<string, string>;
   by_account: Record<string, string>;
-  // Итог по каждой валюте, включая рубль. Складывать между собой нельзя —
-  // это разные деньги. Сюда попадают только оценённые позиции.
+  // Итог по каждой валюте в ней самой, без пересчёта. Складывать нельзя.
   by_currency: Record<string, string>;
-  // Валюты всех позиций, включая неоценённые: по ним решается, нужна ли
-  // оговорка «рублёвая часть». by_currency для этого не годится — валютная
-  // позиция без котировки в него не попадает, но итог от этого рублёвой
-  // частью быть не перестаёт.
   position_currencies: string[];
   // Дата актуальности оценки; пусто, если котировок ещё нет.
   as_of: string | null;
+  // Дата курсов: они обновляются раз в сутки, котировки — каждые 15 минут.
+  fx_as_of: string | null;
   // Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
   // Совокупный капитал посчитан только по оценённым — если оценены не все,
   // это обязано быть видно рядом с самой цифрой.
@@ -42,6 +43,14 @@ export interface PositionRow {
   market_value: string | null;
   profit: string | null;
   profit_percent: string | null;
+  // Стоимость в рублях; null, когда цена есть, а курса нет.
+  value_base: string | null;
+  // "moex" — биржа, "tbank" — цена самого брокера (оценка не независима).
+  price_source: string | null;
+  // Заблокированная брокером часть количества.
+  blocked: string;
+  // Бумагой нельзя распорядиться вовсе: ни купить, ни продать.
+  restricted: boolean;
 }
 
 export interface HistoryPoint {
@@ -57,6 +66,13 @@ export interface ReconciliationRow {
   // Подпись счёта, к которому относится расхождение (сверка считается по
   // каждому счёту отдельно — один ISIN может дать две строки на двух счетах).
   account: string;
+}
+
+export interface CashRow {
+  account: string;
+  currency: string;
+  amount: string;
+  blocked: string;
 }
 
 export interface SyncRunResult {
@@ -97,6 +113,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   overview: () => request<Overview>("/portfolio/overview"),
   positions: () => request<PositionRow[]>("/portfolio/positions"),
+  cash: () => request<CashRow[]>("/portfolio/cash"),
   history: (days = 90) => request<HistoryPoint[]>(`/portfolio/history?days=${days}`),
   reconciliations: () => request<ReconciliationRow[]>("/reconciliations"),
   syncTbank: () => request<SyncRunResult[]>("/sync/tbank", { method: "POST" }),
