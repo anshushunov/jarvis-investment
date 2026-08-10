@@ -462,6 +462,49 @@ def test_post_decision_records_it_and_returns_the_result(client, session):
     assert len(listed) == 1
 
 
+def test_post_decision_that_fails_in_the_engine_leaves_no_trace(client, session):
+    """Решение проходит валидацию (_validate), но падает уже в движке
+    партий — это ветка `except (ConversionError, ReversalError)` внутри
+    SAVEPOINT в record_decision, а не ранняя проверка. Ни решение, ни
+    порождённые им записи не должны остаться в базе, и клиент обязан
+    получить текст настоящей причины, а не общую ошибку сервера."""
+    from app.models import Account, Instrument, LedgerDecision, Transaction
+    from sqlalchemy import select
+
+    account = Account(broker="tbank", kind="broker", external_id="acc-1",
+                      name="Инвестиционный", currency="RUB")
+    old = Instrument(isin="HK0000310034", ticker="3010", secid="3010",
+                     kind="share", currency="HKD")
+    new = Instrument(isin="HK0000051877", ticker="3690", secid="3690",
+                     kind="share", currency="HKD")
+    session.add_all([account, old, new])
+    session.commit()
+
+    # В журнале нет ни одной операции по HK0000310034 — списывать движку
+    # нечего, и отказ приходит уже после того, как решение и его записи легли
+    # в сессию (см. record_decision в app/decisions/service.py).
+    response = client.post("/api/decisions", json={
+        "account": "Инвестиционный (acc-1)",
+        "kind": "CONVERSION",
+        "status": "CONFIRMED",
+        "from_isin": "HK0000310034",
+        "from_quantity": "79",
+        "to_isin": "HK0000051877",
+        "to_quantity": "79",
+        "effective_at": "2026-03-01T00:00:00Z",
+        "note": "Конвертация гонконгского ETF",
+    })
+
+    assert response.status_code == 400
+    assert "не сходится с журналом операций" in response.json()["detail"]
+
+    assert session.execute(select(LedgerDecision)).scalars().all() == []
+    manual = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalars().all()
+    assert manual == []
+
+
 def test_post_decision_without_note_is_rejected(client, session):
     from app.models import Account
 

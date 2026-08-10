@@ -67,7 +67,46 @@ def _to_out(session: Session, decision: LedgerDecision) -> DecisionOut:
 
 @router.get("/decisions", response_model=list[DecisionOut])
 def list_decisions(session: Session = Depends(get_session)) -> list[DecisionOut]:
-    return [_to_out(session, decision) for decision in decisions_for(session)]
+    decisions = decisions_for(session)
+
+    # Тот же приём, что и в get_reconciliations (routes_portfolio.py): счета и
+    # бумаги подгружаются одним запросом на весь список, а не по одному на
+    # каждое решение — иначе список решений даёт N+1 обращений к базе.
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_({d.account_id for d in decisions}))
+        ).scalars()
+    }
+    instrument_ids = {
+        instrument_id
+        for decision in decisions
+        for instrument_id in (decision.from_instrument_id, decision.to_instrument_id)
+        if instrument_id is not None
+    }
+    isins = {
+        instrument.id: instrument.isin
+        for instrument in session.execute(
+            select(Instrument).where(Instrument.id.in_(instrument_ids))
+        ).scalars()
+    }
+
+    return [
+        DecisionOut(
+            id=decision.id,
+            account=account_label(accounts[decision.account_id]),
+            kind=decision.kind.value,
+            status=decision.status.value,
+            from_isin=isins.get(decision.from_instrument_id),
+            from_quantity=decision.from_quantity,
+            to_isin=isins.get(decision.to_instrument_id),
+            to_quantity=decision.to_quantity,
+            effective_at=decision.effective_at,
+            note=decision.note,
+            reverts_id=decision.reverts_id,
+        )
+        for decision in decisions
+    ]
 
 
 @router.post("/decisions", response_model=DecisionOut)
