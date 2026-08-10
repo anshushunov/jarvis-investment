@@ -383,3 +383,183 @@ def test_sync_without_token_returns_clear_error(client, monkeypatch):
 
     assert response.status_code == 400
     assert "TBANK_TOKEN" in response.json()["detail"]
+
+
+def test_reconciliation_row_carries_its_suggestion(client, session):
+    """Гипотеза едет вместе со строкой расхождения: интерфейс не должен
+    сопоставлять два списка на своей стороне."""
+    from decimal import Decimal
+
+    from app.models import Account, Reconciliation
+
+    account = Account(broker="tbank", kind="broker", external_id="acc-1",
+                      name="Инвестиционный", currency="RUB")
+    session.add(account)
+    session.flush()
+    session.add_all([
+        Reconciliation(account_id=account.id, isin="HK0000310034",
+                       ledger_quantity=Decimal("79"), broker_quantity=Decimal("0"),
+                       status="missing_at_broker"),
+        Reconciliation(account_id=account.id, isin="HK0000051877",
+                       ledger_quantity=Decimal("0"), broker_quantity=Decimal("79"),
+                       status="missing_in_ledger"),
+    ])
+    session.commit()
+
+    rows = client.get("/api/reconciliations").json()
+
+    by_isin = {row["isin"]: row for row in rows}
+    suggestion = by_isin["HK0000310034"]["suggestions"][0]
+    assert suggestion["to_isin"] == "HK0000051877"
+    assert suggestion["to_quantity"] == "79.00000000"
+    assert suggestion["ambiguous"] is False
+
+
+def test_post_decision_records_it_and_returns_the_result(client, session):
+    from decimal import Decimal
+
+    from app.ledger.schemas import RawOperation
+    from app.ledger.service import append_operations
+    from app.models import Account, Instrument
+
+    account = Account(broker="tbank", kind="broker", external_id="acc-1",
+                     name="Инвестиционный", currency="RUB")
+    old = Instrument(isin="HK0000310034", ticker="3010", secid="3010",
+                     kind="share", currency="HKD")
+    new = Instrument(isin="HK0000051877", ticker="3690", secid="3690",
+                     kind="share", currency="HKD")
+    session.add_all([account, old, new])
+    session.flush()
+    # Конвертация списывает партию из «старой» бумаги — она должна быть
+    # открыта в журнале заранее, иначе движок отказывает: списывать нечего.
+    append_operations(session, account, "tbank", [RawOperation(
+        external_id="1", op_type="BUY",
+        executed_at=datetime(2024, 5, 1, tzinfo=timezone.utc),
+        isin="HK0000310034", ticker="3010", quantity=Decimal("79"),
+        price=Decimal("120"), amount=Decimal("-9480"), currency="HKD",
+        fee=Decimal("0"), payload={},
+    )])
+    session.commit()
+
+    response = client.post("/api/decisions", json={
+        "account": "Инвестиционный (acc-1)",
+        "kind": "CONVERSION",
+        "status": "CONFIRMED",
+        "from_isin": "HK0000310034",
+        "from_quantity": "79",
+        "to_isin": "HK0000051877",
+        "to_quantity": "79",
+        "effective_at": "2026-03-01T00:00:00Z",
+        "note": "Конвертация гонконгского ETF",
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "CONVERSION"
+    assert body["note"] == "Конвертация гонконгского ETF"
+
+    listed = client.get("/api/decisions").json()
+    assert len(listed) == 1
+
+
+def test_post_decision_without_note_is_rejected(client, session):
+    from app.models import Account
+
+    session.add(Account(broker="tbank", kind="broker", external_id="acc-1",
+                        name="Инвестиционный", currency="RUB"))
+    session.commit()
+
+    response = client.post("/api/decisions", json={
+        "account": "Инвестиционный (acc-1)",
+        "kind": "ACCEPTED_AS_IS",
+        "status": "CONFIRMED",
+        "effective_at": "2026-03-01T00:00:00Z",
+        "note": "   ",
+    })
+
+    assert response.status_code == 400
+    assert "Пояснение обязательно" in response.json()["detail"]
+
+
+def test_post_decision_for_unknown_account_returns_404(client, session):
+    """Подпись счёта, которой нет ни у одного счёта, обязана вернуть внятную
+    ошибку, а не 500 или молчаливое создание решения на случайном счёте."""
+    response = client.post("/api/decisions", json={
+        "account": "Не существует (acc-x)",
+        "kind": "ACCEPTED_AS_IS",
+        "status": "CONFIRMED",
+        "effective_at": "2026-03-01T00:00:00Z",
+        "note": "Проверка несуществующего счёта",
+    })
+
+    assert response.status_code == 404
+    assert "Не существует (acc-x)" in response.json()["detail"]
+
+
+def test_post_decision_for_unknown_isin_returns_404(client, session):
+    """ISIN, которого нет в справочнике бумаг, — та же ситуация: решение не
+    должно падать с чужой ошибкой или создаваться со сломанной ссылкой."""
+    from app.models import Account
+
+    session.add(Account(broker="tbank", kind="broker", external_id="acc-1",
+                        name="Инвестиционный", currency="RUB"))
+    session.commit()
+
+    response = client.post("/api/decisions", json={
+        "account": "Инвестиционный (acc-1)",
+        "kind": "ADJUSTMENT",
+        "status": "CONFIRMED",
+        "from_isin": "XX0000000000",
+        "from_quantity": "1",
+        "effective_at": "2026-03-01T00:00:00Z",
+        "note": "Проверка несуществующей бумаги",
+    })
+
+    assert response.status_code == 404
+    assert "XX0000000000" in response.json()["detail"]
+
+
+def test_revert_of_unknown_decision_returns_readable_error(client, session):
+    """Отмена решения, которого нет, обязана вернуть причину владельцу, а не
+    уронить запрос: сессия после неудачного вызова службы должна оставаться
+    пригодной для ответа клиенту."""
+    response = client.post("/api/decisions/999/revert", json={"note": "Отмена"})
+
+    assert response.status_code == 400
+    assert "999" in response.json()["detail"]
+    assert "не найдено" in response.json()["detail"]
+
+
+def test_reconciliation_suggestions_are_scoped_per_account(client, session):
+    """Гипотезы считаются по каждому счёту отдельно: совпадение величин на
+    чужом счёте не должно натекать в чужую строку расхождения."""
+    from decimal import Decimal
+
+    from app.models import Account, Reconciliation
+
+    account_a = Account(broker="tbank", kind="broker", external_id="acc-a",
+                        name="Счёт А", currency="RUB")
+    account_b = Account(broker="tbank", kind="broker", external_id="acc-b",
+                        name="Счёт Б", currency="RUB")
+    session.add_all([account_a, account_b])
+    session.flush()
+    session.add_all([
+        Reconciliation(account_id=account_a.id, isin="HK0000310034",
+                       ledger_quantity=Decimal("79"), broker_quantity=Decimal("0"),
+                       status="missing_at_broker"),
+        Reconciliation(account_id=account_a.id, isin="HK0000051877",
+                       ledger_quantity=Decimal("0"), broker_quantity=Decimal("79"),
+                       status="missing_in_ledger"),
+        # На счёте Б та же бумага и та же величина расхождения, но пары для
+        # неё на этом счёте нет — гипотеза со счёта А не должна на него натечь.
+        Reconciliation(account_id=account_b.id, isin="HK0000310034",
+                       ledger_quantity=Decimal("79"), broker_quantity=Decimal("0"),
+                       status="missing_at_broker"),
+    ])
+    session.commit()
+
+    rows = client.get("/api/reconciliations").json()
+
+    by_account_isin = {(row["account"], row["isin"]): row for row in rows}
+    assert by_account_isin[("Счёт А (acc-a)", "HK0000310034")]["suggestions"]
+    assert by_account_isin[("Счёт Б (acc-b)", "HK0000310034")]["suggestions"] == []

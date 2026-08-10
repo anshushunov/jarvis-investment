@@ -7,8 +7,16 @@ from sqlalchemy.orm import Session
 from app.accounts.cash import all_balances
 from app.accounts.labels import account_label, account_label_by_id
 from app.analytics.service import portfolio_overview, position_rows
-from app.api.schemas import CashOut, HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
+from app.api.schemas import (
+    CashOut,
+    HistoryPointOut,
+    OverviewOut,
+    PositionOut,
+    ReconciliationOut,
+    SuggestionOut,
+)
 from app.db import get_session
+from app.decisions.suggestions import suggestions_for_account
 from app.models import Account, DailySnapshot, Reconciliation
 from app.timeutils import moscow_today
 
@@ -100,6 +108,13 @@ def get_history(days: int = 90, session: Session = Depends(get_session)) -> list
 @router.get("/reconciliations", response_model=list[ReconciliationOut])
 def get_reconciliations(session: Session = Depends(get_session)) -> list[ReconciliationOut]:
     rows = session.execute(select(Reconciliation).order_by(Reconciliation.isin)).scalars().all()
+    # Гипотезы считаются по счёту целиком: пара ищется среди расхождений
+    # одного счёта, поэтому кэшируем результат на счёт, а не запрашиваем его
+    # для каждой строки.
+    by_account: dict[int, dict[str, list]] = {}
+    for account_id in {row.account_id for row in rows}:
+        by_account[account_id] = suggestions_for_account(session, account_id)
+
     return [
         ReconciliationOut(
             isin=row.isin, status=row.status,
@@ -108,6 +123,10 @@ def get_reconciliations(session: Session = Depends(get_session)) -> list[Reconci
             # может дать две строки на двух разных счетах, неразличимые без
             # подписи счёта (проверено на живых данных владельца).
             account=account_label_by_id(session, row.account_id),
+            suggestions=[
+                SuggestionOut(**suggestion.__dict__)
+                for suggestion in by_account[row.account_id].get(row.isin, [])
+            ],
         )
         for row in rows
     ]
