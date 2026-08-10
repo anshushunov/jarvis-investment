@@ -1,6 +1,11 @@
 from decimal import Decimal
 
-from app.accounts.cash import blocked_cash_by_account, cash_by_account, store_cash
+from app.accounts.cash import (
+    all_balances,
+    blocked_cash_by_account,
+    cash_by_account,
+    store_cash,
+)
 from app.connectors.base import BrokerCash
 from app.models import Account, CashBalance
 
@@ -55,6 +60,26 @@ def test_balances_of_other_accounts_are_untouched(session):
 
     assert [(b.account_id, b.currency) for b in session.query(CashBalance).all()] == [
         (second.id, "USD")
+    ]
+
+
+def test_all_balances_are_ordered_by_account_then_currency(session):
+    """Порядок — свойство ответа модуля, а не вкус экрана: он же задаёт порядок
+    строк в карточке остатков, и без него две синхронизации подряд могли бы
+    переставить строки местами без единого изменения в данных."""
+    first = add_account(session, external_id="acc-1")
+    second = add_account(session, external_id="acc-2")
+    # Второй счёт наполняется раньше первого: порядок задаётся запросом, а не
+    # порядком записи.
+    store_cash(session, second, [BrokerCash(currency="RUB", amount=Decimal("1"),
+                                            blocked=Decimal("0"))])
+    store_cash(session, first, [
+        BrokerCash(currency="USD", amount=Decimal("2"), blocked=Decimal("0")),
+        BrokerCash(currency="CNY", amount=Decimal("3"), blocked=Decimal("0")),
+    ])
+
+    assert [(b.account_id, b.currency) for b in all_balances(session)] == [
+        (first.id, "CNY"), (first.id, "USD"), (second.id, "RUB"),
     ]
 
 

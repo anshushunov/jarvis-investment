@@ -30,6 +30,20 @@ def store_cash(session: Session, account: Account, balances: list[BrokerCash]) -
     return len(balances)
 
 
+def all_balances(session: Session) -> list[CashBalance]:
+    """Все остатки в устойчивом порядке — счёт, затем валюта.
+
+    Читателю (обработчику `/api/portfolio/cash`) нужны строки как есть, а не
+    свёрнутые в словарь, — но ходить за ними самому он не должен: таблицей
+    владеет этот модуль, и запрос к ней живёт здесь же, рядом с правилом её
+    заполнения. Порядок задан здесь, а не у читателя: он свойство ответа, а не
+    вкус конкретного экрана.
+    """
+    return list(session.execute(
+        select(CashBalance).order_by(CashBalance.account_id, CashBalance.currency)
+    ).scalars().all())
+
+
 def cash_by_account(session: Session) -> dict[int, dict[str, Decimal]]:
     """Остатки всех счетов: идентификатор счёта → валюта → сумма."""
     result: dict[int, dict[str, Decimal]] = {}

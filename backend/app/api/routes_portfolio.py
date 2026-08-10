@@ -4,11 +4,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.accounts.cash import all_balances
 from app.accounts.labels import account_label, account_label_by_id
 from app.analytics.service import portfolio_overview, position_rows
 from app.api.schemas import CashOut, HistoryPointOut, OverviewOut, PositionOut, ReconciliationOut
 from app.db import get_session
-from app.models import Account, CashBalance, DailySnapshot, Reconciliation
+from app.models import Account, DailySnapshot, Reconciliation
 from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -66,9 +67,7 @@ def get_positions(session: Session = Depends(get_session)) -> list[PositionOut]:
 
 @router.get("/portfolio/cash", response_model=list[CashOut])
 def get_cash(session: Session = Depends(get_session)) -> list[CashOut]:
-    balances = session.execute(
-        select(CashBalance).order_by(CashBalance.account_id, CashBalance.currency)
-    ).scalars().all()
+    balances = all_balances(session)
     accounts = {
         account.id: account
         for account in session.execute(
