@@ -53,6 +53,24 @@ def test_repeated_run_updates_the_same_row(session):
     assert stored[0].close == Decimal("37.5000")
 
 
+def test_duplicate_isin_in_one_batch_is_merged(session):
+    """Одна бумага с двух площадок приходит в пачке дважды — тот же случай, что
+    уронил store_holdings на живых данных. Здесь уникальный ключ включает
+    источник, поэтому падения нет: вторая цена молча затирает первую, а
+    площадки различаются валютой, и в оценку уходит та, что оказалась в ответе
+    последней. Плюс возвращаемое число записей завышалось на каждый дубль."""
+    instrument = add_instrument(session, "RU0009029540")
+
+    written = store_broker_prices(session, [
+        BrokerPrice(isin="RU0009029540", price=Decimal("315.00"), currency="RUB"),
+        BrokerPrice(isin="RU0009029540", price=Decimal("3.50"), currency="USD"),
+    ], date(2026, 8, 9))
+
+    assert written == 1
+    stored = session.query(Price).filter(Price.instrument_id == instrument.id).one()
+    assert (stored.close, stored.currency) == (Decimal("315.0000"), "RUB")
+
+
 def test_broker_price_does_not_touch_exchange_price(session):
     """Две записи за один день от разных источников сосуществуют — выбор между
     ними делает чтение, а не порядок записи."""
