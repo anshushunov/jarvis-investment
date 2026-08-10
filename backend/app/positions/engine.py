@@ -164,10 +164,7 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
             continue
 
         if entry.quantity == 0:
-            # Сравнение через ==, а не is: op_type хранится строкой
-            # (String(24)), и после чтения из БД это `str`, а не OperationType.
-            # `is` тут молча ложно, и погашение переставало закрывать позицию.
-            if entry.op_type == OperationType.REDEMPTION:
+            if entry.op_type is OperationType.REDEMPTION:
                 _close_whole_position(lots, touched, realized, entry)
             continue
 
