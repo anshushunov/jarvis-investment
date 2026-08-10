@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.marketdata.fx import (
-    latest_rate_date,
+    latest_rate_dates,
     latest_rates,
     refresh_fx_rates,
     refresh_metal_rates,
@@ -67,22 +67,29 @@ def test_rouble_needs_no_stored_rate(session):
     assert latest_rates(session, date(2026, 8, 10))["RUB"] == Decimal("1")
 
 
-def test_latest_rate_date_is_none_when_no_rates(session):
-    assert latest_rate_date(session, date(2026, 8, 10)) is None
+def test_latest_rate_dates_are_empty_when_no_rates(session):
+    assert latest_rate_dates(session, date(2026, 8, 10)) == {}
 
 
-def test_latest_rate_date_is_the_freshest_on_or_before(session):
-    """Дата курсов — своя, отдельная от даты котировок: ЦБ публикует раз в
-    сутки, а по выходным не публикует вовсе, и «данные на» у курсов сдвинуто
-    назад относительно цен."""
+def test_latest_rate_dates_are_per_currency_and_not_from_the_future(session):
+    """Дата курса — своя у каждой валюты: ЦБ публикует раз в сутки и по
+    выходным не публикует вовсе, а золото идёт с MOEX и торгуется каждый день.
+    Одной датой на всю таблицу свежесть золота прикрывала бы несвежесть
+    доллара, поэтому читатель получает их порознь и выбирает сам."""
     session.add_all([
         FxRate(currency="USD", on_date=date(2026, 8, 6), rate=Decimal("80"), source="cbr"),
-        FxRate(currency="HKD", on_date=date(2026, 8, 8), rate=Decimal("10"), source="cbr"),
+        FxRate(currency="USD", on_date=date(2026, 8, 8), rate=Decimal("82"), source="cbr"),
         FxRate(currency="USD", on_date=date(2026, 8, 12), rate=Decimal("85"), source="cbr"),
+        FxRate(currency="HKD", on_date=date(2026, 8, 6), rate=Decimal("10"), source="cbr"),
+        FxRate(currency="XAU", on_date=date(2026, 8, 10), rate=Decimal("11410"), source="moex"),
     ])
     session.flush()
 
-    assert latest_rate_date(session, date(2026, 8, 10)) == date(2026, 8, 8)
+    assert latest_rate_dates(session, date(2026, 8, 10)) == {
+        "USD": date(2026, 8, 8),
+        "HKD": date(2026, 8, 6),
+        "XAU": date(2026, 8, 10),
+    }
 
 
 def test_to_base_returns_none_for_unknown_currency(session):

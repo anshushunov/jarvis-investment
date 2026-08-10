@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.accounts.cash import blocked_cash_by_account, cash_by_account
 from app.analytics.valuation import value_position
 from app.instruments import kinds
-from app.marketdata.fx import latest_rate_date, latest_rates, to_base
+from app.marketdata.fx import latest_rate_dates, latest_rates, to_base
 from app.marketdata.service import latest_prices
 from app.models import Account, Instrument, Position
 from app.money import BASE_CURRENCY, money
@@ -112,10 +112,19 @@ class Overview:
     # by_currency ответить не может: позиция без котировки в него не попадает
     # вовсе, а валютой при этом обладает.
     position_currencies: list[str]
+    # Валюты, которые в пересчёт не попали, потому что курса к рублю на дату
+    # нет. Не то же самое, что «валюты портфеля минус посчитанные»: у позиции
+    # без котировки курс не спрашивается вовсе, и её валюта сюда не попадает —
+    # причина у неё другая. Пустая таблица курсов и нехватка одной строки в ней
+    # дают здесь одинаково честный ответ: без него остаток в серебре исчезал из
+    # капитала молча, а покрытие по позициям об этом не сообщало ничего.
+    currencies_without_rate: list[str]
     as_of: date | None
     # Дата курсов, по которым сделан пересчёт. Отдельно от as_of: котировки
     # обновляются каждые пятнадцать минут, курсы — раз в сутки, и несвежесть у
-    # них разная.
+    # них разная. Это самый старый из использованных курсов, а не самый свежий
+    # из имеющихся: вопрос стоит «насколько несвежи курсы, по которым посчитана
+    # эта цифра».
     fx_as_of: date | None
     # Покрытие оценкой: сколько позиций удалось оценить из скольких всего.
     # Без этой пары главная цифра дашборда может быть посчитана по четверти
@@ -218,6 +227,13 @@ def portfolio_overview(session: Session) -> Overview:
     by_account_id: dict[int, Decimal] = {}
     by_currency: dict[str, Decimal] = {}
     position_currencies: set[str] = set()
+    # Валюты, курс которых реально участвовал в пересчёте, и валюты, у которых
+    # его не нашлось. Первые задают дату «курсы на», вторые — предупреждение о
+    # непосчитанной части капитала. Обе собираются по ходу, а не выводятся
+    # потом из таблиц: только здесь видно, какой курс какой суммой был спрошен.
+    rate_dates = latest_rate_dates(session, today)
+    converted_currencies: set[str] = set()
+    missing_rates: set[str] = set()
     securities = money("0")
     restricted_value = money("0")
     as_of: date | None = None
@@ -243,8 +259,15 @@ def portfolio_overview(session: Session) -> Overview:
             # Неоценённая позиция не попадает ни в итог, ни в разбивки — но
             # молча выпасть из ответа она не должна: её считает positions_total,
             # и дашборд обязан показать, что оценены не все.
+            if valued.value is not None and valued.currency:
+                # Цена есть, а курса нет — причина именно в курсе, и её надо
+                # назвать. У позиции без котировки курс не спрашивался вовсе,
+                # записывать её валюту сюда значило бы обвинить не то.
+                missing_rates.add(valued.currency.upper())
             continue
 
+        if valued.currency:
+            converted_currencies.add(valued.currency.upper())
         valued_positions += 1
         securities = money(securities + valued.value_base)
 
@@ -305,8 +328,12 @@ def portfolio_overview(session: Session) -> Overview:
             in_base = to_base(amount, currency, rates)
             if in_base is None:
                 # Курса нет — в рублёвый капитал и рублёвые разбивки остаток
-                # войти не может.
+                # войти не может, и валюта обязана быть названа: иначе грамм
+                # серебра или золота исчезает из капитала, не оставив следа ни
+                # в одной цифре на экране (покрытие считает только позиции).
+                missing_rates.add(currency.upper())
                 continue
+            converted_currencies.add(currency.upper())
             cash_total = money(cash_total + in_base)
             klass = cash_asset_class(currency)
             by_class[klass] = money(by_class.get(klass, money("0")) + in_base)
@@ -323,12 +350,23 @@ def portfolio_overview(session: Session) -> Overview:
         by_account=dict(sorted(by_account_id.items())),
         by_currency=dict(sorted(by_currency.items())),
         position_currencies=sorted(position_currencies),
+        currencies_without_rate=sorted(missing_rates),
         # Самая поздняя дата котировки, а не самая ранняя: вопрос, на который
         # она отвечает, — «когда последний раз обновлялись цены». Честность
         # главной цифры обеспечивается признаком покрытия рядом
         # (valued_positions/positions_total), а не сдвигом даты назад.
         as_of=as_of,
-        fx_as_of=latest_rate_date(session, today),
+        # А вот у курсов — наоборот, самая ранняя из использованных: вопрос
+        # другой, «насколько несвежи курсы, по которым посчитана эта цифра».
+        # Максимум по всей таблице отвечал на него неверно — золото с MOEX
+        # обновляется ежедневно, и его сегодняшняя дата прикрывала бы курсы ЦБ
+        # недельной давности, по которым посчитаны доллары, юани и гонконгские
+        # доллары. Рубль в расчёт не идёт: у него нет курса и нечему устареть,
+        # и у чисто рублёвого портфеля дата курсов пустая — их там не было.
+        fx_as_of=min(
+            (rate_dates[currency] for currency in converted_currencies if currency in rate_dates),
+            default=None,
+        ),
         valued_positions=valued_positions,
         positions_total=positions_total,
     )

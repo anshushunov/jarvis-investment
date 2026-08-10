@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coverageWarning, foreignCurrencies } from "./coverage";
+import { coverageWarning } from "./coverage";
 import type { Overview } from "./client";
 
 function overview(fields: Partial<Overview> = {}): Overview {
@@ -12,6 +12,7 @@ function overview(fields: Partial<Overview> = {}): Overview {
     by_account: {},
     by_currency: { RUB: "1000.0000" },
     position_currencies: ["RUB"],
+    currencies_without_rate: [],
     as_of: "2026-08-10",
     fx_as_of: "2026-08-10",
     valued_positions: 10,
@@ -39,8 +40,7 @@ describe("coverageWarning", () => {
     const warning = coverageWarning(overview({
       fx_as_of: null,
       valued_positions: 4,
-      position_currencies: ["RUB", "USD", "HKD"],
-      by_currency: { RUB: "1000.0000", USD: "500.0000", XAU: "10.00000000" },
+      currencies_without_rate: ["HKD", "USD", "XAU"],
     }));
 
     expect(warning).toEqual({
@@ -50,34 +50,18 @@ describe("coverageWarning", () => {
 
   it("не жалуется на курсы рублёвому портфелю", () => {
     // Курсы такому портфелю не нужны, и пустая таблица курсов на его итог не
-    // влияет — предупреждать не о чем.
+    // влияет — предупреждать не о чем. Пустая дата курсов сама по себе поводом
+    // не является: у чисто рублёвого портфеля не было ни одного пересчёта.
     expect(coverageWarning(overview({ fx_as_of: null }))).toBeNull();
   });
 
-  it("считает валютную часть непосчитанной и тогда, когда все позиции оценены", () => {
-    // Позиций в иностранной валюте может не быть вовсе, а денежный остаток и
-    // золото — быть. Без курса они выпадают из капитала так же молча.
+  it("предупреждает о единственной выпавшей валюте при остальных курсах на месте", () => {
+    // Таблица курсов полна, дата свежая, все позиции оценены — и при этом
+    // грамм серебра выпадает из капитала, потому что XAG в ней нет. Пока
+    // предупреждение цеплялось за пустую дату курсов, такой остаток исчезал
+    // молча: покрытие считает только позиции и об остатках не знает.
     expect(coverageWarning(overview({
-      fx_as_of: null,
-      by_currency: { RUB: "1000.0000", XAU: "10.00000000" },
-    }))).toEqual({ kind: "rates", currencies: ["XAU"], valued: 10, total: 10 });
-  });
-});
-
-describe("foreignCurrencies", () => {
-  it("сводит валюты бумаг и остатков, отбрасывая рубль", () => {
-    expect(foreignCurrencies(overview({
-      position_currencies: ["RUB", "USD"],
-      by_currency: { RUB: "1", USD: "2", CNY: "3" },
-    }))).toEqual(["CNY", "USD"]);
-  });
-
-  it("не теряет валюту позиции, которую не удалось оценить", () => {
-    // Неоценённая позиция в by_currency не попадает вовсе, но валютой обладает
-    // — и именно про неё предупреждение.
-    expect(foreignCurrencies(overview({
-      position_currencies: ["RUB", "HKD"],
-      by_currency: { RUB: "1" },
-    }))).toEqual(["HKD"]);
+      currencies_without_rate: ["XAG"],
+    }))).toEqual({ kind: "rates", currencies: ["XAG"], valued: 10, total: 10 });
   });
 });

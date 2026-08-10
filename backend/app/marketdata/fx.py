@@ -62,12 +62,28 @@ def latest_rates(session: Session, on_date: date) -> dict[str, Decimal]:
     return result
 
 
-def latest_rate_date(session: Session, on_date: date) -> date | None:
-    """Дата самых свежих курсов не позже указанной. Нужна интерфейсу: у
-    котировок и курсов разная частота обновления, и «данные на» у них разное."""
-    return session.execute(
-        select(func.max(FxRate.on_date)).where(FxRate.on_date <= on_date)
-    ).scalar_one_or_none()
+def latest_rate_dates(session: Session, on_date: date) -> dict[str, date]:
+    """Дата самого свежего курса не позже указанной — по каждой валюте отдельно.
+
+    По валюте, а не одним максимумом на всю таблицу: источники у курсов разные и
+    обновляются они порознь. Золото приходит с MOEX и торгуется каждый день,
+    курсы ЦБ по выходным не публикуются вовсе — общий максимум показывал бы
+    сегодняшнее золото и молчал о том, что доллар в расчёте недельной давности.
+    Какая из дат попадёт в «курсы на», решает читатель: она зависит от того,
+    какие валюты участвовали в конкретном расчёте (см. portfolio_overview).
+    """
+    ranked = select(
+        FxRate.currency,
+        FxRate.on_date,
+        func.row_number().over(
+            partition_by=FxRate.currency, order_by=FxRate.on_date.desc()
+        ).label("rn"),
+    ).where(FxRate.on_date <= on_date).subquery()
+
+    rows = session.execute(
+        select(ranked.c.currency, ranked.c.on_date).where(ranked.c.rn == 1)
+    ).all()
+    return {currency.upper(): rate_date for currency, rate_date in rows}
 
 
 MOEX_SOURCE = "moex"

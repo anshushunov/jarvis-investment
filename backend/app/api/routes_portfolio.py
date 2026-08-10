@@ -38,6 +38,7 @@ def get_overview(session: Session = Depends(get_session)) -> OverviewOut:
         },
         by_currency=overview.by_currency,
         position_currencies=overview.position_currencies,
+        currencies_without_rate=overview.currencies_without_rate,
         as_of=overview.as_of,
         fx_as_of=overview.fx_as_of,
         valued_positions=overview.valued_positions,

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -85,14 +85,19 @@ def add_priced_position(
     return instrument
 
 
-def add_rate(session, currency: str, rate: Decimal, source: str = "cbr") -> FxRate:
+def add_rate(session, currency: str, rate: Decimal, source: str = "cbr",
+             days_ago: int = 0) -> FxRate:
     """Курс к рублю на сегодняшнюю московскую дату.
 
     Именно на сегодняшнюю: оценка спрашивает курсы на `moscow_today()`, и курс
     под фиксированной датой из прошлого она бы нашла, а под датой из будущего —
     уже нет. Привязка к «сегодня» делает тест независимым от дня запуска.
+
+    `days_ago` сдвигает дату назад — там, где проверяется именно несвежесть
+    курса, а не сам факт его наличия.
     """
-    stored = FxRate(currency=currency, on_date=moscow_today(), rate=rate, source=source)
+    stored = FxRate(currency=currency, on_date=moscow_today() - timedelta(days=days_ago),
+                    rate=rate, source=source)
     session.add(stored)
     session.flush()
     return stored
@@ -841,3 +846,90 @@ def test_fx_as_of_is_none_without_rates(session):
     seed(session)
 
     assert portfolio_overview(session).fx_as_of is None
+
+
+def test_fx_as_of_is_the_oldest_rate_that_took_part_in_the_calculation(session):
+    """Живой случай: золото котируется на MOEX ежедневно и курс у него
+    сегодняшний, а все полсотни курсов ЦБ — двухдневной давности. Максимум по
+    таблице подписывал бы дашборд сегодняшним числом, хотя доллары и юани
+    посчитаны по позавчерашним курсам. Отвались ЦБ на неделю — подпись
+    оставалась бы свежей, потому что золото продолжает обновляться."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    store_cash(session, account, [BrokerCash(currency="XAU", amount=Decimal("10"),
+                                             blocked=Decimal("0"))])
+    add_rate(session, "XAU", Decimal("11410"), source="moex")
+    add_rate(session, "HKD", Decimal("10.4724"), days_ago=2)
+
+    overview = portfolio_overview(session)
+
+    assert overview.fx_as_of == moscow_today() - timedelta(days=2)
+
+
+def test_fx_as_of_ignores_currencies_the_portfolio_does_not_use(session):
+    """Курсы грузятся все подряд, а не только по валютам портфеля (см.
+    refresh_fx_rates), и среди полусотни строк всегда найдётся валюта, которую
+    ЦБ давно не обновлял. Тянуть дату назад из-за курса, который в расчёте не
+    участвовал, — врать в другую сторону."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
+                        price=Decimal("36.90"), currency="HKD")
+    add_rate(session, "HKD", Decimal("10.4724"))
+    add_rate(session, "AMD", Decimal("0.21"), days_ago=30)
+
+    assert portfolio_overview(session).fx_as_of == moscow_today()
+
+
+def test_ruble_only_portfolio_reports_no_rate_date(session):
+    """Рубль к рублю — единица, она не хранится и устареть не может. Ни одного
+    курса в расчёт не пошло, значит и подписывать нечего: «курсы на 8 августа»
+    у рублёвого портфеля описывало бы данные, которых он не касался."""
+    seed(session)
+    add_rate(session, "USD", Decimal("82.1665"), days_ago=5)
+
+    assert portfolio_overview(session).fx_as_of is None
+
+
+def test_metal_without_a_rate_is_named_among_uncounted_currencies(session):
+    """Серебро, платина и палладий известны разбивке по классам активов, но в
+    METAL_SECIDS есть только золото — курса серебру взять неоткуда, и остаток
+    в нём выпадает из капитала всегда. Покрытие считает одни позиции и об этом
+    молчит: без отдельного признака сто тысяч рублей исчезают, а цифра рядом
+    выглядит уверенно."""
+    account = add_account(session)
+    store_cash(session, account, [
+        BrokerCash(currency="RUB", amount=Decimal("1000"), blocked=Decimal("0")),
+        BrokerCash(currency="XAG", amount=Decimal("500"), blocked=Decimal("0")),
+    ])
+
+    overview = portfolio_overview(session)
+
+    assert overview.currencies_without_rate == ["XAG"]
+    assert overview.total_value == Decimal("1000.0000")
+    # Покрытие по позициям на это никак не реагирует — потому признак и нужен.
+    assert (overview.valued_positions, overview.positions_total) == (0, 0)
+
+
+def test_position_without_a_quote_does_not_blame_the_rates(session):
+    """У бумаги без котировки курс не спрашивается вовсе: оценивать нечего.
+    Записать её валюту в «нет курса» значило бы назвать причину, которой нет, и
+    отправить владельца чинить не то."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=None, currency="USD")
+
+    overview = portfolio_overview(session)
+
+    assert overview.currencies_without_rate == []
+    assert (overview.valued_positions, overview.positions_total) == (0, 1)
+
+
+def test_priced_position_without_a_rate_names_its_currency(session):
+    """А вот когда цена есть, а курса нет — причина именно в курсе, и её надо
+    назвать поимённо: «цены есть только для N позиций» тут врёт."""
+    account = add_account(session)
+    add_priced_position(session, account, isin="US0378331005", quantity=Decimal("10"),
+                        price=Decimal("200"), currency="USD")
+
+    assert portfolio_overview(session).currencies_without_rate == ["USD"]
