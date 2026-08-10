@@ -1,7 +1,7 @@
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models import Account, Position, Transaction
+from app.models import DECISION_PAYLOAD_KEY, Account, Position, Transaction
 from app.positions.engine import LedgerEntry, fold
 
 
@@ -20,8 +20,9 @@ def _entries(session: Session, account: Account) -> list[LedgerEntry]:
             fee=tx.fee,
             # Идентификатор решения владельца: связывает две стороны
             # конвертации. Лежит в payload, потому что колонка ради доли
-            # процента записей журнала не окупается.
-            link_id=(tx.payload or {}).get("decision_id"),
+            # процента записей журнала не окупается. Ключ — общая константа со
+            # службой решений, которая его туда кладёт.
+            link_id=(tx.payload or {}).get(DECISION_PAYLOAD_KEY),
         )
         for tx in transactions
     ]

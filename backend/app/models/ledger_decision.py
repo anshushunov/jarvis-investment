@@ -9,6 +9,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
 
+# Ключ, под которым идентификатор решения лежит в payload порождённой записи
+# журнала. Константа общая для двух модулей: служба решений кладёт значение
+# (app/decisions/service.py), сборщик позиций достаёт его в LedgerEntry.link_id
+# (app/positions/service.py). Продублированная строка молча разъехалась бы при
+# первом переименовании, и конвертация упала бы с «нет link_id» — ошибкой, не
+# указывающей на настоящую причину.
+DECISION_PAYLOAD_KEY = "decision_id"
+
+
 class DecisionKind(StrEnum):
     # Корпоративное действие: одна бумага превратилась в другую.
     CONVERSION = "CONVERSION"

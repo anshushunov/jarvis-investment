@@ -155,6 +155,32 @@ def test_two_conversions_at_the_same_instant_do_not_mix():
     assert result.positions[4].lots[0].price == Decimal("5")
 
 
+def test_reverting_conversion_at_the_same_instant_runs_after_the_one_it_reverts():
+    """Отмена решения несёт ту же дату события, что и отменяемая конвертация.
+
+    Общий порядок «сначала все OUT одного мгновения, потом все IN» снимал бы
+    бумагу у зеркальной стороны раньше, чем исходная её зачислит: конвертация
+    падала бы с «списывает больше, чем открыто». Решения разбираются по одному
+    целиком, в порядке link_id, поэтому партия проходит круг и возвращается той
+    же — с прежней ценой и прежней датой открытия.
+    """
+    result = fold([
+        _buy(OLD, "79", "120", day=1),
+        _out("79", link_id=1), _in("79", link_id=1),
+        LedgerEntry(op_type=OperationType.CONVERSION_OUT, executed_at=WHEN,
+                    instrument_id=NEW, quantity=Decimal("79"), price=Decimal("0"),
+                    amount=Decimal("0"), fee=Decimal("0"), link_id=2),
+        LedgerEntry(op_type=OperationType.CONVERSION_IN, executed_at=WHEN,
+                    instrument_id=OLD, quantity=Decimal("79"), price=Decimal("0"),
+                    amount=Decimal("0"), fee=Decimal("0"), link_id=2),
+    ])
+
+    assert result.positions[NEW].quantity == 0
+    assert result.positions[OLD].quantity == Decimal("79")
+    assert result.positions[OLD].lots[0].opened_at.day == 1
+    assert result.positions[OLD].lots[0].price == Decimal("120")
+
+
 def test_conversion_into_an_existing_position_keeps_fifo_order():
     """Целевая бумага уже лежит в портфеле — перенесённая партия старше её.
 

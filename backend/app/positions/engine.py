@@ -299,6 +299,15 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
     # возникало мнимого разворота позиции. CONVERSION_OUT строго раньше
     # CONVERSION_IN: иначе карман пуст и себестоимость теряется. IN идёт
     # последним, потому что снятые партии должны быть уже в кармане.
+    #
+    # Решения владельца одного мгновения разбираются по одному целиком, в
+    # порядке возрастания link_id (идентификатора решения, а он растёт вместе с
+    # порядком, в котором владелец решения принимал). Общий порядок «сначала все
+    # OUT, потом все IN» ломался на отмене: зеркальное решение несёт ту же дату
+    # события, и его CONVERSION_OUT снимал бы бумагу раньше, чем CONVERSION_IN
+    # отменяемого решения её зачислил, — конвертация падала бы с «списывает
+    # больше, чем открыто». Записи без решения (link_id None) идут первыми: они
+    # и раньше стояли перед конвертациями по приоритету.
     def sort_key(entry):
         if entry.op_type in INCREASING:
             priority = 0
@@ -308,7 +317,7 @@ def fold(entries: list[LedgerEntry], currency: str = "RUB") -> FoldResult:
             priority = 3
         else:
             priority = 1
-        return (entry.executed_at, priority)
+        return (entry.executed_at, entry.link_id or 0, priority)
 
     for entry in sorted(entries, key=sort_key):
         cash[currency] = money(cash[currency] + entry.amount - entry.fee)
