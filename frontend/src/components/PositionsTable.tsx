@@ -1,4 +1,4 @@
-import { formatMoney, formatQuantity } from "../api/format";
+import { BASE_CURRENCY, formatMoney, formatQuantity } from "../api/format";
 import { ChangeValue } from "./MoneyValue";
 import type { PositionRow } from "../api/client";
 
@@ -25,6 +25,41 @@ function RestrictedMark({ restricted, blocked }: { restricted: boolean; blocked:
     : `Заблокировано брокером: ${formatQuantity(blocked)} шт.`;
 
   return <span title={title} style={{ color: "var(--amber)", marginLeft: 4 }}>🔒</span>;
+}
+
+// Рублёвая оценка строки — та самая величина, которой позиция входит в
+// совокупный капитал. Без неё позиция с ценой, но без курса показывала
+// уверенное «1 000 $» и в капитал не попадала вовсе, а единственное
+// предупреждение на экране называло причиной нехватку котировок — то есть не
+// ту причину.
+function BaseValue({ currency, marketValue, valueBase }: {
+  currency: string;
+  marketValue: string | null;
+  valueBase: string | null;
+}) {
+  // Котировки нет — прочерк строкой выше уже всё сказал, и рублёвой оценки
+  // взяться неоткуда по той же причине. Второй раз о том же не сообщаем.
+  if (marketValue === null) return null;
+
+  if (valueBase === null) {
+    return (
+      <div
+        title={`Нет курса ${currency} к рублю: позиция не входит в совокупный капитал`}
+        style={{ color: "var(--amber)", fontSize: 11.5 }}
+      >
+        нет курса
+      </div>
+    );
+  }
+
+  // Рубли в рублях — тот же самый ряд цифр во второй раз.
+  if (currency.toUpperCase() === BASE_CURRENCY) return null;
+
+  return (
+    <div style={{ color: "var(--tx-2)", fontSize: 11.5 }}>
+      {formatMoney(valueBase, BASE_CURRENCY)}
+    </div>
+  );
 }
 
 export function PositionsTable({ rows, error, loading }: {
@@ -107,7 +142,17 @@ export function PositionsTable({ rows, error, loading }: {
                 {formatMoney(row.last_price, row.currency)}
                 <PriceSourceMark source={row.price_source} />
               </td>
-              <td>{formatMoney(row.market_value, row.currency)}</td>
+              {/* Стоимость в валюте строки, а под ней — в рублях: капитал
+                  считается в рублях, и строка без рублёвой оценки обязана
+                  отличаться от строки с ней. */}
+              <td>
+                {formatMoney(row.market_value, row.currency)}
+                <BaseValue
+                  currency={row.currency}
+                  marketValue={row.market_value}
+                  valueBase={row.value_base}
+                />
+              </td>
               <td><ChangeValue percent={row.profit_percent} /></td>
             </tr>
           ))}
