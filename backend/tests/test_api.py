@@ -195,6 +195,20 @@ def test_overview_exposes_capital_parts(client, session):
     assert body["restricted_value"] == "0.0000"
 
 
+def test_overview_names_currencies_left_out_of_the_total(client, session):
+    """Валюта без курса выпадает из капитала, и контракт обязан её назвать:
+    покрытие оценкой считает одни позиции, а денежный остаток в такой валюте
+    исчезал бы, не отразившись ни в одной цифре ответа."""
+    account, _ = seed(session)
+    session.add(CashBalance(account_id=account.id, currency="XAG",
+                            amount=Decimal("500"), blocked=Decimal("0")))
+    session.flush()
+
+    body = client.get("/api/portfolio/overview").json()
+
+    assert body["currencies_without_rate"] == ["XAG"]
+
+
 def test_positions_expose_price_source_and_blocked(client, session):
     """Оценка по цене брокера не независима, и это должно быть видно на экране,
     а не только в базе."""
@@ -206,6 +220,9 @@ def test_positions_expose_price_source_and_blocked(client, session):
     assert "blocked" in body[0]
     assert "restricted" in body[0]
     assert "value_base" in body[0]
+    # Валюта средней цены — своя: у замещающей облигации она рублёвая при
+    # валютной котировке, и подписать среднюю валютой строки значит соврать.
+    assert "average_price_currency" in body[0]
 
 
 def test_cash_endpoint_lists_balances_per_account_and_currency(client, session):
