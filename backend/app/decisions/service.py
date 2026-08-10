@@ -21,7 +21,7 @@ from app.models import (
 )
 from app.models.ledger_decision import DecisionKind, DecisionStatus
 from app.money import money, quantity as q
-from app.positions.engine import ConversionError, ReversalError
+from app.positions.engine import DECREASING, ConversionError, ReversalError
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_from_snapshot
 
@@ -246,16 +246,27 @@ def _blocking_decisions(session: Session, original: LedgerDecision) -> list[Ledg
     return blocking
 
 
-def _operations_after(session: Session, original: LedgerDecision) -> list[Transaction]:
-    """Операции брокера по зачисленной решением бумаге после даты события.
+def _spending_operations_after(
+    session: Session, original: LedgerDecision
+) -> list[Transaction]:
+    """Операции брокера, расходующие зачисленную решением бумагу после даты события.
 
     Отмена убирает партии, которые решение открыло. Если после этой даты бумагу
-    успели продать, история становится противоречивой: по отменённой версии
-    событий этих бумаг не существовало вовсе. Промолчать нельзя, и упасть уже
-    некуда — движок такого не заметит: зеркальные записи несут дату отменяемого
-    решения и ложатся в журнал раньше позднейшей продажи. На живом разборе
-    выходило, что реальная продажа 40 бумаг на 8000 исчезала из налоговой базы,
-    а в портфеле оставалась короткая позиция, которой нет у брокера.
+    успели израсходовать, история становится противоречивой: по отменённой
+    версии событий этих бумаг не существовало вовсе. Промолчать нельзя, и упасть
+    уже некуда — движок такого не заметит: зеркальные записи несут дату
+    отменяемого решения и ложатся в журнал раньше позднейшей продажи. На живом
+    разборе выходило, что реальная продажа 40 бумаг на 8000 исчезала из
+    налоговой базы, а в портфеле оставалась короткая позиция, которой нет у
+    брокера.
+
+    Считаются только операции, уменьшающие количество: продажа, погашение,
+    вывод бумаг и отрицательная поправка. Покупка, дивиденд, купон, комиссия и
+    налог партий не трогают и отмене не мешают — сначала здесь стояла проверка
+    на любую операцию, и очередной дивиденд по бумаге делал уже записанную
+    конвертацию неотменяемой навсегда. Направление берётся из тех же множеств,
+    что и в движке (DECREASING и знак количества у поправки), чтобы правило не
+    разошлось с ним при следующем изменении.
 
     Записи, порождённые решениями, здесь не считаются: их разбирает
     _blocking_decisions, а погасившая себя пара «решение и его отмена» следа в
@@ -275,6 +286,13 @@ def _operations_after(session: Session, original: LedgerDecision) -> list[Transa
             Transaction.instrument_id == original.to_instrument_id,
             Transaction.executed_at > original.effective_at,
             Transaction.source != SOURCE,
+            or_(
+                Transaction.op_type.in_(DECREASING),
+                and_(
+                    Transaction.op_type == OperationType.ADJUSTMENT,
+                    Transaction.quantity < 0,
+                ),
+            ),
         )
         .order_by(Transaction.executed_at)
     )
@@ -310,22 +328,33 @@ def revert_decision(session: Session, decision_id: int, note: str) -> LedgerDeci
         )
 
     blocking = _blocking_decisions(session, original)
+    # Действующие решения и погашенные разделены: отменить сначала действующее
+    # — совет верный и выполнимый, а погашенному он уже не поможет.
+    active = [decision for decision in blocking if decision.status is not DecisionStatus.REVERTED]
+    if active:
+        numbers = ", ".join(str(decision.id) for decision in active)
+        raise DecisionError(
+            f"Поверх решения {original.id} лежат более поздние решения по тем же "
+            f"бумагам ({numbers}): их записи стоят в журнале на своих, более "
+            "поздних датах и считаются по книге партий, которую это решение "
+            "оставило. Отмените сначала их."
+        )
     if blocking:
         numbers = ", ".join(str(decision.id) for decision in blocking)
         raise DecisionError(
-            f"Поверх решения {original.id} лежат более поздние решения по тем же "
-            f"бумагам ({numbers}): они опираются на бумаги, которые оно "
-            "зачислило, и отмена вырвала бы у них опору. Пока эти записи в "
-            "журнале, отменить это решение нельзя — приведите позиции новым "
-            "решением."
+            f"Решение {original.id} отменить уже нельзя: решение {numbers} "
+            "черпало бумагу, которую оно зачислило. Отмена того решения погасила "
+            "его действие, но записи остались в журнале на своей, более поздней "
+            "дате и по-прежнему требуют эти бумаги в книге. Приведите позиции "
+            "новым решением."
         )
 
-    traded = _operations_after(session, original)
-    if traded:
+    spent = _spending_operations_after(session, original)
+    if spent:
         raise DecisionError(
-            f"После даты решения {original.id} по зачисленной им бумаге были "
-            f"операции ({len(traded)}), самая ранняя — "
-            f"{traded[0].op_type.value} от {traded[0].executed_at:%d.%m.%Y}. "
+            f"После даты решения {original.id} зачисленную им бумагу расходовали: "
+            f"{spent[0].op_type.value} от {spent[0].executed_at:%d.%m.%Y}"
+            f"{f' и ещё {len(spent) - 1} раз' if len(spent) > 1 else ''}. "
             "Отмена убрала бы бумаги, которых по её версии событий не было бы "
             "вовсе: финансовый результат этих операций исчез бы из налоговой "
             "базы, а в портфеле осталась бы короткая позиция, которой нет у "

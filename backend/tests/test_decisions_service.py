@@ -58,6 +58,18 @@ def _sell(session, account, isin: str, quantity: str, price: str, when: datetime
     )])
 
 
+def _dividend(session, account, isin: str, amount: str, when: datetime,
+              external_id: str = "d1") -> None:
+    from app.ledger.schemas import RawOperation
+    from app.ledger.service import append_operations
+
+    append_operations(session, account, "tbank", [RawOperation(
+        external_id=external_id, op_type="DIVIDEND", executed_at=when,
+        isin=isin, ticker=isin[:4], quantity=Decimal("0"), price=Decimal("0"),
+        amount=Decimal(amount), currency="RUB", fee=Decimal("0"), payload={},
+    )])
+
+
 def _book(session, account) -> dict[int, list[tuple]]:
     """Книга открытых партий счёта: количество, цена, дата открытия и признак
     известной себестоимости по каждой партии.
@@ -393,10 +405,58 @@ def test_revert_is_refused_when_the_paper_was_traded_afterwards(session):
     _sell(session, account, "HK0000051877", "40", "200",
           datetime(2026, 4, 1, tzinfo=timezone.utc))
 
-    with pytest.raises(DecisionError, match="были операции"):
+    with pytest.raises(DecisionError, match="бумагу расходовали"):
         revert_decision(session, decision.id, note="Ошибся бумагой")
 
     assert session.get(LedgerDecision, decision.id).status is DecisionStatus.CONFIRMED
+
+
+def test_later_dividend_and_purchase_do_not_block_the_revert(session):
+    """Дивиденд и докупка по зачисленной бумаге отмене не мешают.
+
+    Партий, которые отмена собирается убрать, они не трогают. Проверка сначала
+    смотрела на любую операцию, и очередной дивиденд, приехавший синхронизацией,
+    делал уже записанную конвертацию неотменяемой навсегда — а отказ при этом
+    советовал приводить позиции новым решением, хотя ничего не случилось.
+    """
+    from app.decisions.service import record_decision, revert_decision
+    from app.models import Position
+    from sqlalchemy import select
+
+    account = _account(session)
+    old = _instrument(session, "HK0000310034")
+    new = _instrument(session, "HK0000051877")
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    decision = record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=old.id, from_quantity=Decimal("79"),
+        to_instrument_id=new.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Конвертация", proposed={},
+    ))
+    _dividend(session, account, "HK0000051877", "500",
+              datetime(2026, 3, 15, tzinfo=timezone.utc))
+    _buy(session, account, "HK0000051877", "10", "200",
+         datetime(2026, 4, 1, tzinfo=timezone.utc), external_id="2")
+
+    revert_decision(session, decision.id, note="Ошибся бумагой")
+
+    positions = {
+        p.instrument_id: p.quantity
+        for p in session.execute(select(Position)).scalars()
+    }
+    assert positions == {old.id: Decimal("79"), new.id: Decimal("10")}
+    # Возвращённая партия своя, докупленная — своя: ни та, ни другая не съедена.
+    assert _book(session, account) == {
+        old.id: [(Decimal("79"), Decimal("120"),
+                  datetime(2024, 5, 1, tzinfo=timezone.utc), True)],
+        new.id: [(Decimal("10"), Decimal("200"),
+                  datetime(2026, 4, 1, tzinfo=timezone.utc), True)],
+    }
 
 
 def test_split_recorded_as_conversion_into_the_same_paper_is_revertable(session):
@@ -669,7 +729,7 @@ def test_a_dependent_later_decision_keeps_blocking_after_its_own_revert(session)
 
     revert_decision(session, dependent.id, note="Вторая была ошибкой")
 
-    with pytest.raises(DecisionError, match=f"\\({dependent.id}\\)"):
+    with pytest.raises(DecisionError, match=f"решение {dependent.id} черпало бумагу"):
         revert_decision(session, earlier.id, note="И первая тоже")
 
     assert session.get(LedgerDecision, earlier.id).status is DecisionStatus.CONFIRMED
