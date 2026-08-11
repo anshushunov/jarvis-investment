@@ -13,12 +13,13 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.ledger.schemas import RawOperation
 from app.ledger.service import append_operations
 from app.models import Account, OperationType, Position, Transaction
 from app.positions.service import rebuild_positions
+from conftest import raw_operation
 
 
 def _account(session) -> Account:
@@ -106,7 +107,7 @@ def test_changed_price_alone_produces_a_correcting_entry(session):
     """Брокер уточнил задним числом только цену исполнения — количество и сумма
     те же. Цена не складывается по записям операции, как количество и сумма,
     поэтому сравнивается отдельно: без этого правка проходила бы мимо
-    _find_changed как «не изменилось», падала в to_insert со старым
+    _changed_against как «не изменилось», падала в to_insert со старым
     external_id и тихо гасилась построчным запасным путём без единой записи
     в лог — старая цена (а с ней и неверная себестоимость партии в движке
     позиций) оставалась бы в журнале навсегда."""
@@ -280,3 +281,44 @@ def test_corrected_sell_is_not_corrected_again_on_the_next_sync(session):
         select(Transaction).where(Transaction.op_type == OperationType.ADJUSTMENT)
     ).scalars().all()
     assert len(corrections) == 1
+
+
+def test_find_changed_does_not_query_per_operation(session, account):
+    """Поиск переписанных брокером операций — один запрос на батч.
+
+    Раньше запрос уходил на каждую операцию батча, включая совершенно новые:
+    на первой полной синхронизации счёта это тысячи обращений там, где соседний
+    код ради экономии специально держит кэш инструментов и пакетный flush.
+
+    Количество и сумма варьируются по индексу, а не общие на все 50: dedup_key
+    (app/ledger/dedup.py) не зависит от external_id, и при одинаковом
+    содержании операции 2..50 совпали бы по dedup_key с первой и были бы молча
+    отсеяны как дубль внутри батча ещё до обращения к _find_changed — тест
+    тогда не отличал бы старое поведение от нового.
+    """
+    operations = [
+        raw_operation(external_id=str(index), quantity=str(10 + index), amount=str(-1000 - index))
+        for index in range(50)
+    ]
+
+    statements: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        append_operations(session, account, "tbank", operations)
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", record)
+
+    # Значение 'corrects_external_id' в скомпилированный текст запроса не
+    # попадает — драйвер шлёт его отдельным параметром, а не подставляет в
+    # SQL. Литеральный маркер этого запроса в тексте — оператор доступа к
+    # JSONB-полю payload (astext), других обращений к payload -> ->> в модуле
+    # нет.
+    lookups = [s for s in statements if "payload ->>" in s]
+    assert len(lookups) <= 1, (
+        f"Поиск переписанных операций ушёл {len(lookups)} раз на батч из 50 — "
+        "запрос обязан быть один на батч."
+    )
