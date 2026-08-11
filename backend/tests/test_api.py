@@ -3,7 +3,9 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
+from app.accounts.labels import account_label
 from app.api.routes_sync import get_tbank_connector
 from app.connectors.base import BrokerAccount
 from app.db import get_session
@@ -18,7 +20,9 @@ from app.models import (
     Reconciliation,
     SyncRun,
 )
+from app.snapshots.service import take_snapshot
 from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS
+from app.timeutils import moscow_today
 
 
 @pytest.fixture
@@ -112,6 +116,62 @@ def test_history_returns_snapshots_in_date_order(client, session):
     rows = client.get("/api/portfolio/history?days=90").json()
     assert [row["date"] for row in rows] == [earlier.isoformat(), later.isoformat()]
     assert rows[1]["total_value"] == "7350.0000"
+
+
+def test_history_returns_breakdown_by_account(client, session, account):
+    """История отдаёт разбивку по счетам, а не только итог.
+
+    Разбивка считается и хранится с фазы 2a, но читатель (snapshot_by_account)
+    не вызывался из production-кода ни разу — данные копились в стол.
+    """
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("1000"), blocked=Decimal("0")))
+    session.flush()
+
+    take_snapshot(session, moscow_today())
+    session.commit()
+
+    points = client.get("/api/portfolio/history").json()
+
+    assert points, "снимок за сегодня должен попасть в окно истории"
+    assert account_label(account) in points[-1]["by_account"]
+
+
+def test_history_does_not_query_accounts_per_point(client, session, account):
+    """Разбивка по счетам в истории — один запрос к таблице account на весь
+    ответ, а не один на точку.
+
+    До этой правки `snapshot_by_account` сама выбирала все счета без фильтра
+    внутри цикла по строкам `get_history` — один обход истории превращался в
+    1 + N запросов, где N — число точек в окне (до 90, снимок один в сутки).
+    Три соседних обработчика в этом же файле (`get_overview`, `get_positions`,
+    `get_cash`) уже выбирают счета в словарь один раз на запрос и передают его
+    дальше; `get_history` был единственным исключением.
+    """
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("1000"), blocked=Decimal("0")))
+    session.flush()
+    for offset in range(5):
+        take_snapshot(session, moscow_today() - timedelta(days=offset))
+    session.commit()
+
+    statements: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        response = client.get("/api/portfolio/history")
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    lookups = [s for s in statements if "FROM account" in s]
+    assert len(lookups) == 1, (
+        f"Выбор счетов ушёл {len(lookups)} раз на 5 точек истории — запрос "
+        "обязан быть один на весь ответ."
+    )
 
 
 def test_reconciliations_endpoint_lists_findings(client, session):
@@ -321,7 +381,7 @@ def test_sync_tbank_endpoint_returns_runs(client, session):
 
     assert payload == [{
         "account": "Брокерский (acc-1)", "broker": "tbank", "status": "success",
-        "inserted": 0, "skipped": 0, "mismatches": 0, "error": None,
+        "inserted": 0, "skipped": 0, "mismatches": 0, "corrected": 0, "error": None,
     }]
 
 

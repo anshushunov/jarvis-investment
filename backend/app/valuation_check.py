@@ -11,6 +11,8 @@
 import logging
 from decimal import Decimal
 
+import httpx
+
 from app.analytics.service import portfolio_overview
 from app.config import get_settings
 from app.connectors.tbank.client import OPERATIONS_SERVICE, TBankClient
@@ -48,13 +50,30 @@ def main() -> None:
 
         total_ours = money("0")
         total_theirs = money("0")
-        for account_id, ours in sorted(overview.by_account.items()):
-            account = accounts.get(account_id)
-            if account is None:
+        # Перебираем все счета брокера, а не только те, что попали в
+        # by_account: счёт, синхронизация которого отвалилась целиком, не имеет
+        # ни позиций, ни денег — и в прежней версии не появлялся в сверке
+        # вовсе. Ровно тот случай, ради которого сверку и смотрят.
+        for account in sorted(accounts.values(), key=lambda item: item.name):
+            ours = overview.by_account.get(account.id, money("0"))
+            try:
+                payload = client._post(
+                    OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account.external_id}
+                )
+            except httpx.HTTPError as exc:
+                # Перебор теперь идёт по всем счетам брокера, включая никогда
+                # не синхронизировавшиеся и закрытые (см. правку выше) —
+                # запрос по такому счёту вполне может ответить 4xx или
+                # оборваться по сети. Без перехвата один такой счёт обрывал бы
+                # весь скрипт и прятал состояние всех остальных, а сверку
+                # смотрят именно тогда, когда что-то уже сломалось. Итог по
+                # счёту при этом не подставляется нулём — его просто нет, и
+                # ниже он не участвует в "Итого сопоставимых счетов".
+                logger.info(
+                    "%-28s наш %14s   брокер: ошибка запроса (%s)",
+                    account.name, f"{ours:,.2f}", exc,
+                )
                 continue
-            payload = client._post(
-                OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account.external_id}
-            )
             raw_total = payload.get("totalAmountPortfolio")
             if not raw_total:
                 # Счёт особого типа (цифровые финансовые активы) итога не даёт.

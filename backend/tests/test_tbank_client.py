@@ -58,6 +58,42 @@ def test_get_accounts_returns_empty_list_when_no_accounts_key():
     assert TBankClient(TOKEN).get_accounts() == []
 
 
+@pytest.fixture
+def client_with_null_items():
+    """Транспорт, воспроизводящий реальный ответ T-Invest API на пустой раздел:
+    ключ присутствует, но его значение — явный null, а не отсутствие ключа."""
+    with respx.mock:
+        respx.post(f"{USERS}/GetAccounts").mock(
+            return_value=httpx.Response(200, json={"accounts": None})
+        )
+        respx.post(f"{OPERATIONS}/GetOperationsByCursor").mock(
+            return_value=httpx.Response(200, json={"items": None, "hasNext": False})
+        )
+        respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+            return_value=httpx.Response(200, json={"positions": None})
+        )
+        respx.post(f"{INSTRUMENTS}/Shares").mock(
+            return_value=httpx.Response(200, json={"instruments": None})
+        )
+        yield TBankClient(TOKEN)
+
+
+def test_null_items_are_treated_as_empty(client_with_null_items):
+    """JSON брокера отдаёт null там, где мы ждём список.
+
+    `payload.get("items", [])` спасает от отсутствующего ключа, но не от явного
+    null: значение по умолчанию не срабатывает, и наружу уходит None вместо
+    списка — падение случается уже у вызывающего, вдали от причины.
+    """
+    assert client_with_null_items.get_operations("acc-1", "2026-01-01T00:00:00Z",
+                                                 "2026-08-11T00:00:00Z") == []
+    assert client_with_null_items.get_accounts() == []
+    assert client_with_null_items.get_portfolio("acc-1") == []
+    # Справочник инструментов как раз чаще всего приходит пустым null-списком
+    # (см. _list_field) — четвёртое из четырёх мест применения.
+    assert client_with_null_items.list_instruments("Shares") == []
+
+
 def _operation_item(op_id: str, cursor: str) -> dict:
     return {
         "id": op_id,

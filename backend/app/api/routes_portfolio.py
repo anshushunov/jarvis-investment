@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.accounts.cash import all_balances
-from app.accounts.labels import account_label, account_label_by_id
+from app.accounts.labels import UNKNOWN_ACCOUNT_LABEL, account_label
 from app.analytics.service import portfolio_overview, position_rows
 from app.api.schemas import (
     CashOut,
@@ -18,6 +18,7 @@ from app.api.schemas import (
 from app.db import get_session
 from app.decisions.suggestions import suggestions_for_account
 from app.models import Account, DailySnapshot, Reconciliation
+from app.snapshots.service import snapshot_by_account
 from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -102,18 +103,54 @@ def get_history(days: int = 90, session: Session = Depends(get_session)) -> list
     rows = session.execute(
         select(DailySnapshot).where(DailySnapshot.on_date >= since).order_by(DailySnapshot.on_date)
     ).scalars().all()
-    return [HistoryPointOut(date=row.on_date, total_value=row.total_value) for row in rows]
+    # Счета выбираются один раз на весь ответ, а не на точку истории: снимок
+    # снимается раз в сутки, и запрос без фильтра внутри цикла по строкам (как
+    # было раньше — см. snapshot_by_account) превращал бы один обход окна в
+    # 1 + N запросов. Тот же приём, что и у соседей выше (get_overview,
+    # get_positions, get_cash).
+    account_ids = {
+        int(key)
+        for row in rows
+        for key in (row.by_account or {})
+        if key.lstrip("-").isdigit()
+    }
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_(account_ids))
+        ).scalars()
+    }
+    return [
+        HistoryPointOut(
+            date=row.on_date,
+            total_value=row.total_value,
+            by_account=snapshot_by_account(accounts, row),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/reconciliations", response_model=list[ReconciliationOut])
 def get_reconciliations(session: Session = Depends(get_session)) -> list[ReconciliationOut]:
     rows = session.execute(select(Reconciliation).order_by(Reconciliation.isin)).scalars().all()
+    account_ids = {row.account_id for row in rows}
+    # Счета и гипотезы забираются до сборки ответа — так же, как в трёх соседних
+    # обработчиках. Прежде подпись бралась построчно через account_label_by_id:
+    # SQL при этом шёл один раз на счёт (identity map сессии), но обработчик был
+    # единственным, кто делал это иначе, чем остальные.
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_(account_ids))
+        ).scalars()
+    }
     # Гипотезы считаются по счёту целиком: пара ищется среди расхождений
     # одного счёта, поэтому кэшируем результат на счёт, а не запрашиваем его
     # для каждой строки.
-    by_account: dict[int, dict[str, list]] = {}
-    for account_id in {row.account_id for row in rows}:
-        by_account[account_id] = suggestions_for_account(session, account_id)
+    by_account: dict[int, dict[str, list]] = {
+        account_id: suggestions_for_account(session, account_id)
+        for account_id in account_ids
+    }
 
     return [
         ReconciliationOut(
@@ -122,7 +159,8 @@ def get_reconciliations(session: Session = Depends(get_session)) -> list[Reconci
             # Сверка считается по каждому счёту отдельно — один и тот же ISIN
             # может дать две строки на двух разных счетах, неразличимые без
             # подписи счёта (проверено на живых данных владельца).
-            account=account_label_by_id(session, row.account_id),
+            account=(account_label(accounts[row.account_id])
+                     if row.account_id in accounts else UNKNOWN_ACCOUNT_LABEL),
             suggestions=[
                 SuggestionOut(**suggestion.__dict__)
                 for suggestion in by_account[row.account_id].get(row.isin, [])

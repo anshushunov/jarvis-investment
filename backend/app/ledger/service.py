@@ -89,7 +89,9 @@ def _build_transaction(
         fee=op.fee,
         external_id=op.external_id,
         source=source,
-        payload=op.payload,
+        # MappingProxyType в JSONB-колонку SQLAlchemy не запишет — нужен
+        # обычный (изменяемый) словарь на границе с ORM-моделью.
+        payload=dict(op.payload),
         dedup_key=key,
     )
 
@@ -139,18 +141,73 @@ def _load_known_keys(session: Session, keys: list[str]) -> set[str]:
     )
 
 
-def _find_changed(
-    session: Session, account: Account, source: str, op: RawOperation
+# Сколько внешних идентификаторов кладём в один IN. Батч синхронизации бывает
+# в тысячи операций, а IN такой длины плох и планировщику запросов, и
+# ограничению на число параметров у драйвера.
+_LOOKUP_CHUNK = 500
+
+
+def _recorded_by_external_id(
+    session: Session, account: Account, source: str, external_ids: list[str]
+) -> dict[str, list[Transaction]]:
+    """Уже записанные транзакции счёта по каждому из присланных внешних
+    идентификаторов, в порядке записи.
+
+    Один запрос на батч (точнее — по запросу на _LOOKUP_CHUNK идентификаторов)
+    вместо запроса на операцию. Прежняя версия ходила в базу внутри цикла по
+    батчу, в том числе за операциями, которых там заведомо нет: на первой
+    полной синхронизации счёта это тысячи обращений подряд.
+
+    Ключ словаря — внешний идентификатор ИСХОДНОЙ операции, поэтому
+    корректирующая запись попадает в список к той операции, которую исправляет:
+    свой external_id у неё другой (correction:…, иначе столкнулась бы с
+    uq_transaction_source_external), а связь хранится в payload. Без этого
+    корректировки оставались бы невидимыми для подсчёта записанных итогов, и
+    одна и та же правка брокера переписывалась бы на каждой синхронизации.
+    """
+    result: dict[str, list[Transaction]] = {}
+    if not external_ids:
+        return result
+
+    # Дедуплицируем с сохранением порядка: один и тот же external_id может
+    # повториться в батче (например, на стыке страниц GetOperationsByCursor,
+    # app/connectors/tbank/client.py). Без этого повтор, попавший по разные
+    # стороны границы куска, отдавал бы одну и ту же уже записанную транзакцию
+    # дважды — recorded_quantity/recorded_amount в _changed_against
+    # удвоились бы, и по совпавшей операции писалась бы ложная корректировка
+    # на каждой синхронизации.
+    unique_ids = list(dict.fromkeys(external_ids))
+
+    for start in range(0, len(unique_ids), _LOOKUP_CHUNK):
+        chunk = unique_ids[start:start + _LOOKUP_CHUNK]
+        rows = session.execute(
+            select(Transaction).where(
+                Transaction.account_id == account.id,
+                Transaction.source == source,
+                or_(
+                    Transaction.external_id.in_(chunk),
+                    Transaction.payload["corrects_external_id"].astext.in_(chunk),
+                ),
+            ).order_by(Transaction.id)
+        ).scalars().all()
+
+        for transaction in rows:
+            corrects = (transaction.payload or {}).get("corrects_external_id")
+            key = corrects if corrects is not None else transaction.external_id
+            if key is not None:
+                result.setdefault(key, []).append(transaction)
+
+    return result
+
+
+def _changed_against(
+    recorded: list[Transaction], op: RawOperation
 ) -> tuple[Transaction, Decimal, Decimal, Decimal] | None:
-    """Уже записанная операция с тем же внешним идентификатором, содержание
-    которой разошлось с присланным, вместе с уже записанными итогами.
+    """Уже записанная операция, содержание которой разошлось с присланным,
+    вместе с уже записанными итогами. None — расхождения нет.
 
     Разошлось — значит брокер переписал операцию задним числом. Совпало — это
     обычный дубль пересекающегося окна синхронизации, и говорить о нём нечего.
-
-    Итоги возвращаются отсюда, а не пересчитываются вызывающим: они уже посчитаны
-    здесь, и второй такой же запрос к базе на каждую операцию батча был бы
-    заметен на первой полной синхронизации счёта.
 
     Количество и записанное, и присланное приводится к общему знаковому виду
     (app/positions/engine.py, signed_quantity): в журнале количество продажи
@@ -161,45 +218,25 @@ def _find_changed(
     комиссия, OTHER), знаковое количество нулевое с обеих сторон: правку такой
     операции видно по сумме и цене, а поправлять в позициях у неё нечего.
     """
-    if op.external_id is None:
-        return None
-
-    # Корректирующая запись не может носить тот же external_id, что и
-    # исправляемая (столкнулась бы с uq_transaction_source_external), поэтому
-    # хранит его отдельным полем в payload (см. _correction_for). Без ветки по
-    # этому полю сюда попадала бы только исходная запись — корректировка
-    # оставалась бы невидимой для recorded_quantity/recorded_amount ниже, и
-    # одна и та же правка переписывалась бы заново на каждой синхронизации.
-    existing = session.execute(
-        select(Transaction).where(
-            Transaction.account_id == account.id,
-            Transaction.source == source,
-            or_(
-                Transaction.external_id == op.external_id,
-                Transaction.payload["corrects_external_id"].astext == op.external_id,
-            ),
-        ).order_by(Transaction.id)
-    ).scalars().all()
-    if not existing:
+    if not recorded:
         return None
 
     # Корректирующие записи уже учтены: сравниваем с суммой всего, что по этой
     # операции записано, иначе одна и та же правка порождала бы корректировку
     # при каждой синхронизации.
     recorded_quantity = sum(
-        (signed_quantity(tx.op_type, tx.quantity) for tx in existing), Decimal("0")
+        (signed_quantity(tx.op_type, tx.quantity) for tx in recorded), Decimal("0")
     )
-    recorded_amount = sum((tx.amount for tx in existing), Decimal("0"))
+    recorded_amount = sum((tx.amount for tx in recorded), Decimal("0"))
     # Цена — не поток, в отличие от количества и суммы, и по всем записям
     # операции не складывается. Действующая цена — та, что несёт самая
     # последняя запись: исходная, пока корректировок не было, иначе последняя
     # корректировка (она переносит вперёд самую свежую цену, присланную
     # брокером на момент своей записи). Без этого сравнения правка одной
-    # только цены при тех же количестве и сумме проходила бы мимо
-    # _find_changed как «не изменилось», падала в to_insert со старым
-    # external_id и тихо гасилась построчным запасным путём в _insert_one —
-    # без единой записи в лог, в отличие от ветки корректировки.
-    recorded_price = existing[-1].price
+    # только цены при тех же количестве и сумме проходила бы мимо как «не
+    # изменилось», падала в to_insert со старым external_id и тихо гасилась
+    # построчным запасным путём в _insert_one — без единой записи в лог.
+    recorded_price = recorded[-1].price
 
     if (
         recorded_quantity == signed_quantity(op.op_type, op.quantity)
@@ -207,7 +244,7 @@ def _find_changed(
         and recorded_price == op.price
     ):
         return None
-    return existing[0], recorded_quantity, recorded_amount, recorded_price
+    return recorded[0], recorded_quantity, recorded_amount, recorded_price
 
 
 def _correction_for(
@@ -227,7 +264,7 @@ def _correction_for(
     100 продажа давала +88, и движок открывал партию на 88 бумаг по цене
     продажи — позиция выходила 276 вместо 100, да ещё с «известной»
     себестоимостью, равной цене продажи. `recorded_quantity` приходит уже
-    знаковым (см. _find_changed).
+    знаковым (см. _changed_against).
     """
     return Transaction(
         account_id=account.id,
@@ -288,10 +325,17 @@ def append_operations(
     if not operations:
         return AppendResult(inserted=0, skipped=0)
 
-    # RawOperation несёт поле payload: dict, поэтому сам объект не hashable —
-    # держим ключи в списке, параллельном operations, а не в словаре с op как ключом.
+    # RawOperation несёт поле payload: MappingProxyType, поэтому сам объект не
+    # hashable — держим ключи в списке, параллельном operations, а не в
+    # словаре с op как ключом.
     keys = [natural_key(source, account.external_id, op) for op in operations]
     known = _load_known_keys(session, keys)
+    # Предзагрузка до цикла: раньше поиск переписанных брокером операций уходил
+    # в базу на каждую операцию батча.
+    recorded = _recorded_by_external_id(
+        session, account, source,
+        [op.external_id for op in operations if op.external_id is not None],
+    )
 
     to_insert: list[tuple[RawOperation, str]] = []
     corrections: list[Transaction] = []
@@ -302,7 +346,12 @@ def append_operations(
         if key in known or key in seen_in_batch:
             skipped += 1
             continue
-        changed = _find_changed(session, account, source, op)
+        # Операция без внешнего идентификатора сопоставлению не поддаётся:
+        # ключа, по которому её узнать в журнале, попросту нет.
+        changed = (
+            _changed_against(recorded.get(op.external_id, []), op)
+            if op.external_id is not None else None
+        )
         if changed is not None:
             original, recorded_quantity, recorded_amount, recorded_price = changed
             corrections.append(_correction_for(

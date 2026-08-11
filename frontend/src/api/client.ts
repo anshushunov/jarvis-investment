@@ -68,6 +68,9 @@ export interface PositionRow {
 export interface HistoryPoint {
   date: string;
   total_value: string;
+  // Разбивка итога по счетам на эту дату; ключ — подпись счёта. Пусто у
+  // снимков, снятых до появления разбивки.
+  by_account: Record<string, string>;
 }
 
 export interface Suggestion {
@@ -101,6 +104,8 @@ export interface DecisionInput {
   from_quantity?: string | null;
   to_isin?: string | null;
   to_quantity?: string | null;
+  // Себестоимость всей зачисляемой партии; null — владелец её не знает, и
+  // партия помечается партией с неизвестной себестоимостью.
   cost_basis?: string | null;
   effective_at: string;
   note: string;
@@ -135,6 +140,10 @@ export interface SyncRunResult {
   inserted: number;
   skipped: number;
   mismatches: number;
+  // Операции, которые брокер переписал задним числом: на разницу записана
+  // корректирующая запись. Стабильно ненулевое значение означает поломку
+  // обхода доисполняющихся заявок на стороне бэкенда.
+  corrected: number;
   error: string | null;
 }
 

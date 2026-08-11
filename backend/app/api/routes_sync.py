@@ -36,7 +36,8 @@ def sync_tbank(
             # текст ошибки прогона (run.error) остаётся единственным источником
             # подробностей в этом случае.
             account=account_label_by_id(session, run.account_id), broker=run.broker, status=run.status,
-            inserted=run.inserted, skipped=run.skipped, mismatches=run.mismatches, error=run.error,
+            inserted=run.inserted, skipped=run.skipped, mismatches=run.mismatches,
+            corrected=run.corrected, error=run.error,
         )
         for run in runs
     ]

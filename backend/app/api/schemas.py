@@ -104,10 +104,18 @@ class CashOut(BaseModel):
 class HistoryPointOut(BaseModel):
     date: date
     total_value: Decimal
+    # Разбивка по счетам, подписанным той же единственной на проект функцией,
+    # что и везде (app/accounts/labels.py). В самом снимке лежит устойчивый
+    # идентификатор счёта — подпись строится при чтении.
+    by_account: dict[str, Decimal] = {}
 
     @field_serializer("total_value")
     def serialize_total(self, value: Decimal) -> str:
         return f"{value:.4f}"
+
+    @field_serializer("by_account")
+    def serialize_by_account(self, value: dict[str, Decimal]) -> dict[str, str]:
+        return {key: f"{amount:.4f}" for key, amount in value.items()}
 
 
 class SuggestionOut(BaseModel):
@@ -190,4 +198,6 @@ class SyncRunOut(BaseModel):
     inserted: int
     skipped: int
     mismatches: int
+    # Операции, которые брокер переписал задним числом (см. sync_run.corrected).
+    corrected: int
     error: str | None

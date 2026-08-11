@@ -128,6 +128,7 @@ def sync_broker(
             # потому, что путь оборвался раньше финальных присвоений.
             run.inserted = result.inserted
             run.skipped = result.skipped
+            run.corrected = result.corrected
 
             rebuild_positions(session, account)
 

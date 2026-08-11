@@ -1,8 +1,22 @@
+import logging
 from decimal import Decimal
+
+import pytest
 
 from app.connectors.base import BrokerPosition
 from app.models import Account, BrokerHolding, Instrument, Position, Reconciliation
 from app.sync.reconcile import reconcile_account, reconcile_from_snapshot
+
+
+@pytest.fixture
+def instrument_without_isin(session) -> Instrument:
+    """Инструмент без ISIN: снимок брокера ключуется ISIN, и позиция такой
+    бумаги не может встретить свою пару — сверять её не с чем."""
+    instrument = Instrument(isin=None, ticker="NOISIN", secid="NOISIN",
+                            kind="share", currency="RUB")
+    session.add(instrument)
+    session.flush()
+    return instrument
 
 
 def setup(session) -> tuple[Account, Instrument]:
@@ -205,3 +219,29 @@ def test_reconcile_does_not_touch_other_accounts_findings(session):
     assert len(account2_findings) == 1
     assert account2_findings[0].ledger_quantity == Decimal("99.00000000")
     assert account2_findings[0].broker_quantity == Decimal("50.00000000")
+
+
+def test_ledger_position_without_isin_is_logged(caplog, session, account, instrument_without_isin):
+    """Позиция журнала, инструмент которой без ISIN, в сверку не попадает — но
+    оставляет след в логе: сверять её не с чем, а терять бесследно нельзя.
+
+    Количество в сообщении обязательно: без него розыск потерянной бумаги
+    упирается ровно в то место, где он нужен."""
+    session.add(Position(account_id=account.id, instrument_id=instrument_without_isin.id,
+                         quantity=Decimal("10"), average_price=Decimal("100"),
+                         cost_basis_known=True))
+    session.flush()
+
+    caplog.set_level(logging.WARNING, logger="app.sync.reconcile")
+    reconcile_account(session, account, [])
+
+    # Подстрока "10" ловится и первичным ключом instrument_id — он растёт от
+    # прогона к прогону и не откатывается вместе с транзакцией, так что рано
+    # или поздно совпадёт с количеством и замаскирует пропажу. Проверяем
+    # последний позиционный аргумент записи лога напрямую: это то самое
+    # значение, что передано в logger.warning как количество, а не текст,
+    # где оно могло случайно затеряться среди других чисел.
+    assert any(
+        "без ISIN" in record.getMessage() and record.args[-1] == Decimal("10")
+        for record in caplog.records
+    )

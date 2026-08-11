@@ -51,7 +51,10 @@ describe("ReconciliationBanner", () => {
   });
 
   it("показывает журнал решений, когда расхождений не осталось", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([DECISION]));
+    // Своя Response на каждый вызов: тело читается один раз, и общий объект
+    // делал вторую и последующие проверки бессмысленными — например, проверку
+    // «успешная отмена обновляет данные».
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(jsonResponse([DECISION])));
 
     renderBanner([]);
 
@@ -62,7 +65,7 @@ describe("ReconciliationBanner", () => {
   });
 
   it("показывает журнал решений, не требуя разворачивать список расхождений", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([DECISION]));
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(jsonResponse([DECISION])));
 
     renderBanner([ROW]);
 
@@ -74,7 +77,7 @@ describe("ReconciliationBanner", () => {
   it("отменяет подтверждённое решение с пояснением", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValue(jsonResponse([DECISION]));
+      .mockImplementation(() => Promise.resolve(jsonResponse([DECISION])));
 
     renderBanner([]);
     await screen.findByText(/Смена ISIN гонконгского ETF/);
@@ -97,7 +100,7 @@ describe("ReconciliationBanner", () => {
   it("не отменяет решение без пояснения", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValue(jsonResponse([DECISION]));
+      .mockImplementation(() => Promise.resolve(jsonResponse([DECISION])));
 
     renderBanner([]);
     await screen.findByText(/Смена ISIN гонконгского ETF/);
@@ -112,9 +115,9 @@ describe("ReconciliationBanner", () => {
   });
 
   it("не предлагает отменять уже отменённое решение", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse([
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(jsonResponse([
       { ...DECISION, status: "REVERTED" },
-    ]));
+    ])));
 
     renderBanner([]);
     await screen.findByText(/Смена ISIN гонконгского ETF/);
