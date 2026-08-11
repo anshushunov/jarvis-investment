@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DecisionPanel } from "./DecisionPanel";
+import { DecisionPanel, defaultDirection, moscowToday } from "./DecisionPanel";
 import type { ReconciliationRow } from "../api/client";
 
 const WITH_SUGGESTION: ReconciliationRow = {
@@ -149,6 +149,10 @@ describe("DecisionPanel", () => {
     renderPanel(WITH_SUGGESTION);
 
     await user.selectOptions(screen.getByLabelText(/что произошло/i), "ADJUSTMENT");
+    // WITH_SUGGESTION — это missing_at_broker, поэтому направление по
+    // умолчанию теперь «списать»; тест проверяет именно сторону зачисления,
+    // так что выбираем её явно.
+    await user.click(screen.getByRole("radio", { name: /зачислить бумагу/i }));
     await user.type(screen.getByLabelText(/в какую бумагу/i), "HK0000051877");
     await user.type(screen.getByLabelText(/сколько зачислить/i), "5");
     await user.type(screen.getByLabelText(/пояснение/i), "поправка");
@@ -199,8 +203,14 @@ describe("DecisionPanel", () => {
     }));
     renderPanel(WITHOUT_SUGGESTION);
 
+    // WITHOUT_SUGGESTION — тоже missing_at_broker, поэтому «списать» уже
+    // выбрано направлением по умолчанию, а поле ISIN предзаполнено из row —
+    // клик по уже отмеченной радиокнопке не даёт события change, так что
+    // поле перед вводом нужно очистить явно.
     await user.click(screen.getByRole("radio", { name: /списать бумагу/i }));
-    await user.type(screen.getByLabelText(/из какой бумаги/i), "US50155Q1004");
+    const fromIsinField = screen.getByLabelText(/из какой бумаги/i);
+    await user.clear(fromIsinField);
+    await user.type(fromIsinField, "US50155Q1004");
     await user.type(screen.getByLabelText(/сколько списать/i), "2");
     await user.type(screen.getByLabelText(/пояснение/i), "спишем остаток");
     await user.click(screen.getByRole("button", { name: /подтвердить/i }));
@@ -222,6 +232,9 @@ describe("DecisionPanel", () => {
 
     renderPanel({ ...ROW, suggestions: [] });
 
+    // ROW — missing_at_broker, поэтому по умолчанию подставлено «списать»;
+    // себестоимость — поле стороны зачисления, выбираем её явно.
+    await user.click(screen.getByRole("radio", { name: /зачислить бумагу/i }));
     await user.type(screen.getByLabelText(/в какую бумагу/i), "RU000A0JQUZ6");
     await user.type(screen.getByLabelText(/сколько зачислить/i), "351");
     await user.type(screen.getByLabelText(/себестоимость/i), "40000");
@@ -247,6 +260,9 @@ describe("DecisionPanel", () => {
 
     renderPanel({ ...ROW, suggestions: [] });
 
+    // ROW — missing_at_broker, поэтому по умолчанию подставлено «списать»;
+    // тест проверяет сторону зачисления, выбираем её явно.
+    await user.click(screen.getByRole("radio", { name: /зачислить бумагу/i }));
     await user.type(screen.getByLabelText(/в какую бумагу/i), "RU000A0JQUZ6");
     await user.type(screen.getByLabelText(/сколько зачислить/i), "351");
     await user.type(screen.getByLabelText(/пояснение/i), "Ввод бумаг извне");
@@ -259,5 +275,38 @@ describe("DecisionPanel", () => {
       const body = JSON.parse((call![1] as RequestInit).body as string);
       expect(body.cost_basis).toBeNull();
     });
+  });
+});
+
+describe("подсказки по умолчанию", () => {
+  it("берёт дату события по московскому поясу, а не по UTC", () => {
+    // 01:30 MSK 12 августа — это ещё 22:30 UTC одиннадцатого. Весь проект
+    // живёт по московской календарной дате: снимки, котировки, окно истории.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T22:30:00Z"));
+    try {
+      expect(moscowToday()).toBe("2026-08-12");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("предлагает списание, когда бумаги нет у брокера", () => {
+    expect(defaultDirection({ ...ROW, status: "missing_at_broker" })).toBe("DEBIT");
+  });
+
+  it("предлагает зачисление, когда бумаги нет в журнале", () => {
+    expect(defaultDirection({ ...ROW, status: "missing_in_ledger" })).toBe("CREDIT");
+  });
+
+  it("при расхождении количеств смотрит, в какую сторону оно", () => {
+    expect(defaultDirection({
+      ...ROW, status: "quantity_mismatch",
+      ledger_quantity: "209.00000000", broker_quantity: "560.00000000",
+    })).toBe("CREDIT");
+    expect(defaultDirection({
+      ...ROW, status: "quantity_mismatch",
+      ledger_quantity: "45.00000000", broker_quantity: "40.00000000",
+    })).toBe("DEBIT");
   });
 });

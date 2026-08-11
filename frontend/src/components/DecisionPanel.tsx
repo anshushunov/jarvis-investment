@@ -13,10 +13,27 @@ const KINDS = [
 type Kind = (typeof KINDS)[number]["value"];
 type Direction = "CREDIT" | "DEBIT";
 
-// Дата события по умолчанию — сегодня. Конвертация случилась когда-то раньше,
-// и владелец обычно знает когда; поле редактируемое именно поэтому.
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
+// Дата события по умолчанию — сегодня по Москве. Конвертация случилась
+// когда-то раньше, и владелец обычно знает когда; поле редактируемое именно
+// поэтому. Пояс важен: toISOString даёт дату по UTC, и до 03:00 по Москве
+// подставлялась бы вчерашняя. Весь остальной проект — снимки, котировки, окно
+// истории — живёт по московской календарной дате (backend/app/timeutils.py).
+export function moscowToday(): string {
+  // en-CA даёт ISO-подобный «ГГГГ-ММ-ДД», который и ждёт <input type="date">.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Moscow",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+}
+
+// Направление поправки по умолчанию задаёт само расхождение. Прежнее
+// безусловное «зачислить» было подсказкой наугад: половина разбираемых строк —
+// это бумага, которой у брокера нет, и её надо списывать.
+export function defaultDirection(row: ReconciliationRow): Direction {
+  if (row.status === "missing_at_broker") return "DEBIT";
+  if (row.status === "missing_in_ledger") return "CREDIT";
+  // quantity_mismatch: у брокера больше нашего — зачислить, меньше — списать.
+  return Number(row.broker_quantity) >= Number(row.ledger_quantity) ? "CREDIT" : "DEBIT";
 }
 
 export function DecisionPanel({ row, onDone }: {
@@ -39,7 +56,7 @@ export function DecisionPanel({ row, onDone }: {
   // Направление поправки: корректировка описывает ровно одну сторону
   // (зачисление или списание) — бэкенд отвергает решение, где заполнены обе
   // или ни одной (app/decisions/service.py, _validate).
-  const [direction, setDirection] = useState<Direction>("CREDIT");
+  const [direction, setDirection] = useState<Direction>(defaultDirection(row));
   const [fromIsin, setFromIsin] = useState(
     certainSuggestion?.from_isin ?? (suggestions.length === 0 ? row.isin ?? "" : ""),
   );
@@ -51,7 +68,7 @@ export function DecisionPanel({ row, onDone }: {
   // показываются ни средняя цена, ни доходность (backend/app/decisions/
   // service.py, _generate_entries).
   const [costBasis, setCostBasis] = useState("");
-  const [effectiveAt, setEffectiveAt] = useState(today());
+  const [effectiveAt, setEffectiveAt] = useState(moscowToday());
   const [note, setNote] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
   // Отклонение спрашивается дважды: оно необратимо. Отклонённая пара глушится
