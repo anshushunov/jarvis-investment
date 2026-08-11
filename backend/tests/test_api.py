@@ -321,7 +321,7 @@ def test_sync_tbank_endpoint_returns_runs(client, session):
 
     assert payload == [{
         "account": "Брокерский (acc-1)", "broker": "tbank", "status": "success",
-        "inserted": 0, "skipped": 0, "mismatches": 0, "error": None,
+        "inserted": 0, "skipped": 0, "mismatches": 0, "corrected": 0, "error": None,
     }]
 
 

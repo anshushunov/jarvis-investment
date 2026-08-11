@@ -190,4 +190,6 @@ class SyncRunOut(BaseModel):
     inserted: int
     skipped: int
     mismatches: int
+    # Операции, которые брокер переписал задним числом (см. sync_run.corrected).
+    corrected: int
     error: str | None

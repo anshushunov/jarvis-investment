@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -18,4 +18,10 @@ class SyncRun(Base):
     inserted: Mapped[int] = mapped_column(Integer, default=0)
     skipped: Mapped[int] = mapped_column(Integer, default=0)
     mismatches: Mapped[int] = mapped_column(Integer, default=0)
+    # Операции, которые брокер переписал задним числом: на разницу записана
+    # корректирующая запись (см. AppendResult в app/ledger/service.py). Должно
+    # быть редкостью — частый случай доисполняющейся заявки закрыт окном
+    # STILL_FILLING_WINDOW в коннекторе. Стабильно ненулевой счётчик означает,
+    # что обход перестал работать.
+    corrected: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     error: Mapped[str | None] = mapped_column(Text)

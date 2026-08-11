@@ -85,8 +85,8 @@ def job_sync_tbank() -> None:
         runs = sync_broker(session, TBankConnector(token))
         for run in runs:
             logger.info(
-                "Синхронизация %s: %s, новых %s, расхождений %s",
-                run.broker, run.status, run.inserted, run.mismatches,
+                "Синхронизация %s: %s, новых %s, исправлено %s, расхождений %s",
+                run.broker, run.status, run.inserted, run.corrected, run.mismatches,
             )
 
 

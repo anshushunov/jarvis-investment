@@ -10,6 +10,7 @@ from app.sync.service import (
     resolve_since_for_account,
     sync_broker,
 )
+from conftest import raw_operation
 
 SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -214,6 +215,29 @@ def test_failed_sync_keeps_already_written_operations(session):
 def test_run_records_are_persisted(session):
     sync_broker(session, FakeConnector(), SINCE)
     assert session.query(SyncRun).count() == 1
+
+
+def test_sync_run_records_corrections(session):
+    """Правки брокера задним числом видны в записи прогона.
+
+    Счётчик считался, но не присваивался никуда: наблюдать его можно было
+    только в логе. А это сигнал о поломке обхода STILL_FILLING_WINDOW — если он
+    станет стабильно ненулевым, значит обход перестал работать.
+    """
+    connector = FakeConnector(operations=[
+        raw_operation(external_id="1", op_type=OperationType.SELL,
+                      quantity="12", price="120", amount="1440"),
+    ])
+    sync_broker(session, connector)
+
+    # Тот же external_id, но брокер доисполнил заявку: 12 стало 100.
+    connector.operations = [
+        raw_operation(external_id="1", op_type=OperationType.SELL,
+                      quantity="100", price="120", amount="12000"),
+    ]
+    runs = sync_broker(session, connector)
+
+    assert runs[0].corrected == 1
 
 
 def test_db_level_failure_on_one_account_does_not_break_others(session):

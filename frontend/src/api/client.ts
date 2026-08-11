@@ -135,6 +135,10 @@ export interface SyncRunResult {
   inserted: number;
   skipped: number;
   mismatches: number;
+  // Операции, которые брокер переписал задним числом: на разницу записана
+  // корректирующая запись. Стабильно ненулевое значение означает поломку
+  // обхода доисполняющихся заявок на стороне бэкенда.
+  corrected: number;
   error: string | null;
 }
 
