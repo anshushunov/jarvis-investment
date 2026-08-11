@@ -1,5 +1,8 @@
+import logging
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
+import app.scheduler as scheduler_module
 from app.scheduler import build_scheduler
 from app.timeutils import MOSCOW_TZ, moscow_now, moscow_today
 
@@ -45,3 +48,23 @@ def test_fx_job_is_registered():
     # поэтому shutdown() не нужен и упал бы с SchedulerNotRunningError.
     scheduler = build_scheduler()
     assert scheduler.get_job("refresh_fx") is not None
+
+
+def test_sync_job_without_token_does_nothing(monkeypatch, caplog):
+    """Пустой TBANK_TOKEN — задача молча пропускается, а не падает.
+
+    У задачи снимка такой тест есть, у синхронизации не было: отказ здесь
+    остановил бы весь планировщик, а вместе с ним и снимки, и курсы.
+    """
+    monkeypatch.setattr(scheduler_module, "get_settings",
+                        lambda: SimpleNamespace(tbank_token=""))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("К брокеру ходить не за чем: токена нет")
+
+    monkeypatch.setattr(scheduler_module, "TBankConnector", fail)
+
+    with caplog.at_level(logging.WARNING):
+        scheduler_module.job_sync_tbank()
+
+    assert any("TBANK_TOKEN" in record.getMessage() for record in caplog.records)
