@@ -245,3 +245,44 @@ def test_append_only_trigger_is_created_by_the_migration_chain(migrations_engine
             "SELECT proname FROM pg_proc WHERE proname = 'transaction_append_only'"
         )).scalar_one_or_none()
         assert left is None
+
+
+def test_0016_downgrade_refuses_when_manual_entries_exist(migrations_engine):
+    """Записи, порождённые решениями владельца, переживают удаление таблицы
+    решений (журнал append-only, DELETE запрещён триггером) и остаются без
+    объяснения. Откат обязан отказаться понятным сообщением, а не молча
+    оставить безотцовщину."""
+    with migrations_engine.connect() as connection:
+        config = _alembic_config(connection)
+
+        command.upgrade(config, "0016")
+        connection.commit()
+
+        connection.execute(text(
+            "INSERT INTO account (broker, kind, external_id, name, currency) "
+            "VALUES ('tbank', 'broker', 'acc-1', 'Инвестиционный', 'RUB')"
+        ))
+        connection.execute(text("""
+            INSERT INTO transaction (account_id, op_type, executed_at, quantity,
+                                     price, amount, currency, fee, source, dedup_key, payload)
+            SELECT id, 'CONVERSION_IN', TIMESTAMPTZ '2026-03-01 00:00:00+00', 79,
+                   0, 0, 'RUB', 0, 'manual', 'manual-1', '{}'::jsonb
+            FROM account WHERE external_id = 'acc-1'
+        """))
+        connection.commit()
+
+        with pytest.raises(RuntimeError, match="Откат миграции 0016 невозможен") as refusal:
+            command.downgrade(config, "base")
+
+        # Совет в отказе обязан быть выполнимым: отмена решения ничего не
+        # удаляет, а порождает новые записи с тем же source='manual' — счётчик
+        # от неё только вырастет.
+        assert "revert" not in str(refusal.value)
+
+        connection.rollback()
+
+        # Триггер append-only запрещает DELETE по журналу, поэтому чистим
+        # схему целиком, а не строку: база в фикстуре общая для модуля.
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+        connection.commit()

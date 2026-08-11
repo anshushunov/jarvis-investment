@@ -42,7 +42,10 @@ export interface PositionRow {
   // Валюта котировки: текущая цена и стоимость — в ней.
   currency: string;
   quantity: string;
-  average_price: string;
+  // null = себестоимость неизвестна: бумаги пришли переводом, брокер цены
+  // покупки не сообщил. Это не ноль — на экране прочерк.
+  average_price: string | null;
+  cost_basis_known: boolean;
   // Валюта средней цены: у замещающей облигации расчёты рублёвые, а котировка
   // валютная, и подписать среднюю знаком котировки значит соврать в разы.
   average_price_currency: string;
@@ -67,6 +70,18 @@ export interface HistoryPoint {
   total_value: string;
 }
 
+export interface Suggestion {
+  from_isin: string;
+  from_quantity: string;
+  to_isin: string;
+  to_quantity: string;
+  // Бумага-получатель заблокирована у брокера целиком: конвертации часто
+  // оседают именно так. Признак усиливающий, сам по себе гипотезу не создаёт.
+  blocked_fully: boolean;
+  // Кандидатов с такой же величиной несколько — выбирает владелец.
+  ambiguous: boolean;
+}
+
 export interface ReconciliationRow {
   isin: string | null;
   status: string;
@@ -75,6 +90,34 @@ export interface ReconciliationRow {
   // Подпись счёта, к которому относится расхождение (сверка считается по
   // каждому счёту отдельно — один ISIN может дать две строки на двух счетах).
   account: string;
+  suggestions: Suggestion[];
+}
+
+export interface DecisionInput {
+  account: string;
+  kind: "CONVERSION" | "ADJUSTMENT" | "ACCEPTED_AS_IS";
+  status: "CONFIRMED" | "REJECTED";
+  from_isin?: string | null;
+  from_quantity?: string | null;
+  to_isin?: string | null;
+  to_quantity?: string | null;
+  cost_basis?: string | null;
+  effective_at: string;
+  note: string;
+}
+
+export interface Decision {
+  id: number;
+  account: string;
+  kind: string;
+  status: string;
+  from_isin: string | null;
+  from_quantity: string | null;
+  to_isin: string | null;
+  to_quantity: string | null;
+  effective_at: string;
+  note: string;
+  reverts_id: number | null;
 }
 
 export interface CashRow {
@@ -126,4 +169,21 @@ export const api = {
   history: (days = 90) => request<HistoryPoint[]>(`/portfolio/history?days=${days}`),
   reconciliations: () => request<ReconciliationRow[]>("/reconciliations"),
   syncTbank: () => request<SyncRunResult[]>("/sync/tbank", { method: "POST" }),
+  decisions: () => request<Decision[]>("/decisions"),
+  createDecision: (body: DecisionInput) =>
+    request<Decision>("/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  // Отмена адресная: бэкенд снимает те самые партии, которые открыло
+  // отменяемое решение. Пояснение обязательно, как и при записи, — иначе через
+  // год причину отмены не восстановит никто (бэкенд отвергнет запрос без него).
+  // Возвращается зеркальное решение, а не отменённое: журнал append-only.
+  revertDecision: (id: number, note: string) =>
+    request<Decision>(`/decisions/${id}/revert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
 };

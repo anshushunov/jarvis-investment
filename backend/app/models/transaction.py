@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import DDL, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, event, func
+from sqlalchemy import DDL, DateTime, Enum, ForeignKey, Index, Numeric, String, UniqueConstraint, event, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,6 +22,26 @@ class OperationType(StrEnum):
     AMORTIZATION = "AMORTIZATION"
     VARIATION_MARGIN = "VARIATION_MARGIN"
     OTHER = "OTHER"
+    # Ввод и вывод бумаг: перевод от другого брокера или между счетами.
+    # Количество двигают, себестоимости не несут — брокер её не сообщает.
+    TRANSFER_IN = "TRANSFER_IN"
+    TRANSFER_OUT = "TRANSFER_OUT"
+    # Две стороны корпоративного действия. Порождаются только решением
+    # владельца (app/decisions/service.py) и связаны через payload.decision_id:
+    # OUT снимает открытые партии, IN раскладывает их на новую бумагу.
+    CONVERSION_OUT = "CONVERSION_OUT"
+    CONVERSION_IN = "CONVERSION_IN"
+    # Ручная поправка количества и корректировка операции, изменённой брокером
+    # задним числом. Журнал append-only — правок нет, есть только новые записи.
+    ADJUSTMENT = "ADJUSTMENT"
+
+
+# Ключ, под которым корректирующая запись (op_type=ADJUSTMENT, см. ниже) хранит
+# в payload id исправляемой ею записи. По аналогии с DECISION_PAYLOAD_KEY в
+# app/models/ledger_decision.py — та же причина: строка задаётся в одном месте
+# (app/ledger/service.py, _correction_for) и должна читаться оттуда же, а не
+# дублироваться литералом там, где её понадобится найти.
+CORRECTS_TRANSACTION_ID_PAYLOAD_KEY = "corrects_transaction_id"
 
 
 class Transaction(Base):
@@ -41,7 +61,14 @@ class Transaction(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("account.id"))
     instrument_id: Mapped[int | None] = mapped_column(ForeignKey("instrument.id"))
-    op_type: Mapped[OperationType] = mapped_column(String(24))
+    # Нативный enum PostgreSQL, а не String(24): из строковой колонки значение
+    # приходило как str, и `entry.op_type is OperationType.REDEMPTION` молча
+    # возвращало ложь — погашение облигаций не закрывало позицию, а юнит-тест
+    # на объекте из памяти при этом проходил.
+    op_type: Mapped[OperationType] = mapped_column(
+        Enum(OperationType, name="operation_type", native_enum=True,
+             values_callable=lambda enum: [member.value for member in enum])
+    )
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), default=Decimal("0"))
     price: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0"))

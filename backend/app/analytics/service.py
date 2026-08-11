@@ -50,7 +50,12 @@ class PositionRow:
     # знак рубля к суммам в USD, HKD и CNY.
     currency: str
     quantity: Decimal
-    average_price: Decimal
+    # None — себестоимость неизвестна: бумаги пришли переводом, брокер цены не
+    # сообщил. Это не ноль и не «бесплатно»: показывать тут число нечестно.
+    average_price: Decimal | None
+    # Ложь — по позиции нет ни средней, ни доходности. Причина отличается от
+    # «нет котировки»: там неизвестна текущая цена, здесь — цена покупки.
+    cost_basis_known: bool
     # Валюта средней цены — валюта расчётов по бумаге из справочника брокера, и
     # она не обязана совпадать с `currency` (валютой котировки). У замещающей
     # облигации справочник говорит «рубли», покупалась она за рубли, а MOEX
@@ -165,7 +170,13 @@ def position_rows(session: Session) -> list[PositionRow]:
         reference_currency = _currency_of(instrument)
         price_currency = (valued.currency or reference_currency).upper()
 
-        if valued.value is None or price_currency != reference_currency:
+        if not position.cost_basis_known:
+            # Себестоимости нет вовсе — считать не из чего. Отдельная ветка до
+            # проверки котировки: причина умолчания другая, и на экране она
+            # называется своими словами.
+            profit = None
+            percent = None
+        elif valued.value is None or price_currency != reference_currency:
             # Не ноль: «0 ₽» и «0,0%» в таблице читаются как «бумага ничего не
             # стоит», хотя на деле котировки просто нет.
             #
@@ -197,7 +208,8 @@ def position_rows(session: Session) -> list[PositionRow]:
                 # рублёвые), а котируется она в юанях.
                 currency=price_currency,
                 quantity=position.quantity,
-                average_price=position.average_price,
+                average_price=position.average_price if position.cost_basis_known else None,
+                cost_basis_known=position.cost_basis_known,
                 average_price_currency=reference_currency,
                 last_price=valued.price,
                 market_value=valued.value,

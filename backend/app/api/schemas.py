@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, field_serializer
@@ -58,7 +58,10 @@ class PositionOut(BaseModel):
     # по умолчанию.
     currency: str
     quantity: Decimal
-    average_price: Decimal
+    # None — себестоимость неизвестна (бумаги пришли переводом). Сериализуется
+    # как null и на экране даёт прочерк, а не ноль.
+    average_price: Decimal | None
+    cost_basis_known: bool
     # Валюта средней цены — своя, потому что у замещающей облигации расчёты
     # рублёвые, а котировка валютная (см. PositionRow в app/analytics/service.py).
     average_price_currency: str
@@ -107,12 +110,73 @@ class HistoryPointOut(BaseModel):
         return f"{value:.4f}"
 
 
+class SuggestionOut(BaseModel):
+    """Гипотеза корпоративного действия, предложенная системой.
+
+    Едет вместе со строкой расхождения, а не отдельным списком: сопоставлять
+    их на стороне интерфейса значило бы повторить там правило подбора пары.
+    """
+
+    from_isin: str
+    from_quantity: Decimal
+    to_isin: str
+    to_quantity: Decimal
+    # Бумага-получатель заблокирована у брокера целиком — усиливающий признак.
+    blocked_fully: bool
+    # Кандидатов с такой же величиной несколько: выбирает владелец.
+    ambiguous: bool
+
+    @field_serializer("from_quantity", "to_quantity")
+    def serialize_quantity(self, value: Decimal) -> str:
+        return f"{value:.8f}"
+
+
+class DecisionIn(BaseModel):
+    # Подпись счёта — та же, что показана в строке расхождения: интерфейс
+    # идентификаторов счетов не видит.
+    account: str
+    kind: str
+    status: str
+    from_isin: str | None = None
+    from_quantity: Decimal | None = None
+    to_isin: str | None = None
+    to_quantity: Decimal | None = None
+    cost_basis: Decimal | None = None
+    effective_at: datetime
+    note: str
+
+
+class DecisionOut(BaseModel):
+    id: int
+    account: str
+    kind: str
+    status: str
+    from_isin: str | None
+    from_quantity: Decimal | None
+    to_isin: str | None
+    to_quantity: Decimal | None
+    effective_at: datetime
+    note: str
+    reverts_id: int | None
+
+    @field_serializer("from_quantity", "to_quantity")
+    def serialize_quantity(self, value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.8f}"
+
+
+class RevertIn(BaseModel):
+    note: str
+
+
 class ReconciliationOut(BaseModel):
     isin: str | None
     status: str
     ledger_quantity: Decimal
     broker_quantity: Decimal
     account: str
+    # Гипотезы конвертации по этой строке. Пусто — пары не нашлось, и
+    # расхождение закрывается ручной корректировкой.
+    suggestions: list[SuggestionOut] = []
 
     @field_serializer("ledger_quantity", "broker_quantity")
     def serialize_quantity(self, value: Decimal) -> str:

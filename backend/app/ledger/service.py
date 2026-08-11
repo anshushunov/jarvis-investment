@@ -1,6 +1,9 @@
+import hashlib
+import logging
 from dataclasses import dataclass
+from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -8,7 +11,10 @@ from app.db_errors import is_unique_violation
 from app.instruments.service import resolve_instrument
 from app.ledger.dedup import natural_key
 from app.ledger.schemas import RawOperation
-from app.models import Account, Instrument, Transaction
+from app.models import CORRECTS_TRANSACTION_ID_PAYLOAD_KEY, Account, Instrument, OperationType, Transaction
+from app.positions.engine import signed_quantity
+
+logger = logging.getLogger(__name__)
 
 # UniqueConstraint("dedup_key", name="uq_transaction_dedup_key") в app/models/transaction.py.
 _DEDUP_KEY_UNIQUE_CONSTRAINT = "uq_transaction_dedup_key"
@@ -35,6 +41,11 @@ def _is_duplicate_conflict(exc: IntegrityError) -> bool:
 class AppendResult:
     inserted: int
     skipped: int
+    # Операции, которые брокер переписал задним числом: на разницу записана
+    # корректирующая запись. Должно быть редкостью — частый случай
+    # доисполняющейся заявки закрыт окном STILL_FILLING_WINDOW в коннекторе.
+    # Если счётчик стабильно ненулевой, значит обход перестал работать.
+    corrected: int = 0
 
 
 class _InstrumentCache:
@@ -128,6 +139,149 @@ def _load_known_keys(session: Session, keys: list[str]) -> set[str]:
     )
 
 
+def _find_changed(
+    session: Session, account: Account, source: str, op: RawOperation
+) -> tuple[Transaction, Decimal, Decimal, Decimal] | None:
+    """Уже записанная операция с тем же внешним идентификатором, содержание
+    которой разошлось с присланным, вместе с уже записанными итогами.
+
+    Разошлось — значит брокер переписал операцию задним числом. Совпало — это
+    обычный дубль пересекающегося окна синхронизации, и говорить о нём нечего.
+
+    Итоги возвращаются отсюда, а не пересчитываются вызывающим: они уже посчитаны
+    здесь, и второй такой же запрос к базе на каждую операцию батча был бы
+    заметен на первой полной синхронизации счёта.
+
+    Количество и записанное, и присланное приводится к общему знаковому виду
+    (app/positions/engine.py, signed_quantity): в журнале количество продажи
+    беззнаковое, а количество корректировки знаковое, и складывать их как есть
+    нельзя — продажа 12, исправленная до 100, давала бы 12 + (−88) = −76 против
+    присланных 100, и одна и та же правка переписывалась бы на каждой
+    синхронизации. У операций, которые количество не двигают вовсе (деньги,
+    комиссия, OTHER), знаковое количество нулевое с обеих сторон: правку такой
+    операции видно по сумме и цене, а поправлять в позициях у неё нечего.
+    """
+    if op.external_id is None:
+        return None
+
+    # Корректирующая запись не может носить тот же external_id, что и
+    # исправляемая (столкнулась бы с uq_transaction_source_external), поэтому
+    # хранит его отдельным полем в payload (см. _correction_for). Без ветки по
+    # этому полю сюда попадала бы только исходная запись — корректировка
+    # оставалась бы невидимой для recorded_quantity/recorded_amount ниже, и
+    # одна и та же правка переписывалась бы заново на каждой синхронизации.
+    existing = session.execute(
+        select(Transaction).where(
+            Transaction.account_id == account.id,
+            Transaction.source == source,
+            or_(
+                Transaction.external_id == op.external_id,
+                Transaction.payload["corrects_external_id"].astext == op.external_id,
+            ),
+        ).order_by(Transaction.id)
+    ).scalars().all()
+    if not existing:
+        return None
+
+    # Корректирующие записи уже учтены: сравниваем с суммой всего, что по этой
+    # операции записано, иначе одна и та же правка порождала бы корректировку
+    # при каждой синхронизации.
+    recorded_quantity = sum(
+        (signed_quantity(tx.op_type, tx.quantity) for tx in existing), Decimal("0")
+    )
+    recorded_amount = sum((tx.amount for tx in existing), Decimal("0"))
+    # Цена — не поток, в отличие от количества и суммы, и по всем записям
+    # операции не складывается. Действующая цена — та, что несёт самая
+    # последняя запись: исходная, пока корректировок не было, иначе последняя
+    # корректировка (она переносит вперёд самую свежую цену, присланную
+    # брокером на момент своей записи). Без этого сравнения правка одной
+    # только цены при тех же количестве и сумме проходила бы мимо
+    # _find_changed как «не изменилось», падала в to_insert со старым
+    # external_id и тихо гасилась построчным запасным путём в _insert_one —
+    # без единой записи в лог, в отличие от ветки корректировки.
+    recorded_price = existing[-1].price
+
+    if (
+        recorded_quantity == signed_quantity(op.op_type, op.quantity)
+        and recorded_amount == op.amount
+        and recorded_price == op.price
+    ):
+        return None
+    return existing[0], recorded_quantity, recorded_amount, recorded_price
+
+
+def _correction_for(
+    account: Account, source: str, op: RawOperation, original: Transaction,
+    recorded_quantity: Decimal, recorded_amount: Decimal,
+) -> Transaction:
+    """Корректирующая запись на разницу между присланным и записанным.
+
+    Одна запись на изменившуюся операцию, а не по записи на каждое поле:
+    свёртка обязана увидеть изменение целиком, иначе цена уедет отдельно от
+    количества.
+
+    Разность считается по знаковому количеству, а не по сырому: у корректировки
+    тип ADJUSTMENT, и её направление движок берёт из знака количества
+    (app/positions/engine.py, signed_quantity — там же записано и само
+    соглашение). Сырая разность верна только для покупок: доисполненная с 12 до
+    100 продажа давала +88, и движок открывал партию на 88 бумаг по цене
+    продажи — позиция выходила 276 вместо 100, да ещё с «известной»
+    себестоимостью, равной цене продажи. `recorded_quantity` приходит уже
+    знаковым (см. _find_changed).
+    """
+    return Transaction(
+        account_id=account.id,
+        instrument_id=original.instrument_id,
+        op_type=OperationType.ADJUSTMENT,
+        executed_at=op.executed_at,
+        quantity=signed_quantity(op.op_type, op.quantity) - recorded_quantity,
+        price=op.price,
+        amount=op.amount - recorded_amount,
+        currency=op.currency,
+        fee=Decimal("0"),
+        external_id=f"correction:{original.external_id}",
+        source=source,
+        dedup_key=hashlib.sha256(
+            f"correction|{source}|{account.external_id}|{original.external_id}"
+            f"|{op.quantity}|{op.amount}".encode()
+        ).hexdigest(),
+        payload={
+            CORRECTS_TRANSACTION_ID_PAYLOAD_KEY: original.id,
+            "corrects_external_id": original.external_id,
+        },
+    )
+
+
+def _insert_correction(session: Session, account: Account, correction: Transaction) -> bool:
+    """Вставляет одну корректирующую запись под собственным SAVEPOINT.
+
+    В отличие от _insert_one, конфликт здесь — не безобидный дубль, который
+    можно молча проглотить: коллизия по (account_id, source, external_id)
+    корректировки означает, что эту же исходную операцию брокер переписывает
+    уже не в первый раз, а external_id корректировки не рассчитан на две
+    правки одной и той же исходной записи. Потерянная корректировка — это
+    потерянная правка брокера, поэтому конфликт логируется как ошибка,
+    требующая ручного разбора, а не гасится тихо.
+    """
+    try:
+        with session.begin_nested():
+            session.add(correction)
+            session.flush()
+    except IntegrityError as exc:
+        if not _is_duplicate_conflict(exc):
+            raise
+        logger.error(
+            "Не удалось записать корректирующую запись для операции %s на счёте %s "
+            "(external_id корректировки %s): конфликт по уникальному ограничению журнала. "
+            "Похоже, эта операция уже была скорректирована прежде, а повторная правка той же "
+            "записи не предусмотрена — корректировка потеряна, нужен ручной разбор.",
+            correction.payload.get("corrects_external_id"), account.external_id,
+            correction.external_id,
+        )
+        return False
+    return True
+
+
 def append_operations(
     session: Session, account: Account, source: str, operations: list[RawOperation]
 ) -> AppendResult:
@@ -140,6 +294,7 @@ def append_operations(
     known = _load_known_keys(session, keys)
 
     to_insert: list[tuple[RawOperation, str]] = []
+    corrections: list[Transaction] = []
     skipped = 0
     seen_in_batch: set[str] = set()
 
@@ -147,11 +302,56 @@ def append_operations(
         if key in known or key in seen_in_batch:
             skipped += 1
             continue
+        changed = _find_changed(session, account, source, op)
+        if changed is not None:
+            original, recorded_quantity, recorded_amount, recorded_price = changed
+            corrections.append(_correction_for(
+                account, source, op, original, recorded_quantity, recorded_amount
+            ))
+            # Количество в обеих половинах сообщения знаковое: сравнивать в
+            # одной строке беззнаковое присланное с уже сложенным знаковым
+            # записанным значило бы читать «было −100, стало 100» там, где
+            # изменилась одна цена.
+            logger.warning(
+                "Брокер изменил операцию %s на счёте %s: было количество %s на %s по цене %s, "
+                "стало %s на %s по цене %s. Записана корректирующая запись.",
+                op.external_id, account.external_id, recorded_quantity,
+                recorded_amount, recorded_price,
+                signed_quantity(op.op_type, op.quantity), op.amount, op.price,
+            )
+            skipped += 1
+            continue
         seen_in_batch.add(key)
         to_insert.append((op, key))
 
-    if not to_insert:
+    if not to_insert and not corrections:
         return AppendResult(inserted=0, skipped=skipped)
+
+    # Корректировки вставляются раньше и отдельно от to_insert, а не заодно с ним:
+    # обе ветки ниже (быстрый путь и построчный запасной) читают corrected_count уже
+    # готовым, независимо от того, какая из них обработает остаток батча.
+    corrected_count = 0
+    if corrections:
+        try:
+            with session.begin_nested():
+                session.add_all(corrections)
+                session.flush()
+            corrected_count = len(corrections)
+        except IntegrityError as exc:
+            if not _is_duplicate_conflict(exc):
+                raise
+            # Тот же приём, что и у to_insert ниже: SAVEPOINT откатил всю пачку
+            # корректировок и изгнал их из сессии, поэтому вставляем по одной под
+            # своим SAVEPOINT — но, в отличие от to_insert, конфликт для
+            # корректировки не безобидный дубль (см. _insert_correction), а
+            # потерянная правка брокера, которую нельзя списать молча.
+            for correction in corrections:
+                if _insert_correction(session, account, correction):
+                    corrected_count += 1
+            session.flush()
+
+    if not to_insert:
+        return AppendResult(inserted=0, skipped=skipped, corrected=corrected_count)
 
     # Быстрый путь: один общий flush на весь батч (SQLAlchemy сам батчирует вставку
     # через insertmanyvalues). Замер на 5000 операциях, три прогона, PostgreSQL 16 на
@@ -190,8 +390,8 @@ def append_operations(
             else:
                 conflict_skipped += 1
         session.flush()
-        return AppendResult(inserted=inserted, skipped=skipped + conflict_skipped)
+        return AppendResult(inserted=inserted, skipped=skipped + conflict_skipped, corrected=corrected_count)
 
     # Второй flush() здесь не нужен: он уже случился внутри блока with session.begin_nested()
     # выше — к этому моменту нечего сбрасывать, добавление было бы чистым no-op.
-    return AppendResult(inserted=len(transactions), skipped=skipped)
+    return AppendResult(inserted=len(transactions), skipped=skipped, corrected=corrected_count)

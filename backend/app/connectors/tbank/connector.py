@@ -206,6 +206,10 @@ class TBankConnector:
             positions.append(BrokerPosition(
                 isin=instrument.isin, ticker=ticker, quantity=qty,
                 blocked=blocked_by_figi.get(figi, quantity("0")),
+                # Тот же BrokerInstrument, что уже разрешён по FIGI выше:
+                # у бумаги, которой нет в нашем справочнике, это единственный
+                # источник вида, валюты и названия.
+                reference=instrument,
             ))
         return positions
 

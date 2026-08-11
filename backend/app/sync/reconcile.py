@@ -4,7 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerPosition
-from app.models import Account, Instrument, Position, Reconciliation
+from app.models import Account, BrokerHolding, Instrument, Position, Reconciliation
 
 TOLERANCE = Decimal("0.000001")
 
@@ -67,3 +67,31 @@ def reconcile_account(
 
     session.flush()
     return findings
+
+
+def reconcile_from_snapshot(session: Session, account: Account) -> list[Reconciliation]:
+    """Пересчитывает сверку по уже сохранённому снимку брокера.
+
+    Нужна после решения владельца: подтверждение конвертации меняет позиции, и
+    расхождения обязаны пересчитаться сразу. Ходить за этим к брокеру незачем —
+    снимок лежит в broker_holding с прошлой синхронизации, а частота запросов у
+    T-Invest API ограничена.
+
+    Пустая таблица снимка означает «снимка нет», а не «у брокера ничего нет»:
+    reconcile_account сначала стирает прежние расхождения счёта, а потом
+    выписывает missing_at_broker на каждую позицию журнала. Счёт, чья
+    синхронизация упала, не дойдя до store_holdings, получал бы после первого же
+    решения владельца полный набор выдуманных расхождений. Отличить пустой
+    снимок от отсутствующего нечем, поэтому выбор в пользу осторожного: старые
+    расхождения остаются как есть до следующей удачной синхронизации.
+    """
+    holdings = session.execute(
+        select(BrokerHolding).where(BrokerHolding.account_id == account.id)
+    ).scalars().all()
+    if not holdings:
+        return []
+    return reconcile_account(session, account, [
+        BrokerPosition(isin=holding.isin, ticker=None,
+                       quantity=holding.quantity, blocked=holding.blocked)
+        for holding in holdings
+    ])
