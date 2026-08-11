@@ -235,7 +235,13 @@ def test_ledger_position_without_isin_is_logged(caplog, session, account, instru
     caplog.set_level(logging.WARNING, logger="app.sync.reconcile")
     reconcile_account(session, account, [])
 
+    # Подстрока "10" ловится и первичным ключом instrument_id — он растёт от
+    # прогона к прогону и не откатывается вместе с транзакцией, так что рано
+    # или поздно совпадёт с количеством и замаскирует пропажу. Проверяем
+    # последний позиционный аргумент записи лога напрямую: это то самое
+    # значение, что передано в logger.warning как количество, а не текст,
+    # где оно могло случайно затеряться среди других чисел.
     assert any(
-        "без ISIN" in record.getMessage() and "10" in record.getMessage()
+        "без ISIN" in record.getMessage() and record.args[-1] == Decimal("10")
         for record in caplog.records
     )
