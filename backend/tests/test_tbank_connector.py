@@ -610,6 +610,42 @@ def test_position_without_isin_is_logged(caplog, connector_with_isinless_positio
 
 
 @respx.mock
+def test_cash_pseudo_position_is_dropped_without_a_warning(caplog):
+    """Денежная псевдо-позиция GetPortfolio отбрасывается молча — не как
+    настоящая бумага без ISIN. RUB000UTSTOM и подобные несут настоящий FIGI
+    (ранняя проверка `if not figi` их не отсекает) и не несут ISIN — это не
+    пробел справочника, а то, как устроены деньги в GetPortfolio (см.
+    докстринг fetch_cash). Отличает их instrumentType "currency": тем же
+    полем, что и KIND_BY_INSTRUMENT_TYPE. Живой счёт синхронизируется каждые
+    пятнадцать минут по шести счетам в нескольких валютах — без этой тишины
+    предупреждение о «бумаге без ISIN» кричало бы на каждую денежную позицию
+    и заглушило бы настоящую потерянную бумагу.
+    """
+    respx.post(f"{OPERATIONS}/GetPortfolio").mock(
+        return_value=httpx.Response(200, json={
+            "positions": [
+                {
+                    "figi": "RUB000UTSTOM",
+                    "instrumentType": "currency",
+                    "quantity": {"units": "500", "nano": 0},
+                    "ticker": "RUB000UTSTOM",
+                },
+            ],
+        })
+    )
+    _mock_instrument_lists(
+        Currencies=[{"figi": "RUB000UTSTOM", "ticker": "RUB000UTSTOM"}],  # без isin
+    )
+    _mock_empty_positions()
+
+    caplog.set_level(logging.WARNING, logger="app.connectors.tbank.connector")
+    positions = TBankConnector(TOKEN).fetch_positions("1000000001")
+
+    assert positions == []
+    assert not any("без ISIN" in record.getMessage() for record in caplog.records)
+
+
+@respx.mock
 def test_fetch_positions_keeps_full_precision_for_fractional_quantity():
     # units=10, nano=123456789: если бы количество сначала округлялось до
     # денежных 4 знаков (money()), а потом расширялось до 8 (quantity()),

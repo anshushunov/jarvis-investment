@@ -291,7 +291,7 @@ export function DecisionPanel({ row, onDone }: {
                          style={{ display: "block", width: "100%" }} />
                 </label>
                 <label style={{ fontSize: 12, gridColumn: "1 / -1" }}>
-                  Себестоимость всей партии, ₽ — если знаете
+                  Себестоимость всей партии, в валюте бумаги — если знаете
                   <input value={costBasis} onChange={(e) => setCostBasis(e.target.value)}
                          placeholder="не знаю"
                          style={{ display: "block", width: "100%" }} />

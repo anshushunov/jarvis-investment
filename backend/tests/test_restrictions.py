@@ -134,15 +134,16 @@ _FLAG_COMBINATIONS = [
 
 def test_restriction_rule_covers_all_four_flag_combinations_via_operations_channel(session):
     """Самое рискованное место всей задачи: правило «ограничением считается
-    недоступность ОБЕИХ операций сразу» (_restricted в
+    недоступность ОБЕИХ операций сразу» (trading_restricted_from_flags в
     app/instruments/service.py). Опечатка `and` -> `or` даёт то же самое на
     двух прежних тестах (там всегда обе доступны или обе недоступны) — здесь
     же участвуют все четыре комбинации, и смешанные обязаны остаться
     неограниченными.
 
     Канал — настоящий: resolve_instrument на новой операции создаёт
-    инструмент через _insert_instrument -> _reference_from -> _restricted,
-    а не через подстановку restricted в apply_reference напрямую."""
+    инструмент через _insert_instrument -> _reference_from ->
+    trading_restricted_from_flags, а не через подстановку restricted в
+    apply_reference напрямую."""
     for name, code, buy, sell, expected in _FLAG_COMBINATIONS:
         isin = f"RU0OPCH000{code}"
         instrument = resolve_instrument(session, _buy_with_flags(isin, buy, sell))

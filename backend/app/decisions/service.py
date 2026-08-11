@@ -21,7 +21,7 @@ from app.models import (
     Transaction,
 )
 from app.models.ledger_decision import DecisionKind, DecisionStatus
-from app.money import money, quantity as q
+from app.money import BASE_CURRENCY, money, quantity as q
 from app.positions.engine import DECREASING, ConversionError, ReversalError, decreasing_adjustment
 from app.positions.service import rebuild_positions
 from app.sync.reconcile import reconcile_from_snapshot
@@ -135,12 +135,14 @@ def _entry(
 def _currency_of(session: Session, instrument_id: int) -> str:
     """Валюта бумаги для записи, порождённой решением.
 
-    Рубль остаётся запасным значением: колонка currency в журнале NOT NULL, а
-    инструмент, заведённый из снимка без справочных сведений, валюты может не
-    иметь вовсе.
+    Базовая валюта остаётся запасным значением не потому, что у инструмента
+    сегодня бывает пустая валюта: Instrument.currency объявлена NOT NULL
+    (Mapped[str]), и оба пути создания инструмента всегда пишут в неё
+    непустое значение. Это страховка на случай, если колонка когда-нибудь
+    станет необязательной, — а не обход существующего пробела в данных.
     """
     instrument = session.get(Instrument, instrument_id)
-    return (instrument.currency if instrument and instrument.currency else "RUB").upper()
+    return (instrument.currency if instrument and instrument.currency else BASE_CURRENCY).upper()
 
 
 def _generate_entries(session: Session, decision: LedgerDecision) -> None:

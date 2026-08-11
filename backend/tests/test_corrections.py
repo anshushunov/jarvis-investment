@@ -293,7 +293,7 @@ def test_find_changed_does_not_query_per_operation(session, account):
     Количество и сумма варьируются по индексу, а не общие на все 50: dedup_key
     (app/ledger/dedup.py) не зависит от external_id, и при одинаковом
     содержании операции 2..50 совпали бы по dedup_key с первой и были бы молча
-    отсеяны как дубль внутри батча ещё до обращения к _find_changed — тест
+    отсеяны как дубль внутри батча ещё до обращения к _changed_against — тест
     тогда не отличал бы старое поведение от нового.
     """
     operations = [
@@ -318,7 +318,7 @@ def test_find_changed_does_not_query_per_operation(session, account):
     # JSONB-полю payload (astext), других обращений к payload -> ->> в модуле
     # нет.
     lookups = [s for s in statements if "payload ->>" in s]
-    assert len(lookups) <= 1, (
+    assert len(lookups) == 1, (
         f"Поиск переписанных операций ушёл {len(lookups)} раз на батч из 50 — "
         "запрос обязан быть один на батч."
     )

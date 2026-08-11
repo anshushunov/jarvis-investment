@@ -818,8 +818,16 @@ def test_generated_entry_is_read_back_through_the_shared_payload_key(session):
 
 
 @pytest.fixture
-def hkd_instruments(session, account) -> tuple[Instrument, Instrument]:
-    """Две гонконгские бумаги решения №1 — обе в HKD, а не в рубле по умолчанию.
+def convertible_instruments(session, account) -> tuple[Instrument, Instrument]:
+    """Бумага-источник решения №1 в HKD, бумага-получатель — в USD: разные
+    валюты по разные стороны конвертации, а не одна и та же на обеих.
+
+    Пока обе бумаги были в HKD, тест по ним не заметил бы перепутанные
+    стороны: если бы _generate_entries по опечатке отдал CONVERSION_OUT и
+    CONVERSION_IN валюту одного и того же инструмента (строки там отличаются
+    ровно одним словом — from_instrument_id/to_instrument_id), обе записи
+    всё равно вышли бы HKD, и проверка по множеству валют осталась бы
+    зелёной. Разные валюты делают это различимым.
 
     Бумага-источник заранее лежит в журнале: без этого движок откажет при
     свёртке конвертации («списывает больше, чем открыто») — тот же приём, что
@@ -827,8 +835,8 @@ def hkd_instruments(session, account) -> tuple[Instrument, Instrument]:
     """
     source = Instrument(isin="HK0000310034", ticker="HK03", secid="HK03",
                         kind="share", currency="HKD")
-    target = Instrument(isin="HK0000051877", ticker="HK05", secid="HK05",
-                        kind="share", currency="HKD")
+    target = Instrument(isin="US0378331005", ticker="AAPL", secid="AAPL",
+                        kind="share", currency="USD")
     session.add_all([source, target])
     session.flush()
 
@@ -838,18 +846,19 @@ def hkd_instruments(session, account) -> tuple[Instrument, Instrument]:
     return source, target
 
 
-def test_conversion_entries_carry_instrument_currency(session, account, hkd_instruments):
-    """Записи решения несут валюту своей бумаги, а не рубль по умолчанию.
+def test_conversion_entries_carry_each_sides_own_currency(session, account, convertible_instruments):
+    """CONVERSION_OUT несёт валюту бумаги-источника, CONVERSION_IN — бумаги-получателя.
 
-    Суммы у них нулевые, и сегодня это безвредно, но у гонконгского ETF из
-    решения №1 валюта HKD: первый же потребитель, посмотревший на валюту
-    записи, соврал бы.
+    Суммы у этих записей нулевые, и сегодня это безвредно, но у гонконгского
+    ETF из решения №1 валюта HKD, а у бумаги, в которую он превращается, может
+    быть любая другая: первый же потребитель, посмотревший на валюту записи,
+    соврал бы, если бы стороны в _generate_entries перепутались местами.
     """
     from app.decisions.service import record_decision
-    from app.models import Transaction
+    from app.models import OperationType, Transaction
     from sqlalchemy import select
 
-    source, target = hkd_instruments  # обе в HKD
+    source, target = convertible_instruments  # HKD -> USD
 
     decision = LedgerDecision(
         account_id=account.id,
@@ -862,11 +871,73 @@ def test_conversion_entries_carry_instrument_currency(session, account, hkd_inst
     )
     record_decision(session, decision)
 
-    entries = session.execute(
-        select(Transaction).where(Transaction.source == "manual")
-    ).scalars().all()
+    entries = {
+        entry.op_type: entry.currency
+        for entry in session.execute(
+            select(Transaction).where(Transaction.source == "manual")
+        ).scalars()
+    }
 
-    assert {entry.currency for entry in entries} == {"HKD"}
+    assert entries[OperationType.CONVERSION_OUT] == "HKD"
+    assert entries[OperationType.CONVERSION_IN] == "USD"
+
+
+def test_adjustment_credit_entry_carries_instrument_currency(session, account):
+    """Зачисляющая поправка несёт валюту своей бумаги, а не рубль счёта.
+
+    Ветка ADJUSTMENT/CREDIT (to_instrument_id) до этого теста валюту записи
+    не проверял ни один тест этого файла."""
+    from app.decisions.service import record_decision
+    from app.models import Transaction
+    from sqlalchemy import select
+
+    instrument = Instrument(isin="HK0000310034", ticker="HK03", secid="HK03",
+                            kind="share", currency="HKD")
+    session.add(instrument)
+    session.flush()
+
+    record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.ADJUSTMENT,
+        status=DecisionStatus.CONFIRMED,
+        to_instrument_id=instrument.id, to_quantity=Decimal("10"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Зачисление по отчёту брокера", proposed={},
+    ))
+
+    entry = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalar_one()
+    assert entry.currency == "HKD"
+
+
+def test_adjustment_debit_entry_carries_instrument_currency(session, account):
+    """Списывающая поправка тоже несёт валюту своей бумаги, а не рубль счёта.
+
+    Ветка ADJUSTMENT/DEBIT (from_instrument_id) до этого теста валюту записи
+    не проверял ни один тест этого файла."""
+    from app.decisions.service import record_decision
+    from app.models import Transaction
+    from sqlalchemy import select
+
+    instrument = Instrument(isin="HK0000310034", ticker="HK03", secid="HK03",
+                            kind="share", currency="HKD")
+    session.add(instrument)
+    session.flush()
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    record_decision(session, LedgerDecision(
+        account_id=account.id, kind=DecisionKind.ADJUSTMENT,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=instrument.id, from_quantity=Decimal("40"),
+        effective_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        note="Сорок бумаг в журнале лишние", proposed={},
+    ))
+
+    entry = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalar_one()
+    assert entry.currency == "HKD"
 
 
 def test_decision_can_point_at_the_one_it_reverts(session):

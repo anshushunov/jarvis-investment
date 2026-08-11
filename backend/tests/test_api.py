@@ -168,7 +168,7 @@ def test_history_does_not_query_accounts_per_point(client, session, account):
 
     assert response.status_code == 200
     lookups = [s for s in statements if "FROM account" in s]
-    assert len(lookups) <= 1, (
+    assert len(lookups) == 1, (
         f"Выбор счетов ушёл {len(lookups)} раз на 5 точек истории — запрос "
         "обязан быть один на весь ответ."
     )
