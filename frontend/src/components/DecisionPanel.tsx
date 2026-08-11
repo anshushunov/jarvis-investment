@@ -46,6 +46,11 @@ export function DecisionPanel({ row, onDone }: {
   const [fromQuantity, setFromQuantity] = useState(certainSuggestion?.from_quantity ?? "");
   const [toIsin, setToIsin] = useState(certainSuggestion?.to_isin ?? "");
   const [toQuantity, setToQuantity] = useState(certainSuggestion?.to_quantity ?? "");
+  // Себестоимость всей зачисляемой партии, если владелец её знает. Пусто —
+  // партия помечается неизвестной себестоимостью, и по позиции не
+  // показываются ни средняя цена, ни доходность (backend/app/decisions/
+  // service.py, _generate_entries).
+  const [costBasis, setCostBasis] = useState("");
   const [effectiveAt, setEffectiveAt] = useState(today());
   const [note, setNote] = useState("");
   const [validation, setValidation] = useState<string | null>(null);
@@ -91,6 +96,7 @@ export function DecisionPanel({ row, onDone }: {
     setFromQuantity("");
     setToIsin("");
     setToQuantity("");
+    setCostBasis("");
   }
 
   // Тот же принцип при смене направления корректировки: поле стороны, что
@@ -102,6 +108,7 @@ export function DecisionPanel({ row, onDone }: {
     setFromQuantity("");
     setToIsin("");
     setToQuantity("");
+    setCostBasis("");
   }
 
   function confirm(status: "CONFIRMED" | "REJECTED") {
@@ -120,6 +127,7 @@ export function DecisionPanel({ row, onDone }: {
     let payloadFromQuantity: string | null = null;
     let payloadToIsin: string | null = null;
     let payloadToQuantity: string | null = null;
+    let payloadCostBasis: string | null = null;
 
     if (kind === "CONVERSION") {
       payloadFromIsin = fromIsin || null;
@@ -133,6 +141,7 @@ export function DecisionPanel({ row, onDone }: {
       } else {
         payloadToIsin = toIsin || null;
         payloadToQuantity = toQuantity || null;
+        payloadCostBasis = costBasis || null;
       }
     }
 
@@ -144,6 +153,7 @@ export function DecisionPanel({ row, onDone }: {
       from_quantity: payloadFromQuantity,
       to_isin: payloadToIsin,
       to_quantity: payloadToQuantity,
+      cost_basis: payloadCostBasis,
       effective_at: `${effectiveAt}T00:00:00Z`,
       note,
     });
@@ -262,6 +272,16 @@ export function DecisionPanel({ row, onDone }: {
                   Сколько зачислить
                   <input value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
                          style={{ display: "block", width: "100%" }} />
+                </label>
+                <label style={{ fontSize: 12, gridColumn: "1 / -1" }}>
+                  Себестоимость всей партии, ₽ — если знаете
+                  <input value={costBasis} onChange={(e) => setCostBasis(e.target.value)}
+                         placeholder="не знаю"
+                         style={{ display: "block", width: "100%" }} />
+                  <span style={{ display: "block", fontSize: 11, color: "var(--tx-2)" }}>
+                    Пусто — себестоимость останется неизвестной, и по позиции не
+                    будет ни средней цены, ни доходности.
+                  </span>
                 </label>
               </>
             )}

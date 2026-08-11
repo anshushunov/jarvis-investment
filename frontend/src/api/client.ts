@@ -104,6 +104,8 @@ export interface DecisionInput {
   from_quantity?: string | null;
   to_isin?: string | null;
   to_quantity?: string | null;
+  // Себестоимость всей зачисляемой партии; null — владелец её не знает, и
+  // партия помечается партией с неизвестной себестоимостью.
   cost_basis?: string | null;
   effective_at: string;
   note: string;

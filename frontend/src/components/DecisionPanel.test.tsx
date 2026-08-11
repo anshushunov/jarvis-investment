@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,15 @@ const AMBIGUOUS: ReconciliationRow = {
       blocked_fully: false, ambiguous: true,
     },
   ],
+};
+
+const ROW: ReconciliationRow = {
+  isin: null,
+  status: "missing_at_broker",
+  ledger_quantity: "0.00000000",
+  broker_quantity: "0.00000000",
+  account: "Инвестиционный",
+  suggestions: [],
 };
 
 function renderPanel(row: ReconciliationRow) {
@@ -204,5 +213,51 @@ describe("DecisionPanel", () => {
     expect(body.from_quantity).toBe("2");
     expect(body.to_isin).toBeNull();
     expect(body.to_quantity).toBeNull();
+  });
+
+  it("отправляет себестоимость зачисляемой бумаги, когда владелец её знает", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementation(() => Promise.resolve(jsonResponse({ id: 1 })));
+
+    renderPanel({ ...ROW, suggestions: [] });
+
+    await user.type(screen.getByLabelText(/в какую бумагу/i), "RU000A0JQUZ6");
+    await user.type(screen.getByLabelText(/сколько зачислить/i), "351");
+    await user.type(screen.getByLabelText(/себестоимость/i), "40000");
+    await user.type(screen.getByLabelText(/пояснение/i), "Ввод бумаг извне");
+    await user.click(screen.getByRole("button", { name: /подтвердить/i }));
+
+    await waitFor(() => {
+      const call = fetchSpy.mock.calls.find(
+        ([url]) => typeof url === "string" && url.endsWith("/decisions"),
+      );
+      expect(call).toBeDefined();
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      // Без себестоимости позиция навсегда остаётся без средней цены и без
+      // доходности — а владелец её знает и ввести не может.
+      expect(body.cost_basis).toBe("40000");
+    });
+  });
+
+  it("не отправляет себестоимость, когда поле пусто", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementation(() => Promise.resolve(jsonResponse({ id: 1 })));
+
+    renderPanel({ ...ROW, suggestions: [] });
+
+    await user.type(screen.getByLabelText(/в какую бумагу/i), "RU000A0JQUZ6");
+    await user.type(screen.getByLabelText(/сколько зачислить/i), "351");
+    await user.type(screen.getByLabelText(/пояснение/i), "Ввод бумаг извне");
+    await user.click(screen.getByRole("button", { name: /подтвердить/i }));
+
+    await waitFor(() => {
+      const call = fetchSpy.mock.calls.find(
+        ([url]) => typeof url === "string" && url.endsWith("/decisions"),
+      );
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body.cost_basis).toBeNull();
+    });
   });
 });
