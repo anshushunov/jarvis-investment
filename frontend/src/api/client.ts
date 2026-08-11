@@ -68,6 +68,9 @@ export interface PositionRow {
 export interface HistoryPoint {
   date: string;
   total_value: string;
+  // Разбивка итога по счетам на эту дату; ключ — подпись счёта. Пусто у
+  // снимков, снятых до появления разбивки.
+  by_account: Record<string, string>;
 }
 
 export interface Suggestion {

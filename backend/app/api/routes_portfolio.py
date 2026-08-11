@@ -18,6 +18,7 @@ from app.api.schemas import (
 from app.db import get_session
 from app.decisions.suggestions import suggestions_for_account
 from app.models import Account, DailySnapshot, Reconciliation
+from app.snapshots.service import snapshot_by_account
 from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -102,7 +103,14 @@ def get_history(days: int = 90, session: Session = Depends(get_session)) -> list
     rows = session.execute(
         select(DailySnapshot).where(DailySnapshot.on_date >= since).order_by(DailySnapshot.on_date)
     ).scalars().all()
-    return [HistoryPointOut(date=row.on_date, total_value=row.total_value) for row in rows]
+    return [
+        HistoryPointOut(
+            date=row.on_date,
+            total_value=row.total_value,
+            by_account=snapshot_by_account(session, row),
+        )
+        for row in rows
+    ]
 
 
 @router.get("/reconciliations", response_model=list[ReconciliationOut])

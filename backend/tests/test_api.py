@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
+from app.accounts.labels import account_label
 from app.api.routes_sync import get_tbank_connector
 from app.connectors.base import BrokerAccount
 from app.db import get_session
@@ -18,7 +19,9 @@ from app.models import (
     Reconciliation,
     SyncRun,
 )
+from app.snapshots.service import take_snapshot
 from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS
+from app.timeutils import moscow_today
 
 
 @pytest.fixture
@@ -112,6 +115,25 @@ def test_history_returns_snapshots_in_date_order(client, session):
     rows = client.get("/api/portfolio/history?days=90").json()
     assert [row["date"] for row in rows] == [earlier.isoformat(), later.isoformat()]
     assert rows[1]["total_value"] == "7350.0000"
+
+
+def test_history_returns_breakdown_by_account(client, session, account):
+    """История отдаёт разбивку по счетам, а не только итог.
+
+    Разбивка считается и хранится с фазы 2a, но читатель (snapshot_by_account)
+    не вызывался из production-кода ни разу — данные копились в стол.
+    """
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("1000"), blocked=Decimal("0")))
+    session.flush()
+
+    take_snapshot(session, moscow_today())
+    session.commit()
+
+    points = client.get("/api/portfolio/history").json()
+
+    assert points, "снимок за сегодня должен попасть в окно истории"
+    assert account_label(account) in points[-1]["by_account"]
 
 
 def test_reconciliations_endpoint_lists_findings(client, session):
