@@ -15,6 +15,7 @@ from app.models import (
     DECISION_PAYLOAD_KEY,
     DECISION_REVERTS_PAYLOAD_KEY,
     Account,
+    Instrument,
     LedgerDecision,
     OperationType,
     Transaction,
@@ -106,7 +107,7 @@ def _payload(decision: LedgerDecision) -> dict:
 
 def _entry(
     decision: LedgerDecision, leg: str, op_type: OperationType,
-    instrument_id: int, quantity, price,
+    instrument_id: int, quantity, price, currency: str,
 ) -> Transaction:
     return Transaction(
         account_id=decision.account_id,
@@ -116,7 +117,11 @@ def _entry(
         quantity=q(quantity),
         price=money(price),
         amount=money("0"),
-        currency="RUB",
+        # Валюта своей бумаги, а не рубль по умолчанию. Суммы у этих записей
+        # нулевые, и на оценку валюта пока не влияет, но у гонконгского ETF из
+        # первого разобранного расхождения она HKD — прибитый гвоздём рубль
+        # соврал бы первому же потребителю, который на неё посмотрит.
+        currency=currency,
         fee=money("0"),
         external_id=f"decision:{decision.id}:{leg}",
         source=SOURCE,
@@ -125,6 +130,17 @@ def _entry(
         # LedgerEntry.link_id (app/positions/service.py).
         payload=_payload(decision),
     )
+
+
+def _currency_of(session: Session, instrument_id: int) -> str:
+    """Валюта бумаги для записи, порождённой решением.
+
+    Рубль остаётся запасным значением: колонка currency в журнале NOT NULL, а
+    инструмент, заведённый из снимка без справочных сведений, валюты может не
+    иметь вовсе.
+    """
+    instrument = session.get(Instrument, instrument_id)
+    return (instrument.currency if instrument and instrument.currency else "RUB").upper()
 
 
 def _generate_entries(session: Session, decision: LedgerDecision) -> None:
@@ -139,9 +155,11 @@ def _generate_entries(session: Session, decision: LedgerDecision) -> None:
 
     if decision.kind is DecisionKind.CONVERSION:
         session.add(_entry(decision, "out", OperationType.CONVERSION_OUT,
-                           decision.from_instrument_id, decision.from_quantity, "0"))
+                           decision.from_instrument_id, decision.from_quantity, "0",
+                           _currency_of(session, decision.from_instrument_id)))
         session.add(_entry(decision, "in", OperationType.CONVERSION_IN,
-                           decision.to_instrument_id, decision.to_quantity, "0"))
+                           decision.to_instrument_id, decision.to_quantity, "0",
+                           _currency_of(session, decision.to_instrument_id)))
     elif decision.kind is DecisionKind.ADJUSTMENT:
         if decision.to_instrument_id is not None:
             # Себестоимость известна — цена на бумагу; нет — ноль, и партия
@@ -151,7 +169,8 @@ def _generate_entries(session: Session, decision: LedgerDecision) -> None:
                      if decision.cost_basis is not None and decision.to_quantity
                      else money("0"))
             session.add(_entry(decision, "in", OperationType.ADJUSTMENT,
-                               decision.to_instrument_id, decision.to_quantity, price))
+                               decision.to_instrument_id, decision.to_quantity, price,
+                               _currency_of(session, decision.to_instrument_id)))
         else:
             # Знак списания ставит не служба: соглашение о знаке у ADJUSTMENT
             # записано в одном месте (app/positions/engine.py), и второй его
@@ -160,7 +179,8 @@ def _generate_entries(session: Session, decision: LedgerDecision) -> None:
             # 276 бумаг вместо 100.
             session.add(_entry(decision, "out", OperationType.ADJUSTMENT,
                                decision.from_instrument_id,
-                               decreasing_adjustment(decision.from_quantity), "0"))
+                               decreasing_adjustment(decision.from_quantity), "0",
+                               _currency_of(session, decision.from_instrument_id)))
 
     session.flush()
 

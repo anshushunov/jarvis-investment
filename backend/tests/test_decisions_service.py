@@ -817,6 +817,58 @@ def test_generated_entry_is_read_back_through_the_shared_payload_key(session):
     assert DECISION_PAYLOAD_KEY == "decision_id"
 
 
+@pytest.fixture
+def hkd_instruments(session, account) -> tuple[Instrument, Instrument]:
+    """Две гонконгские бумаги решения №1 — обе в HKD, а не в рубле по умолчанию.
+
+    Бумага-источник заранее лежит в журнале: без этого движок откажет при
+    свёртке конвертации («списывает больше, чем открыто») — тот же приём, что
+    и в существующих тестах конвертации этого файла (см. _buy выше).
+    """
+    source = Instrument(isin="HK0000310034", ticker="HK03", secid="HK03",
+                        kind="share", currency="HKD")
+    target = Instrument(isin="HK0000051877", ticker="HK05", secid="HK05",
+                        kind="share", currency="HKD")
+    session.add_all([source, target])
+    session.flush()
+
+    _buy(session, account, "HK0000310034", "79", "120",
+         datetime(2024, 5, 1, tzinfo=timezone.utc))
+
+    return source, target
+
+
+def test_conversion_entries_carry_instrument_currency(session, account, hkd_instruments):
+    """Записи решения несут валюту своей бумаги, а не рубль по умолчанию.
+
+    Суммы у них нулевые, и сегодня это безвредно, но у гонконгского ETF из
+    решения №1 валюта HKD: первый же потребитель, посмотревший на валюту
+    записи, соврал бы.
+    """
+    from app.decisions.service import record_decision
+    from app.models import Transaction
+    from sqlalchemy import select
+
+    source, target = hkd_instruments  # обе в HKD
+
+    decision = LedgerDecision(
+        account_id=account.id,
+        kind=DecisionKind.CONVERSION,
+        status=DecisionStatus.CONFIRMED,
+        from_instrument_id=source.id, from_quantity=Decimal("79"),
+        to_instrument_id=target.id, to_quantity=Decimal("79"),
+        effective_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        note="Смена ISIN гонконгского ETF",
+    )
+    record_decision(session, decision)
+
+    entries = session.execute(
+        select(Transaction).where(Transaction.source == "manual")
+    ).scalars().all()
+
+    assert {entry.currency for entry in entries} == {"HKD"}
+
+
 def test_decision_can_point_at_the_one_it_reverts(session):
     account = _account(session)
     original = LedgerDecision(
