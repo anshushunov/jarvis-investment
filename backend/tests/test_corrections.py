@@ -322,3 +322,42 @@ def test_find_changed_does_not_query_per_operation(session, account):
         f"Поиск переписанных операций ушёл {len(lookups)} раз на батч из 50 — "
         "запрос обязан быть один на батч."
     )
+
+
+def test_recorded_lookup_deduplicates_external_id_before_chunking(session, account, monkeypatch):
+    """Один и тот же external_id может встретиться в батче дважды — например,
+    повтор на стыке страниц GetOperationsByCursor (app/connectors/tbank/client.py).
+
+    Без дедупликации списка идентификаторов перед разбиением на куски повтор,
+    оказавшийся по разные стороны границы куска, заставляет каждый кусок, в
+    который он попал, вернуть одну и ту же уже записанную операцию заново:
+    recorded_quantity/recorded_amount в _changed_against удваиваются ещё до
+    сравнения. Разница с присланным при этом считается от вдвое завышенного
+    «было», и корректирующая запись выходит на неверную величину — здесь
+    100 − 24 = 76 вместо настоящих 100 − 12 = 88 (единственная уже записанная
+    операция — 12, а не 24: удвоение целиком на совести бага).
+
+    Дедупликация count/словаря не проверяет умышленно: она переживает
+    рефакторинг `_recorded_by_external_id` хуже, чем наблюдаемый результат
+    `append_operations` — итоговая (и единственная допустимая) сумма
+    корректировки.
+    """
+    # Один идентификатор — один кусок: тот же повтор в батче гарантированно
+    # разносится по разным кускам без искусственно большого батча в 500+ операций.
+    monkeypatch.setattr("app.ledger.service._LOOKUP_CHUNK", 1)
+
+    append_operations(session, account, "tbank", [raw_operation(external_id="op-1", quantity="12", amount="-1200")])
+
+    # op-1 в батче дважды — тот самый повтор на стыке страниц: обе копии
+    # несут одно и то же (реальное) новое содержание брокера.
+    result = append_operations(session, account, "tbank", [
+        raw_operation(external_id="op-1", quantity="100", amount="-10000"),
+        raw_operation(external_id="op-1", quantity="100", amount="-10000"),
+    ])
+
+    assert result.corrected == 1
+    correction = session.execute(
+        select(Transaction).where(Transaction.op_type == OperationType.ADJUSTMENT)
+    ).scalar_one()
+    assert correction.quantity == Decimal("88")
+    assert correction.amount == Decimal("-8800")

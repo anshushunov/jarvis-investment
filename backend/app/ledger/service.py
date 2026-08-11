@@ -167,8 +167,17 @@ def _recorded_by_external_id(
     if not external_ids:
         return result
 
-    for start in range(0, len(external_ids), _LOOKUP_CHUNK):
-        chunk = external_ids[start:start + _LOOKUP_CHUNK]
+    # Дедуплицируем с сохранением порядка: один и тот же external_id может
+    # повториться в батче (например, на стыке страниц GetOperationsByCursor,
+    # app/connectors/tbank/client.py). Без этого повтор, попавший по разные
+    # стороны границы куска, отдавал бы одну и ту же уже записанную транзакцию
+    # дважды — recorded_quantity/recorded_amount в _changed_against
+    # удвоились бы, и по совпавшей операции писалась бы ложная корректировка
+    # на каждой синхронизации.
+    unique_ids = list(dict.fromkeys(external_ids))
+
+    for start in range(0, len(unique_ids), _LOOKUP_CHUNK):
+        chunk = unique_ids[start:start + _LOOKUP_CHUNK]
         rows = session.execute(
             select(Transaction).where(
                 Transaction.account_id == account.id,
