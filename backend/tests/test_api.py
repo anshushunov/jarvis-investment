@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from app.accounts.labels import account_label
 from app.api.routes_sync import get_tbank_connector
@@ -134,6 +135,43 @@ def test_history_returns_breakdown_by_account(client, session, account):
 
     assert points, "снимок за сегодня должен попасть в окно истории"
     assert account_label(account) in points[-1]["by_account"]
+
+
+def test_history_does_not_query_accounts_per_point(client, session, account):
+    """Разбивка по счетам в истории — один запрос к таблице account на весь
+    ответ, а не один на точку.
+
+    До этой правки `snapshot_by_account` сама выбирала все счета без фильтра
+    внутри цикла по строкам `get_history` — один обход истории превращался в
+    1 + N запросов, где N — число точек в окне (до 90, снимок один в сутки).
+    Три соседних обработчика в этом же файле (`get_overview`, `get_positions`,
+    `get_cash`) уже выбирают счета в словарь один раз на запрос и передают его
+    дальше; `get_history` был единственным исключением.
+    """
+    session.add(CashBalance(account_id=account.id, currency="RUB",
+                            amount=Decimal("1000"), blocked=Decimal("0")))
+    session.flush()
+    for offset in range(5):
+        take_snapshot(session, moscow_today() - timedelta(days=offset))
+    session.commit()
+
+    statements: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        response = client.get("/api/portfolio/history")
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    lookups = [s for s in statements if "FROM account" in s]
+    assert len(lookups) <= 1, (
+        f"Выбор счетов ушёл {len(lookups)} раз на 5 точек истории — запрос "
+        "обязан быть один на весь ответ."
+    )
 
 
 def test_reconciliations_endpoint_lists_findings(client, session):

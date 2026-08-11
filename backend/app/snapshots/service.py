@@ -1,7 +1,6 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -39,7 +38,7 @@ def take_snapshot(session: Session, on_date: date) -> DailySnapshot:
     return session.query(DailySnapshot).filter(DailySnapshot.on_date == on_date).one()
 
 
-def snapshot_by_account(session: Session, snapshot: DailySnapshot) -> dict[str, Decimal]:
+def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -> dict[str, Decimal]:
     """Разбивка снимка по счетам, подписанная для показа.
 
     Подпись строится здесь, при чтении, единственной на проект функцией
@@ -49,12 +48,15 @@ def snapshot_by_account(session: Session, snapshot: DailySnapshot) -> dict[str, 
     ключи не числовые и не соответствуют ни одному счёту, поэтому отдаются как
     есть: переписывать историю ради формата ключа незачем, а терять её тем
     более. Отдельной миграции данных для этого не нужно.
-    """
-    accounts = {
-        account.id: account
-        for account in session.execute(select(Account)).scalars()
-    }
 
+    Счета приходят снаружи готовым словарём, а не выбираются здесь: читатель
+    (`/portfolio/history`) зовёт эту функцию на каждую точку окна истории — до
+    90 в сутки при снимке раз в день, — и запрос без фильтра внутри такого
+    цикла превращал бы один обход в 1 + N SQL-запросов. Три соседних
+    обработчика в routes_portfolio.py (`get_overview`, `get_positions`,
+    `get_cash`) по той же причине выбирают счета в словарь один раз на запрос
+    и передают его дальше; здесь тот же приём, просто на один уровень глубже.
+    """
     result: dict[str, Decimal] = {}
     for key, value in (snapshot.by_account or {}).items():
         account = accounts.get(int(key)) if key.lstrip("-").isdigit() else None

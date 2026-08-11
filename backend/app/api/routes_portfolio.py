@@ -103,11 +103,28 @@ def get_history(days: int = 90, session: Session = Depends(get_session)) -> list
     rows = session.execute(
         select(DailySnapshot).where(DailySnapshot.on_date >= since).order_by(DailySnapshot.on_date)
     ).scalars().all()
+    # Счета выбираются один раз на весь ответ, а не на точку истории: снимок
+    # снимается раз в сутки, и запрос без фильтра внутри цикла по строкам (как
+    # было раньше — см. snapshot_by_account) превращал бы один обход окна в
+    # 1 + N запросов. Тот же приём, что и у соседей выше (get_overview,
+    # get_positions, get_cash).
+    account_ids = {
+        int(key)
+        for row in rows
+        for key in (row.by_account or {})
+        if key.lstrip("-").isdigit()
+    }
+    accounts = {
+        account.id: account
+        for account in session.execute(
+            select(Account).where(Account.id.in_(account_ids))
+        ).scalars()
+    }
     return [
         HistoryPointOut(
             date=row.on_date,
             total_value=row.total_value,
-            by_account=snapshot_by_account(session, row),
+            by_account=snapshot_by_account(accounts, row),
         )
         for row in rows
     ]

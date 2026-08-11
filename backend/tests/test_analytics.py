@@ -270,7 +270,7 @@ def test_snapshot_by_account_is_labelled_at_read_time(session):
     account = seed(session)
     snapshot = take_snapshot(session, date(2026, 3, 12))
 
-    assert snapshot_by_account(session, snapshot) == {
+    assert snapshot_by_account({account.id: account}, snapshot) == {
         "Брокерский (acc-1)": Decimal("7350.0000")
     }
 
@@ -284,7 +284,7 @@ def test_snapshot_of_old_format_is_still_readable(session):
     session.add(legacy)
     session.flush()
 
-    assert snapshot_by_account(session, legacy) == {"Инвестиционный": Decimal("100.0000")}
+    assert snapshot_by_account({}, legacy) == {"Инвестиционный": Decimal("100.0000")}
 
 
 def test_position_with_zero_price_shows_full_loss(session):
