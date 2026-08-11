@@ -223,20 +223,19 @@ def test_reconcile_does_not_touch_other_accounts_findings(session):
 
 def test_ledger_position_without_isin_is_logged(caplog, session, account, instrument_without_isin):
     """Позиция журнала, инструмент которой без ISIN, в сверку не попадает — но
-    оставляет след в логе: сверять её не с чем, а терять бесследно нельзя."""
+    оставляет след в логе: сверять её не с чем, а терять бесследно нельзя.
+
+    Количество в сообщении обязательно: без него розыск потерянной бумаги
+    упирается ровно в то место, где он нужен."""
     session.add(Position(account_id=account.id, instrument_id=instrument_without_isin.id,
                          quantity=Decimal("10"), average_price=Decimal("100"),
                          cost_basis_known=True))
     session.flush()
 
-    # test_migrations.py гоняет alembic раньше по алфавиту, а alembic/env.py
-    # вызывает logging.config.fileConfig(), которая по умолчанию отключает
-    # (logger.disabled = True) все уже зарегистрированные логгеры, не
-    # упомянутые в alembic.ini, — в т.ч. этот. Одного caplog.set_level с именем
-    # логгера мало: он трогает только уровень, а не флаг disabled.
-    logger = logging.getLogger("app.sync.reconcile")
-    logger.disabled = False
     caplog.set_level(logging.WARNING, logger="app.sync.reconcile")
     reconcile_account(session, account, [])
 
-    assert any("без ISIN" in record.getMessage() for record in caplog.records)
+    assert any(
+        "без ISIN" in record.getMessage() and "10" in record.getMessage()
+        for record in caplog.records
+    )

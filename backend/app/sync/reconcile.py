@@ -30,8 +30,10 @@ def reconcile_account(
             # портфеле и в капитале, но в расхождения не попадает никогда —
             # и без этой строки понять, почему её там нет, неоткуда.
             logger.warning(
-                "Позиция счёта %s по инструменту %s (%s) не участвует в сверке: инструмент без ISIN.",
+                "Позиция счёта %s по инструменту %s (%s, количество %s) не участвует в сверке: "
+                "инструмент без ISIN.",
                 account.external_id, instrument.id, instrument.ticker or instrument.issuer,
+                position.quantity,
             )
             continue
         ledger[instrument.isin] = (position, instrument)

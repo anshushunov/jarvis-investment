@@ -602,13 +602,6 @@ def test_position_without_isin_is_logged(caplog, connector_with_isinless_positio
     Бумага, пропавшая из сверки таким образом, выглядит как сошедшаяся: её нет
     ни в расхождениях, ни в позициях, и понять, что она вообще была, неоткуда.
     """
-    # test_migrations.py гоняет alembic раньше по алфавиту, а alembic/env.py
-    # вызывает logging.config.fileConfig(), которая по умолчанию отключает
-    # (logger.disabled = True) все уже зарегистрированные логгеры, не
-    # упомянутые в alembic.ini, — в т.ч. этот. Одного caplog.set_level с именем
-    # логгера мало: он трогает только уровень, а не флаг disabled.
-    logger = logging.getLogger("app.connectors.tbank.connector")
-    logger.disabled = False
     caplog.set_level(logging.WARNING, logger="app.connectors.tbank.connector")
     positions = connector_with_isinless_position.fetch_positions("acc-1")
 

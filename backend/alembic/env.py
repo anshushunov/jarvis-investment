@@ -14,8 +14,15 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# disable_existing_loggers=False обязателен: по умолчанию fileConfig глушит
+# (logger.disabled = True) все уже зарегистрированные логгеры, не
+# перечисленные в alembic.ini, — а это логгеры приложения (app.*). Миграции
+# применяются при старте бэкенда в том же процессе, что и всё остальное, —
+# без этого флага после первого запуска команды `alembic upgrade` они
+# замолкают на весь оставшийся срок жизни процесса.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Соединение, переданное вызывающим кодом (config.attributes["connection"]),
 # имеет приоритет над настройками приложения: тест цепочки миграций гоняет её
