@@ -1,11 +1,15 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from app.connectors.base import BrokerInstrument
+from app.instruments.backfill import _restricted_from as backfill_restricted
 from app.instruments.backfill import backfill_instruments
-from app.instruments.service import apply_reference, resolve_instrument
+from app.instruments.service import apply_reference, resolve_instrument, trading_restricted_from_flags
 from app.ledger.schemas import RawOperation
 from app.models import Instrument, OperationType
+from app.sync.holdings import _restricted_from as holdings_restricted
 
 
 def add_instrument(session, isin: str, restricted: bool = False) -> Instrument:
@@ -162,3 +166,31 @@ def test_restriction_rule_covers_all_four_flag_combinations_via_backfill_channel
         isin = f"RU0BFCH000{code}"
         instrument = session.query(Instrument).filter_by(isin=isin).one()
         assert instrument.trading_restricted is expected, name
+
+
+def test_trading_restricted_rule_lives_in_one_place():
+    """Правило «ограничена в обороте» существует в одном экземпляре.
+
+    Три копии этого правила уже расходились в проекте: два правила о знаке
+    ADJUSTMENT дали позицию в 276 бумаг вместо 100. Тест проверяет не поведение,
+    а само отсутствие копий — поведение проверяют тесты ниже.
+    """
+    assert backfill_restricted is trading_restricted_from_flags
+    assert holdings_restricted is trading_restricted_from_flags
+
+
+@pytest.mark.parametrize(
+    ("buy", "sell", "expected"),
+    [
+        (False, False, True),    # ни купить, ни продать — ограничение
+        (False, True, False),    # закрыта для покупки, но продать можно
+        (True, False, False),
+        (True, True, False),
+        (None, False, None),     # сведений нет — прежнее значение не трогаем
+        (False, None, None),
+        (None, None, None),
+        ("false", "false", None),  # не bool — не сведения
+    ],
+)
+def test_trading_restricted_from_flags(buy, sell, expected):
+    assert trading_restricted_from_flags(buy, sell) is expected

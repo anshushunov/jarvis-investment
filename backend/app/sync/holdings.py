@@ -7,13 +7,17 @@ from sqlalchemy.orm import Session
 from app.connectors.base import BrokerPosition
 from app.db_errors import is_unique_violation
 from app.instruments import kinds
-from app.instruments.service import apply_reference, secid_from_ticker
+from app.instruments.service import apply_reference, secid_from_ticker, trading_restricted_from_flags
 from app.models import Account, BrokerHolding, Instrument
 
 # Тот же уникальный индекс, что в app/instruments/service.py — обе точки
 # вставки Instrument конкурируют за один и тот же ISIN, поэтому и имя
 # индекса, с которым сверяется IntegrityError, у них общее.
 _ISIN_UNIQUE_INDEX = "ix_instrument_isin"
+
+# Правило «ограничена в обороте» — одно на проект (app/instruments/service.py).
+# Здесь то же самое имя указывает на ту же самую функцию, а не на копию.
+_restricted_from = trading_restricted_from_flags
 
 
 def store_holdings(session: Session, account: Account, positions: list[BrokerPosition]) -> int:
@@ -83,7 +87,7 @@ def store_holdings(session: Session, account: Account, positions: list[BrokerPos
                 item.reference.kind,
                 item.reference.name,
                 (item.reference.currency or "").upper() or None,
-                _restricted_from(item.reference),
+                _restricted_from(item.reference.buy_available, item.reference.sell_available),
             )
 
         session.add(BrokerHolding(
@@ -133,7 +137,7 @@ def _insert_instrument_from_reference(session: Session, item: BrokerPosition) ->
         kind=reference.kind or kinds.OTHER,
         currency=(reference.currency or "RUB").upper(),
         issuer=reference.name,
-        trading_restricted=bool(_restricted_from(reference)),
+        trading_restricted=bool(_restricted_from(reference.buy_available, reference.sell_available)),
     )
     try:
         with session.begin_nested():
@@ -152,21 +156,7 @@ def _insert_instrument_from_reference(session: Session, item: BrokerPosition) ->
             reference.kind,
             reference.name,
             (reference.currency or "").upper() or None,
-            _restricted_from(reference),
+            _restricted_from(reference.buy_available, reference.sell_available),
         )
         return winner
     return instrument
-
-
-def _restricted_from(reference) -> bool | None:
-    """Ограничена ли бумага в обороте по справочным сведениям снимка.
-
-    Правило то же, что в app/instruments/service.py: ограничением считается
-    недоступность обеих операций сразу. Один флаг ничего не решает — выпуск,
-    закрытый для покупки, но открытый для продажи, распоряжению поддаётся.
-    Хотя бы один флаг отсутствует — сведений нет, возвращаем None.
-    """
-    buy, sell = reference.buy_available, reference.sell_available
-    if not isinstance(buy, bool) or not isinstance(sell, bool):
-        return None
-    return not buy and not sell

@@ -23,10 +23,13 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerInstrument
-from app.instruments.service import apply_reference, secid_from_ticker
+from app.instruments.service import apply_reference, secid_from_ticker, trading_restricted_from_flags
 from app.models import Instrument
 
 logger = logging.getLogger(__name__)
+
+# Правило «ограничена в обороте» — одно на проект (app/instruments/service.py).
+_restricted_from = trading_restricted_from_flags
 
 
 def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrument]) -> int:
@@ -68,7 +71,7 @@ def backfill_instruments(session: Session, reference: Mapping[str, BrokerInstrum
         if found is not None:
             touched |= apply_reference(
                 instrument, found.kind, found.name, found.currency,
-                _restricted_from(found),
+                _restricted_from(found.buy_available, found.sell_available),
             )
 
         if touched:
@@ -130,15 +133,6 @@ def _availability_rank(instrument: BrokerInstrument) -> int:
     if not isinstance(instrument.sell_available, bool):
         return 0
     return 2 if (instrument.buy_available or instrument.sell_available) else 1
-
-
-def _restricted_from(found: BrokerInstrument) -> bool | None:
-    """Ограничение в обороте по флагам справочника. Правило то же, что и для
-    операций (app/instruments/service.py): ограничением считается недоступность
-    обеих операций сразу, а отсутствие любого из флагов — отсутствие сведений."""
-    if not isinstance(found.buy_available, bool) or not isinstance(found.sell_available, bool):
-        return None
-    return not found.buy_available and not found.sell_available
 
 
 def _repair_secid(instrument: Instrument) -> bool:

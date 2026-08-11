@@ -102,19 +102,31 @@ def _reference_from(op: RawOperation) -> tuple[str | None, str | None, str | Non
         str(kind) if kind else None,
         str(name) if name else None,
         str(currency).upper() if currency else None,
-        _restricted(buy, sell),
+        trading_restricted_from_flags(buy, sell),
     )
 
 
-def _restricted(buy: object, sell: object) -> bool | None:
+def trading_restricted_from_flags(buy: object, sell: object) -> bool | None:
     """Ограничена ли бумага в обороте: недоступны обе операции сразу.
+
+    Единственное на проект место, где записано это правило. Его читают три
+    источника справочных сведений — payload операции (_reference_from ниже),
+    снимок позиций брокера (app/sync/holdings.py) и разовое дозаполнение
+    справочника (app/instruments/backfill.py), — и раньше каждый нёс свою
+    копию. Копии правил в этом проекте уже расходились: два правила о знаке
+    ADJUSTMENT стоили позиции в 276 бумаг вместо 100.
 
     Одного флага мало. Бумага, которую нельзя купить, но можно продать,
     распоряжению поддаётся — именно так выглядят выпуски, закрытые для новых
     покупок, но не замороженные. Ограничением считается только пара.
 
     Хотя бы один флаг отсутствует — сведений нет, возвращаем None: прежнее
-    значение в базе трогать нельзя.
+    значение в базе трогать нельзя (см. apply_reference выше, где None и False
+    обрабатываются по-разному).
+
+    Принимает object, а не bool | None, намеренно: два из трёх вызывающих
+    достают флаги из JSON — payload операции и ответ справочника, — где вместо
+    булева значения может лежать что угодно.
     """
     if not isinstance(buy, bool) or not isinstance(sell, bool):
         return None
