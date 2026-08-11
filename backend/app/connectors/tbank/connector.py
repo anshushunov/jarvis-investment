@@ -201,6 +201,14 @@ class TBankConnector:
                 continue
             instrument = instruments.get(figi)
             if instrument is None or not instrument.isin:
+                # Без ISIN позицию не с чем сверять: журнал ключуется им же.
+                # Отбрасываем — но со следом: бумага, пропавшая отсюда молча,
+                # выглядит дальше как сошедшаяся, а не как потерянная.
+                logger.warning(
+                    "Позиция счёта %s (FIGI %s, количество %s) пропущена: бумага без ISIN "
+                    "в справочнике брокера — сверять её не с чем.",
+                    account_external_id, figi, qty,
+                )
                 continue
             ticker = item.get("ticker") or instrument.ticker
             positions.append(BrokerPosition(

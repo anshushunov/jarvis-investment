@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 
 from sqlalchemy import delete, select
@@ -5,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.connectors.base import BrokerPosition
 from app.models import Account, BrokerHolding, Instrument, Position, Reconciliation
+
+logger = logging.getLogger(__name__)
 
 TOLERANCE = Decimal("0.000001")
 
@@ -20,11 +23,18 @@ def reconcile_account(
         .where(Position.account_id == account.id)
     ).all()
 
-    ledger: dict[str, tuple[Position, Instrument]] = {
-        instrument.isin: (position, instrument)
-        for position, instrument in rows
-        if instrument.isin
-    }
+    ledger: dict[str, tuple[Position, Instrument]] = {}
+    for position, instrument in rows:
+        if not instrument.isin:
+            # Сверять нечем: снимок брокера ключуется ISIN. Позиция остаётся в
+            # портфеле и в капитале, но в расхождения не попадает никогда —
+            # и без этой строки понять, почему её там нет, неоткуда.
+            logger.warning(
+                "Позиция счёта %s по инструменту %s (%s) не участвует в сверке: инструмент без ISIN.",
+                account.external_id, instrument.id, instrument.ticker or instrument.issuer,
+            )
+            continue
+        ledger[instrument.isin] = (position, instrument)
     # Тот же ISIN приходит от брокера дважды, когда бумага лежит на двух
     # площадках. Количества складываются — ровно как в store_holdings, потому
     # что это две порции одной бумаги на одном счёте. Одно правило на снимок и

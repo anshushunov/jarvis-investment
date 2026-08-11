@@ -1,8 +1,22 @@
+import logging
 from decimal import Decimal
+
+import pytest
 
 from app.connectors.base import BrokerPosition
 from app.models import Account, BrokerHolding, Instrument, Position, Reconciliation
 from app.sync.reconcile import reconcile_account, reconcile_from_snapshot
+
+
+@pytest.fixture
+def instrument_without_isin(session) -> Instrument:
+    """Инструмент без ISIN: снимок брокера ключуется ISIN, и позиция такой
+    бумаги не может встретить свою пару — сверять её не с чем."""
+    instrument = Instrument(isin=None, ticker="NOISIN", secid="NOISIN",
+                            kind="share", currency="RUB")
+    session.add(instrument)
+    session.flush()
+    return instrument
 
 
 def setup(session) -> tuple[Account, Instrument]:
@@ -205,3 +219,24 @@ def test_reconcile_does_not_touch_other_accounts_findings(session):
     assert len(account2_findings) == 1
     assert account2_findings[0].ledger_quantity == Decimal("99.00000000")
     assert account2_findings[0].broker_quantity == Decimal("50.00000000")
+
+
+def test_ledger_position_without_isin_is_logged(caplog, session, account, instrument_without_isin):
+    """Позиция журнала, инструмент которой без ISIN, в сверку не попадает — но
+    оставляет след в логе: сверять её не с чем, а терять бесследно нельзя."""
+    session.add(Position(account_id=account.id, instrument_id=instrument_without_isin.id,
+                         quantity=Decimal("10"), average_price=Decimal("100"),
+                         cost_basis_known=True))
+    session.flush()
+
+    # test_migrations.py гоняет alembic раньше по алфавиту, а alembic/env.py
+    # вызывает logging.config.fileConfig(), которая по умолчанию отключает
+    # (logger.disabled = True) все уже зарегистрированные логгеры, не
+    # упомянутые в alembic.ini, — в т.ч. этот. Одного caplog.set_level с именем
+    # логгера мало: он трогает только уровень, а не флаг disabled.
+    logger = logging.getLogger("app.sync.reconcile")
+    logger.disabled = False
+    caplog.set_level(logging.WARNING, logger="app.sync.reconcile")
+    reconcile_account(session, account, [])
+
+    assert any("без ISIN" in record.getMessage() for record in caplog.records)
