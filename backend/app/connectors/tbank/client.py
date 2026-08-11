@@ -87,6 +87,16 @@ def _build_ssl_context() -> ssl.SSLContext:
     return context
 
 
+def _list_field(payload: dict, key: str) -> list:
+    """Список из ответа брокера: отсутствующий ключ и явный null — одно и то же.
+
+    `payload.get(key, [])` спасает только от первого. T-Invest API отдаёт null
+    там, где список пуст, и тогда наружу уходило None: падение случалось уже у
+    вызывающего, за границей коннектора, где причину не видно.
+    """
+    return payload.get(key) or []
+
+
 class TBankClient:
     """Тонкий HTTP-клиент REST-шлюза T-Invest API. Никакой бизнес-логики:
     только вызовы читающих методов и разбор JSON-конвертов вида {"поле": [...]}.
@@ -154,7 +164,7 @@ class TBankClient:
             return response.json()
 
     def get_accounts(self) -> list[dict]:
-        return self._post(USERS_SERVICE, "GetAccounts", {}).get("accounts", [])
+        return _list_field(self._post(USERS_SERVICE, "GetAccounts", {}), "accounts")
 
     def get_operations(self, account_id: str, from_iso: str, to_iso: str) -> list[dict]:
         """Все операции за период. OperationsService/GetOperations (без курсора)
@@ -173,7 +183,7 @@ class TBankClient:
             if cursor:
                 body["cursor"] = cursor
             page = self._post(OPERATIONS_SERVICE, "GetOperationsByCursor", body)
-            items.extend(page.get("items", []))
+            items.extend(_list_field(page, "items"))
             cursor = page.get("nextCursor") or ""
             if not page.get("hasNext") or not cursor:
                 return items
@@ -183,7 +193,7 @@ class TBankClient:
         )
 
     def get_portfolio(self, account_id: str) -> list[dict]:
-        return self._post(OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account_id}).get("positions", [])
+        return _list_field(self._post(OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account_id}), "positions")
 
     def get_positions(self, account_id: str) -> dict:
         """OperationsService/GetPositions — денежные остатки и заблокированные
@@ -213,4 +223,4 @@ class TBankClient:
         INSTRUMENT_STATUS_BASE нужен коннектору как запасной путь для видов,
         полный список которых сервер не отдаёт целиком (см. там же)."""
         body = {"instrumentStatus": status}
-        return self._post(INSTRUMENTS_SERVICE, kind, body).get("instruments", [])
+        return _list_field(self._post(INSTRUMENTS_SERVICE, kind, body), "instruments")

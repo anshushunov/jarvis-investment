@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from app.ledger.schemas import RawOperation
 from app.models import Account, Instrument, OperationType, Transaction
 
 
@@ -38,6 +39,24 @@ def test_transaction_persists_decimal_precision(session):
     assert stored.price == Decimal("142.5000")
     assert stored.fee == Decimal("1.4963")
     assert stored.payload == {"raw": "value"}
+
+
+def test_raw_operation_payload_is_frozen():
+    """frozen=True обязан замораживать и вложенный payload.
+
+    Иначе обещание неизменности ложное: поля защищены, а словарь внутри —
+    нет, и операция меняется у всех держателей ссылки разом.
+    """
+    operation = RawOperation(
+        external_id="1", op_type=OperationType.BUY,
+        executed_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        isin="RU000A0JQUZ6", ticker="AGRO",
+        quantity=Decimal("1"), price=Decimal("100"), amount=Decimal("-100"),
+        currency="RUB", fee=Decimal("0"), payload={"figi": "BBG000000001"},
+    )
+
+    with pytest.raises(TypeError):
+        operation.payload["figi"] = "подменено"
 
 
 def test_external_id_unique_per_source(session):

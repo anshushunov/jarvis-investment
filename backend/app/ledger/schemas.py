@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -7,7 +8,7 @@ from app.models import OperationType
 
 
 class RawOperation(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     external_id: str | None
     op_type: OperationType
@@ -19,7 +20,24 @@ class RawOperation(BaseModel):
     amount: Decimal
     currency: str
     fee: Decimal
-    payload: dict
+    # Только для чтения: frozen=True защищает поля модели, но не содержимое
+    # вложенного словаря — правка payload у одного держателя ссылки меняла
+    # операцию у всех сразу, а обещание неизменности оказывалось ложным.
+    #
+    # Аннотация — именно MappingProxyType, а не typing.Mapping: для
+    # typing.Mapping у pydantic есть встроенная core-схема, которая после
+    # "before"-валидатора всё равно приводит значение к обычному dict (тогда
+    # frozen=True защищает поле, но не спасает от operation.payload[k] = v).
+    # MappingProxyType pydantic не знает — arbitrary_types_allowed заставляет
+    # его просто проверить isinstance и оставить объект как есть.
+    payload: MappingProxyType
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def payload_must_be_read_only(cls, value):
+        if isinstance(value, MappingProxyType):
+            return value
+        return MappingProxyType(dict(value))
 
     @field_validator("executed_at")
     @classmethod

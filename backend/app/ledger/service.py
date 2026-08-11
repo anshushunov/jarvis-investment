@@ -89,7 +89,9 @@ def _build_transaction(
         fee=op.fee,
         external_id=op.external_id,
         source=source,
-        payload=op.payload,
+        # MappingProxyType в JSONB-колонку SQLAlchemy не запишет — нужен
+        # обычный (изменяемый) словарь на границе с ORM-моделью.
+        payload=dict(op.payload),
         dedup_key=key,
     )
 

@@ -48,10 +48,12 @@ def main() -> None:
 
         total_ours = money("0")
         total_theirs = money("0")
-        for account_id, ours in sorted(overview.by_account.items()):
-            account = accounts.get(account_id)
-            if account is None:
-                continue
+        # Перебираем все счета брокера, а не только те, что попали в
+        # by_account: счёт, синхронизация которого отвалилась целиком, не имеет
+        # ни позиций, ни денег — и в прежней версии не появлялся в сверке
+        # вовсе. Ровно тот случай, ради которого сверку и смотрят.
+        for account in sorted(accounts.values(), key=lambda item: item.name):
+            ours = overview.by_account.get(account.id, money("0"))
             payload = client._post(
                 OPERATIONS_SERVICE, "GetPortfolio", {"accountId": account.external_id}
             )
