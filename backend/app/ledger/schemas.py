@@ -30,6 +30,15 @@ class RawOperation(BaseModel):
     # frozen=True защищает поле, но не спасает от operation.payload[k] = v).
     # MappingProxyType pydantic не знает — arbitrary_types_allowed заставляет
     # его просто проверить isinstance и оставить объект как есть.
+    #
+    # Цена этого выбора: MappingProxyType непрозрачен для pydantic —
+    # model_dump_json(), model_json_schema() и глубокое копирование модели
+    # (copy.deepcopy, model_copy(deep=True)) на нём падают ("Unable to
+    # serialize unknown type: mappingproxy" / "cannot pickle 'mappingproxy'
+    # object"). Сегодня это никого не задевает — таких вызывающих у
+    # RawOperation нет. Первый, кто захочет залогировать операцию как JSON
+    # или сделать её глубокую копию, упрётся в эту ошибку — пусть узнает о
+    # причине здесь, а не из трассировки.
     payload: MappingProxyType
 
     @field_validator("payload", mode="before")

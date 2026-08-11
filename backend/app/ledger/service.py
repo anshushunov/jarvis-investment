@@ -325,8 +325,9 @@ def append_operations(
     if not operations:
         return AppendResult(inserted=0, skipped=0)
 
-    # RawOperation несёт поле payload: dict, поэтому сам объект не hashable —
-    # держим ключи в списке, параллельном operations, а не в словаре с op как ключом.
+    # RawOperation несёт поле payload: MappingProxyType, поэтому сам объект не
+    # hashable — держим ключи в списке, параллельном operations, а не в
+    # словаре с op как ключом.
     keys = [natural_key(source, account.external_id, op) for op in operations]
     known = _load_known_keys(session, keys)
     # Предзагрузка до цикла: раньше поиск переписанных брокером операций уходил

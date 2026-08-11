@@ -72,6 +72,9 @@ def client_with_null_items():
         respx.post(f"{OPERATIONS}/GetPortfolio").mock(
             return_value=httpx.Response(200, json={"positions": None})
         )
+        respx.post(f"{INSTRUMENTS}/Shares").mock(
+            return_value=httpx.Response(200, json={"instruments": None})
+        )
         yield TBankClient(TOKEN)
 
 
@@ -86,6 +89,9 @@ def test_null_items_are_treated_as_empty(client_with_null_items):
                                                  "2026-08-11T00:00:00Z") == []
     assert client_with_null_items.get_accounts() == []
     assert client_with_null_items.get_portfolio("acc-1") == []
+    # Справочник инструментов как раз чаще всего приходит пустым null-списком
+    # (см. _list_field) — четвёртое из четырёх мест применения.
+    assert client_with_null_items.list_instruments("Shares") == []
 
 
 def _operation_item(op_id: str, cursor: str) -> dict:
