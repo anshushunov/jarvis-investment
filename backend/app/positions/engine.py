@@ -61,6 +61,14 @@ def signed_quantity(op_type: OperationType, quantity: Decimal) -> Decimal:
     INCREASING/DECREASING). У ADJUSTMENT знак уже в количестве, и трогать его
     нельзя — это и есть его направление.
 
+    Предпосылка: у операции с собственным направлением (INCREASING, DECREASING)
+    количество неотрицательно — знак несёт тип, а не число. Отрицательное
+    количество продажи здесь стало бы приходом. Производители RawOperation
+    обязаны это соблюдать; у единственного сегодняшнего — коннектора Т-Банка —
+    предпосылка закреплена тестом (tests/test_tbank_mapper.py,
+    test_mapper_never_produces_negative_quantity_for_directional_operations).
+    У ADJUSTMENT всё наоборот: знак и есть направление, и трогать его нельзя.
+
     Стороны конвертации сюда не входят: они не открывают и не закрывают партии
     по своему количеству, а переносят чужие (см. CONVERSION и _apply_conversion).
     """

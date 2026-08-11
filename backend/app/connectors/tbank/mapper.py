@@ -97,7 +97,12 @@ def _executed_quantity(operation: dict) -> Decimal:
     двигать позицию."""
     done = operation.get("quantityDone")
     raw = done if done not in (None, "") else operation.get("quantity")
-    return Decimal(raw or "0")
+    # Модуль, а не значение как есть: направление операции несёт её тип, и
+    # signed_quantity (app/positions/engine.py) расставляет знак сама. Брокер
+    # отдаёт количество беззнаковым, но отрицательное значение в ответе
+    # развернуло бы операцию — продажа стала бы приходом, и позиция уехала бы
+    # на двойную величину, ничем себя не выдав.
+    return abs(Decimal(raw or "0"))
 
 
 def map_operation(

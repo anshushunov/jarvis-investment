@@ -246,3 +246,31 @@ def test_payload_carries_availability_flags():
 
     assert result.payload["instrument_buy_available"] is False
     assert result.payload["instrument_sell_available"] is False
+
+
+def test_mapper_never_produces_negative_quantity_for_directional_operations():
+    """Количество у операции с собственным направлением неотрицательно.
+
+    На этом молча стоит signed_quantity (app/positions/engine.py): она отрицает
+    количество у DECREASING, и отрицательное количество продажи дало бы приход
+    вместо расхода. Т-Банк — единственный сегодняшний производитель
+    RawOperation, и предпосылку проверяем на нём: брокер отдаёт quantityDone
+    беззнаковым, направление несёт тип операции.
+    """
+    operation = {
+        "id": "77",
+        "state": "OPERATION_STATE_EXECUTED",
+        "type": "OPERATION_TYPE_SELL",
+        "date": "2026-08-11T10:00:00Z",
+        "quantityDone": "-100",
+        "price": {"units": "50", "nano": 0},
+        "payment": {"units": "5000", "nano": 0, "currency": "rub"},
+    }
+
+    mapped = map_operation(operation, None)
+
+    assert mapped is not None
+    assert mapped.quantity >= 0, (
+        "Отрицательное количество у операции с собственным направлением "
+        "разворачивает её в signed_quantity: продажа стала бы приходом."
+    )
