@@ -4,7 +4,8 @@ from decimal import Decimal
 import pytest
 
 from app.accounts.cash import store_cash
-from app.analytics.service import portfolio_overview, position_rows
+from app.analytics.service import Holding, portfolio_overview, position_rows, value_portfolio
+from app.marketdata.service import LatestPrice
 from app.connectors.base import BrokerCash, BrokerPosition
 from app.models import Account, DailySnapshot, FxRate, Instrument, Position, Price
 from app.snapshots.service import snapshot_by_account, take_snapshot
@@ -951,3 +952,70 @@ def test_priced_position_without_a_rate_names_its_currency(session):
                         price=Decimal("200"), currency="USD")
 
     assert portfolio_overview(session).currencies_without_rate == ["USD"]
+
+
+def test_value_portfolio_counts_securities_and_cash(session):
+    instrument = Instrument(isin="RU000A0JQUZ6", ticker="AGRO", secid="AGRO",
+                            currency="RUB", kind="share")
+    session.add(instrument)
+    session.flush()
+    holdings = [Holding(account_id=1, instrument=instrument,
+                        quantity=Decimal("10"), blocked=Decimal("0"))]
+    prices = {instrument.id: LatestPrice(close=Decimal("100.0000"),
+                                         on_date=date(2024, 6, 3),
+                                         currency="RUB", source="moex")}
+
+    overview = value_portfolio(
+        holdings=holdings, cash={1: {"RUB": Decimal("500.0000")}}, blocked_cash={},
+        prices=prices, rates={"RUB": Decimal("1")}, rate_dates={},
+    )
+
+    assert overview.total_value == Decimal("1500.0000")
+    assert overview.securities_value == Decimal("1000.0000")
+    assert overview.cash_value == Decimal("500.0000")
+    assert overview.by_account == {1: Decimal("1500.0000")}
+
+
+def test_value_portfolio_names_unpriced_positions(session):
+    """«Оценено 1 из 2» не отвечает на вопрос, какой бумаги не хватило, а без
+    ответа пункт не починить: список — это рабочий список сопоставлений."""
+    priced = Instrument(isin="RU000A0JQUZ6", ticker="AGRO", secid="AGRO",
+                        currency="RUB", kind="share", issuer="Русагро")
+    unpriced = Instrument(isin="US87238U2033", ticker="US87238U2033", secid="US87238U2033",
+                          currency="USD", kind="share", issuer="ТКС Холдинг")
+    session.add_all([priced, unpriced])
+    session.flush()
+
+    overview = value_portfolio(
+        holdings=[
+            Holding(account_id=1, instrument=priced, quantity=Decimal("10"), blocked=Decimal("0")),
+            Holding(account_id=1, instrument=unpriced, quantity=Decimal("5"), blocked=Decimal("0")),
+        ],
+        cash={}, blocked_cash={},
+        prices={priced.id: LatestPrice(close=Decimal("100.0000"), on_date=date(2024, 6, 3),
+                                       currency="RUB", source="moex")},
+        rates={"RUB": Decimal("1")}, rate_dates={},
+    )
+
+    assert (overview.valued_positions, overview.positions_total) == (1, 2)
+    assert overview.unpriced == ["ТКС Холдинг"]
+
+
+def test_position_without_rate_is_named_too(session):
+    instrument = Instrument(isin="KYG017191142", ticker="9988", secid="9988",
+                            currency="HKD", kind="share", issuer="Alibaba")
+    session.add(instrument)
+    session.flush()
+
+    overview = value_portfolio(
+        holdings=[Holding(account_id=1, instrument=instrument,
+                          quantity=Decimal("10"), blocked=Decimal("0"))],
+        cash={}, blocked_cash={},
+        prices={instrument.id: LatestPrice(close=Decimal("76.6500"), on_date=date(2024, 6, 3),
+                                           currency="HKD", source="yahoo")},
+        rates={"RUB": Decimal("1")}, rate_dates={},
+    )
+
+    assert overview.currencies_without_rate == ["HKD"]
+    assert overview.unpriced == ["Alibaba"]
+    assert overview.total_value == Decimal("0.0000")

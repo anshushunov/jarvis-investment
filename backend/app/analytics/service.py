@@ -9,7 +9,7 @@ from app.accounts.cash import blocked_cash_by_account, cash_by_account
 from app.analytics.valuation import value_position
 from app.instruments import kinds
 from app.marketdata.fx import latest_rate_dates, latest_rates, to_base
-from app.marketdata.service import prices_as_of
+from app.marketdata.service import LatestPrice, prices_as_of
 from app.models import Account, Instrument, Position
 from app.money import BASE_CURRENCY, money
 from app.sync.holdings import blocked_by_instrument
@@ -84,6 +84,25 @@ class PositionRow:
 
 
 @dataclass(frozen=True)
+class Holding:
+    """Позиция на вход оценки — вне зависимости от того, откуда она взялась.
+
+    Сегодняшний состав приходит из таблицы `position`, исторический —
+    восстановлен свёрткой журнала (app/positions/history.py). Оценка обязана не
+    различать их: одна функция на оба пути — единственная гарантия, что
+    достроенная точка графика не разойдётся с живой.
+    """
+
+    account_id: int
+    instrument: Instrument
+    quantity: Decimal
+    # Заблокированная брокером часть. У исторической точки её взять неоткуда —
+    # снимок блокировок текущий, — и приходит ноль: `restricted_value` такой
+    # точки неполон и в снимке не хранится.
+    blocked: Decimal
+
+
+@dataclass(frozen=True)
 class Overview:
     # Весь капитал в рублях: бумаги плюс деньги, всё пересчитано по курсам.
     # Позиция, для которой нет цены или нет курса, в итог не входит и считается
@@ -136,6 +155,9 @@ class Overview:
     # портфеля и выглядеть при этом совершенно уверенно — с экрана не заметить.
     valued_positions: int
     positions_total: int
+    # Бумаги, которые оценить не удалось, — поимённо. Пара чисел покрытия
+    # говорит «сколько», а починить можно только то, что названо.
+    unpriced: list[str]
 
 
 def asset_class_of(instrument: Instrument) -> str:
@@ -229,17 +251,50 @@ def position_rows(session: Session) -> list[PositionRow]:
     return result
 
 
+def _holdings(session: Session) -> list[Holding]:
+    blocked = blocked_by_instrument(session)
+    return [
+        Holding(
+            account_id=account.id,
+            instrument=instrument,
+            quantity=position.quantity,
+            blocked=blocked.get((account.id, instrument.id), Decimal("0")),
+        )
+        for position, instrument, account in _rows(session)
+    ]
+
+
 def portfolio_overview(session: Session) -> Overview:
     # Дата берётся один раз на весь обзор: два отдельных вызова разошлись бы на
     # сутки у прогона, начатого за миг до московской полуночи, и курсы оказались
     # бы датированы не тем днём, по которому посчитаны.
     today = moscow_today()
-    # Один проход по таблице цен на весь показ дашборда: цена, её валюта и её
-    # дата приходят вместе (см. LatestPrice в app/marketdata/service.py).
-    prices = prices_as_of(session, today)
-    rates = latest_rates(session, today)
-    blocked = blocked_by_instrument(session)
+    return value_portfolio(
+        holdings=_holdings(session),
+        cash=cash_by_account(session),
+        blocked_cash=blocked_cash_by_account(session),
+        # Один проход по таблице цен на весь показ дашборда: цена, её валюта и
+        # её дата приходят вместе (см. LatestPrice в app/marketdata/service.py).
+        prices=prices_as_of(session, today),
+        rates=latest_rates(session, today),
+        rate_dates=latest_rate_dates(session, today),
+    )
 
+
+def value_portfolio(
+    holdings: list[Holding],
+    cash: dict[int, dict[str, Decimal]],
+    blocked_cash: dict[int, dict[str, Decimal]],
+    prices: dict[int, LatestPrice],
+    rates: dict[str, Decimal],
+    rate_dates: dict[str, date],
+) -> Overview:
+    """Оценка портфеля по готовому составу, ценам и курсам.
+
+    Чистая: в базу не ходит и о том, «сегодня» это или 2021 год, не знает
+    вовсе. Всё, что различает живой дашборд и достроенную точку истории, —
+    аргументы.
+    """
     by_class: dict[str, Decimal] = {}
     by_account_id: dict[int, Decimal] = {}
     by_currency: dict[str, Decimal] = {}
@@ -248,19 +303,23 @@ def portfolio_overview(session: Session) -> Overview:
     # его не нашлось. Первые задают дату «курсы на», вторые — предупреждение о
     # непосчитанной части капитала. Обе собираются по ходу, а не выводятся
     # потом из таблиц: только здесь видно, какой курс какой суммой был спрошен.
-    rate_dates = latest_rate_dates(session, today)
     converted_currencies: set[str] = set()
     missing_rates: set[str] = set()
+    # Бумаги без оценки — поимённо, а не только числом.
+    unpriced: list[str] = []
     securities = money("0")
     restricted_value = money("0")
     as_of: date | None = None
     positions_total = 0
     valued_positions = 0
 
-    for position, instrument, account in _rows(session):
+    for holding in holdings:
+        instrument = holding.instrument
+        account_id = holding.account_id
+        quantity = holding.quantity
         positions_total += 1
         latest = prices.get(instrument.id)
-        valued = value_position(position.quantity, latest, rates)
+        valued = value_position(quantity, latest, rates)
         position_currencies.add(valued.currency or _currency_of(instrument))
 
         if valued.value is not None and latest is not None:
@@ -281,6 +340,12 @@ def portfolio_overview(session: Session) -> Overview:
                 # назвать. У позиции без котировки курс не спрашивался вовсе,
                 # записывать её валюту сюда значило бы обвинить не то.
                 missing_rates.add(valued.currency.upper())
+            # Название — то же, каким бумага подписана в таблице позиций
+            # (issuer, иначе тикер, иначе ISIN): владелец ищет её глазами по
+            # тому же имени.
+            unpriced.append(
+                instrument.issuer or instrument.ticker or instrument.isin or "—"
+            )
             continue
 
         if valued.currency:
@@ -290,8 +355,8 @@ def portfolio_overview(session: Session) -> Overview:
 
         klass = asset_class_of(instrument)
         by_class[klass] = money(by_class.get(klass, money("0")) + valued.value_base)
-        by_account_id[account.id] = money(
-            by_account_id.get(account.id, money("0")) + valued.value_base
+        by_account_id[account_id] = money(
+            by_account_id.get(account_id, money("0")) + valued.value_base
         )
 
         # Недоступная часть позиции. Две причины дают её по-разному: бумага,
@@ -299,10 +364,10 @@ def portfolio_overview(session: Session) -> Overview:
         # количество — только своей долей. Когда верно и то и другое,
         # ограничение бумаги поглощает блокировку количества, и складывать их
         # нельзя — получится больше, чем сама позиция.
-        blocked_quantity = blocked.get((account.id, instrument.id), Decimal("0"))
+        blocked_quantity = holding.blocked
         if instrument.trading_restricted:
             restricted_value = money(restricted_value + valued.value_base)
-        elif blocked_quantity and position.quantity != 0:
+        elif blocked_quantity and quantity != 0:
             # Доля по количеству: цена у заблокированной и свободной части одна
             # и та же бумага. Доля берётся от модулей и обрезается единицей,
             # потому что числитель и знаменатель приходят из разных источников:
@@ -314,12 +379,11 @@ def portfolio_overview(session: Session) -> Overview:
             # недоступного в девять раз больше собственной стоимости; без
             # модулей знаковое деление у короткой позиции превратило бы
             # обязательство в положительное «недоступно».
-            share = min(abs(blocked_quantity) / abs(position.quantity), Decimal("1"))
+            share = min(abs(blocked_quantity) / abs(quantity), Decimal("1"))
             restricted_value = money(restricted_value + valued.value_base * share)
 
     cash_total = money("0")
-    blocked_cash = blocked_cash_by_account(session)
-    for account_id, balances in cash_by_account(session).items():
+    for account_id, balances in cash.items():
         for currency, amount in balances.items():
             # Остаток виден в своей валюте всегда, даже когда пересчитать его
             # нечем: иначе валюта без курса исчезает бесследно.
@@ -386,4 +450,5 @@ def portfolio_overview(session: Session) -> Overview:
         ),
         valued_positions=valued_positions,
         positions_total=positions_total,
+        unpriced=sorted(unpriced),
     )
