@@ -14,7 +14,7 @@ from app.models.ledger_decision import (
 from app.models.position import Position
 from app.models.price import Price
 from app.models.reconciliation import Reconciliation
-from app.models.snapshot import DailySnapshot
+from app.models.snapshot import SNAPSHOT_BACKFILL, SNAPSHOT_LIVE, DailySnapshot
 from app.models.sync_run import SyncRun
 from app.models.transaction import CORRECTS_TRANSACTION_ID_PAYLOAD_KEY, OperationType, Transaction
 
@@ -36,6 +36,8 @@ __all__ = [
     "Position",
     "Price",
     "Reconciliation",
+    "SNAPSHOT_BACKFILL",
+    "SNAPSHOT_LIVE",
     "SyncRun",
     "Transaction",
 ]
