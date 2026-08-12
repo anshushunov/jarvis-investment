@@ -40,6 +40,7 @@ class CbrClient:
         self.timeout = timeout
         # Внедряемая загрузка: тесты разбирают записанный ответ, не выходя в сеть.
         self._fetch = fetch
+        self._codes: dict[str, str] | None = None
 
     def rates(self, on_date: date) -> tuple[date, dict[str, Decimal]]:
         """Курсы, действующие на `on_date`, и дата, на которую они установлены.
@@ -68,3 +69,53 @@ class CbrClient:
             rate = Decimal(value.replace(",", ".")) / Decimal(nominal)
             rates[code] = rate.quantize(RATE_EXP)
         return effective, rates
+
+    def currency_codes(self) -> dict[str, str]:
+        """ISO-код валюты → внутренний код ЦБ (`USD` → `R01235`).
+
+        Читается из справочника, а не зашивается литералами: кодов больше
+        сотни, и ошибка в одном даёт не отказ, а курс чужой валюты. Ответ не
+        меняется в течение прогона и запрашивается один раз.
+        """
+        if self._codes is None:
+            body = self._fetch(f"{self.base_url}/scripts/XML_valFull.asp", {}, self.timeout)
+            root = ElementTree.fromstring(body.decode(ENCODING))
+            self._codes = {
+                code.upper(): item.attrib["ID"]
+                for item in root.findall("Item")
+                if (code := item.findtext("ISO_Char_Code") or "")
+            }
+        return self._codes
+
+    def rate_history(self, currency: str, start: date, end: date) -> list[tuple[date, Decimal]]:
+        """Курсы валюты за период — одним запросом на всю историю.
+
+        Отдаются только опубликованные дни: в выходные и праздники ЦБ курса не
+        устанавливает, и достраивать пропуски здесь нельзя. Вопрос «какой курс
+        действовал в субботу» решает читающая сторона (`latest_rates`), одним
+        правилом на проект.
+        """
+        code = self.currency_codes()[currency.upper()]
+        body = self._fetch(
+            f"{self.base_url}/scripts/XML_dynamic.asp",
+            {
+                "date_req1": start.strftime("%d/%m/%Y"),
+                "date_req2": end.strftime("%d/%m/%Y"),
+                "VAL_NM_RQ": code,
+            },
+            self.timeout,
+        )
+        root = ElementTree.fromstring(body.decode(ENCODING))
+
+        rows: list[tuple[date, Decimal]] = []
+        for record in root.findall("Record"):
+            nominal = record.findtext("Nominal")
+            value = record.findtext("Value")
+            if not nominal or not value:
+                continue
+            rate = Decimal(value.replace(",", ".")) / Decimal(nominal)
+            rows.append((
+                datetime.strptime(record.attrib["Date"], "%d.%m.%Y").date(),
+                rate.quantize(RATE_EXP),
+            ))
+        return rows
