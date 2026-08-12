@@ -1,6 +1,6 @@
 import { useAnimationMode, type AnimationMode } from "../design/animation";
-import { Button } from "../ui/Button";
 import { Card, CardTitle } from "../ui/Card";
+import { SegmentedControl } from "../ui/SegmentedControl";
 
 const MODES: { value: AnimationMode; label: string }[] = [
   { value: "off", label: "Выключены" },
@@ -14,19 +14,7 @@ export function SettingsPage() {
   return (
     <Card>
       <CardTitle>Анимации</CardTitle>
-      {/* Временно три кнопки: SegmentedControl появляется следующей задачей и
-          заменит их, не меняя поведения. */}
-      <div className="flex gap-2">
-        {MODES.map((option) => (
-          <Button
-            key={option.value}
-            variant={option.value === mode ? "primary" : "ghost"}
-            onClick={() => setMode(option.value)}
-          >
-            {option.label}
-          </Button>
-        ))}
-      </div>
+      <SegmentedControl options={MODES} value={mode} onChange={setMode} name="animation-mode" />
       {systemPrefersReduced && (
         <div className="mt-2 text-xs text-muted">
           Система просит уменьшить движение — по умолчанию анимации выключены.

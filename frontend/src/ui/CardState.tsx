@@ -12,15 +12,27 @@ const TONE = {
   error: "text-red",
 } as const;
 
+/**
+ * Сообщение о состоянии без подложки — для карточек, у которых есть своя
+ * шапка: график стоимости держит в ней переключатель периода, и прятать его
+ * на время загрузки нельзя, иначе из выбранного периода не выбраться.
+ */
+export function StateMessage({ kind, children }: {
+  kind: keyof typeof TONE;
+  children: ReactNode;
+}) {
+  // role="status" — чтобы состояние читалось с экрана, а не только
+  // различалось цветом.
+  return <div role="status" className={`text-sm ${TONE[kind]}`}>{children}</div>;
+}
+
 export function CardState({ kind, children }: {
   kind: keyof typeof TONE;
   children: ReactNode;
 }) {
   return (
     <Card>
-      {/* role="status" — чтобы состояние читалось с экрана, а не только
-          различалось цветом. */}
-      <div role="status" className={`text-sm ${TONE[kind]}`}>{children}</div>
+      <StateMessage kind={kind}>{children}</StateMessage>
     </Card>
   );
 }

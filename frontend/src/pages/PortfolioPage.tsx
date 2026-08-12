@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router";
 
 import { api } from "../api/client";
@@ -9,11 +10,28 @@ import { SummaryCard } from "../components/SummaryCard";
 import { ValueChart } from "../components/ValueChart";
 import { Card } from "../ui/Card";
 import { CardState } from "../ui/CardState";
+import { SegmentedControl } from "../ui/SegmentedControl";
+
+// После достройки истории график рисует больше двух тысяч точек одной линией —
+// отдельный год в ней не разглядеть.
+const PERIODS = [
+  { value: 30, label: "Месяц" },
+  { value: 365, label: "Год" },
+  { value: 0, label: "Всё время" },
+];
 
 export function PortfolioPage() {
+  // Период — состояние экрана, а не часть адреса: это не место, а взгляд на
+  // него.
+  const [days, setDays] = useState(0);
+
   const overview = useQuery({ queryKey: ["overview"], queryFn: api.overview });
   const cash = useQuery({ queryKey: ["cash"], queryFn: api.cash });
-  const history = useQuery({ queryKey: ["history"], queryFn: () => api.history() });
+  // 0 — «всё время»: бэкенд без параметра days отдаёт весь период (фаза 2c).
+  const history = useQuery({
+    queryKey: ["history", days],
+    queryFn: () => api.history(days || undefined),
+  });
   const reconciliations = useQuery({ queryKey: ["reconciliations"], queryFn: api.reconciliations });
 
   if (overview.isLoading) return <CardState kind="loading">Загрузка…</CardState>;
@@ -58,7 +76,12 @@ export function PortfolioPage() {
           <SummaryCard overview={overview.data!} />
           <CashCard rows={cash.data ?? []} error={cashError} loading={cash.isPending} />
         </div>
-        <ValueChart points={history.data ?? []} error={historyError} loading={history.isPending} />
+        <ValueChart
+          points={history.data ?? []}
+          error={historyError}
+          loading={history.isPending}
+          action={<SegmentedControl options={PERIODS} value={days} onChange={setDays} />}
+        />
       </div>
 
       <AllocationChart data={overview.data!.by_asset_class} />

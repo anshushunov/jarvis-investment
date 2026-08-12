@@ -1,8 +1,10 @@
 import ReactECharts from "echarts-for-react";
+import type { ReactNode } from "react";
+
 import { formatDate } from "../api/format";
 import { tokens } from "../design/tokens";
 import { Card, CardTitle } from "../ui/Card";
-import { CardState } from "../ui/CardState";
+import { StateMessage } from "../ui/CardState";
 import type { HistoryPoint } from "../api/client";
 
 // Точка неполна, когда оценены не все позиции. Неизвестное покрытие (null у
@@ -16,26 +18,45 @@ function isIncomplete(point: HistoryPoint): boolean {
   );
 }
 
-export function ValueChart({ points, error, loading }: {
+/** Шапка карточки: подпись и, если есть, действие справа от неё. */
+function ChartHeader({ action }: { action?: ReactNode }) {
+  if (action === undefined) return <CardTitle>Стоимость портфеля</CardTitle>;
+
+  return (
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <span className="text-xs text-muted">Стоимость портфеля</span>
+      {action}
+    </div>
+  );
+}
+
+export function ValueChart({ points, error, loading, action }: {
   points: HistoryPoint[];
   error: string | null;
   loading: boolean;
+  // Переключатель периода стоит в шапке самой карточки: он про этот график и
+  // ни про что больше. Виден и в состояниях — иначе из выбранного периода,
+  // где данных нет, не выбраться.
+  action?: ReactNode;
 }) {
   // Сбой запроса — не то же самое, что «истории ещё нет»: заглушка про
-  // накопление снимков при реальном сбое сети была бы враньём.
-  if (error) {
-    return <CardState kind="error">Не удалось загрузить историю стоимости: {error}</CardState>;
-  }
+  // накопление снимков при реальном сбое сети была бы враньём. То же и для
+  // идущего запроса: пока история не пришла, «истории нет» — неправда, а не
+  // осторожная формулировка.
+  const state = error !== null
+    ? { kind: "error" as const, text: `Не удалось загрузить историю стоимости: ${error}` }
+    : loading
+      ? { kind: "loading" as const, text: "Загрузка истории…" }
+      : points.length === 0
+        ? { kind: "empty" as const, text: "Истории пока нет: достройте её прогоном app.snapshots.backfill." }
+        : null;
 
-  // То же и для идущего запроса: пока история не пришла, «истории нет» —
-  // неправда, а не осторожная формулировка.
-  if (loading) return <CardState kind="loading">Загрузка истории…</CardState>;
-
-  if (points.length === 0) {
+  if (state !== null) {
     return (
-      <CardState kind="empty">
-        Истории пока нет: достройте её прогоном app.snapshots.backfill.
-      </CardState>
+      <Card>
+        <ChartHeader action={action} />
+        <StateMessage kind={state.kind}>{state.text}</StateMessage>
+      </Card>
     );
   }
 
@@ -46,7 +67,7 @@ export function ValueChart({ points, error, loading }: {
 
   return (
     <Card>
-      <CardTitle>Стоимость портфеля</CardTitle>
+      <ChartHeader action={action} />
       <ReactECharts
         style={{ height: 260 }}
         option={{
