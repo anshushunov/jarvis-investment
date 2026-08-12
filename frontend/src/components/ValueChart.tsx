@@ -2,13 +2,24 @@ import ReactECharts from "echarts-for-react";
 import { formatDate } from "../api/format";
 import type { HistoryPoint } from "../api/client";
 
+// Точка неполна, когда оценены не все позиции. Неизвестное покрытие (null у
+// снимков, снятых до достройки) неполнотой не считается: объявить их неполными
+// — такое же враньё, как объявить полными.
+function isIncomplete(point: HistoryPoint): boolean {
+  return (
+    point.valued_positions !== null &&
+    point.positions_total !== null &&
+    point.valued_positions < point.positions_total
+  );
+}
+
 export function ValueChart({ points, error, loading }: {
   points: HistoryPoint[];
   error: string | null;
   loading: boolean;
 }) {
-  // Сбой запроса — не то же самое, что «снимков ещё не накопилось»:
-  // заглушка про накопление снимков при реальном сбое сети была бы враньём.
+  // Сбой запроса — не то же самое, что «истории ещё нет»: заглушка про
+  // накопление снимков при реальном сбое сети была бы враньём.
   if (error) {
     return (
       <div className="card" style={{ color: "var(--red)", fontSize: 13 }}>
@@ -17,7 +28,7 @@ export function ValueChart({ points, error, loading }: {
     );
   }
 
-  // То же и для идущего запроса: пока история не пришла, «снимков ещё нет» —
+  // То же и для идущего запроса: пока история не пришла, «истории нет» —
   // неправда, а не осторожная формулировка.
   if (loading) {
     return (
@@ -25,13 +36,18 @@ export function ValueChart({ points, error, loading }: {
     );
   }
 
-  if (points.length < 2) {
+  if (points.length === 0) {
     return (
       <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>
-        График появится, когда накопится хотя бы два ежедневных снимка стоимости.
+        Истории пока нет: достройте её прогоном app.snapshots.backfill.
       </div>
     );
   }
+
+  const values = points.map((point) => Number.parseFloat(point.total_value));
+  const incomplete = points
+    .map((point, index) => (isIncomplete(point) ? [index, values[index]] : null))
+    .filter((item): item is number[] => item !== null);
 
   return (
     <div className="card">
@@ -46,15 +62,45 @@ export function ValueChart({ points, error, loading }: {
                    axisLine: { lineStyle: { color: "#3a4763" } } },
           yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "#1c2438" } },
                    axisLabel: { color: "#9aa5c4" } },
-          tooltip: { trigger: "axis" },
-          series: [{
-            type: "line", smooth: true, showSymbol: false,
-            lineStyle: { color: "#638cff", width: 2 },
-            areaStyle: { color: "rgba(99,140,255,0.18)" },
-            data: points.map((p) => Number.parseFloat(p.total_value)),
-          }],
+          tooltip: {
+            trigger: "axis",
+            formatter: (params: Array<{ dataIndex: number }>) => {
+              const point = points[params[0].dataIndex];
+              const value = Number.parseFloat(point.total_value).toLocaleString("ru-RU", {
+                maximumFractionDigits: 0,
+              });
+              const head = `${formatDate(point.date) ?? point.date}<br/>${value} ₽`;
+              if (!isIncomplete(point)) return head;
+              // Названия бумаг, а не только счёт: искать глазами владелец
+              // будет по имени, а «оценено 57 из 59» не говорит, каких.
+              const names = point.unpriced.join(", ");
+              return `${head}<br/>оценено ${point.valued_positions} из ${point.positions_total}` +
+                     (names ? `<br/>нет цены: ${names}` : "");
+            },
+          },
+          series: [
+            {
+              type: "line", smooth: true, showSymbol: false,
+              lineStyle: { color: "#638cff", width: 2 },
+              areaStyle: { color: "rgba(99,140,255,0.18)" },
+              data: values,
+            },
+            {
+              // Неполнота передаётся и цветом, и формой: спека системы требует,
+              // чтобы факт и предположение различались, а цвет в одиночку не
+              // различает их для того, кто его не видит.
+              type: "scatter", symbol: "triangle", symbolSize: 8,
+              itemStyle: { color: "#e2b93b" },
+              data: incomplete,
+            },
+          ],
         }}
       />
+      {incomplete.length > 0 && (
+        <div style={{ color: "var(--tx-2)", fontSize: 12, marginTop: 8 }}>
+          ▲ — дни, где оценены не все позиции: цены на эти бумаги нет ни на бирже, ни у брокера.
+        </div>
+      )}
     </div>
   );
 }
