@@ -1,4 +1,6 @@
 import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
+import { Button } from "../ui/Button";
+import { Card, CardTitle } from "../ui/Card";
 import { CoverageNotice } from "./CoverageNotice";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
@@ -12,14 +14,10 @@ const STATUS_LABEL: Record<string, string> = {
 // изменился портфель или просто пришли деньги на счёт.
 function CapitalParts({ overview }: { overview: Overview }) {
   return (
-    <div style={{ margin: "10px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
-      Бумаги <span style={{ color: "var(--tx-1, inherit)" }}>
-        {formatMoney(overview.securities_value, BASE_CURRENCY)}
-      </span>
+    <div className="mt-2.5 text-xs text-muted">
+      Бумаги <span>{formatMoney(overview.securities_value, BASE_CURRENCY)}</span>
       {" · деньги "}
-      <span style={{ color: "var(--tx-1, inherit)" }}>
-        {formatMoney(overview.cash_value, BASE_CURRENCY)}
-      </span>
+      <span>{formatMoney(overview.cash_value, BASE_CURRENCY)}</span>
     </div>
   );
 }
@@ -36,9 +34,9 @@ function RestrictedNotice({ overview }: { overview: Overview }) {
   if (!isPositiveAmount(overview.restricted_value)) return null;
 
   return (
-    <div style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--tx-2)" }}>
+    <div className="mt-1.5 text-xs text-muted">
       Недоступно к продаже{" "}
-      <span style={{ color: "var(--amber)" }}>
+      <span className="text-amber">
         {formatMoney(overview.restricted_value, BASE_CURRENCY)}
       </span>
     </div>
@@ -53,44 +51,39 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
   syncErrorMessage: string | null;
 }) {
   return (
-    <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12 }}>Совокупный капитал</div>
-      <div style={{ fontSize: 34, fontWeight: 650, letterSpacing: "-0.025em", margin: "6px 0 0" }}>
+    <Card>
+      <CardTitle>Совокупный капитал</CardTitle>
+      {/* Отступ до цифры задаёт сам CardTitle (8px). Прежний инлайн отбивал
+          6px — двухпиксельная разница здесь и есть цена одинаковой подписи у
+          всех карточек. */}
+      <div className="text-hero font-[650] tracking-[-0.025em]">
         <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />
       </div>
       <CapitalParts overview={overview} />
       <RestrictedNotice overview={overview} />
       <CoverageNotice overview={overview} />
-      <button
-        onClick={onSync}
-        disabled={syncing}
-        style={{
-          marginTop: 14,
-          border: "1px solid var(--line)", borderRadius: 9, padding: "7px 14px",
-          background: "rgba(123,156,255,0.14)", color: "var(--blue)", cursor: "pointer",
-        }}
-      >
+      <Button onClick={onSync} disabled={syncing} className="mt-3.5">
         {syncing ? "Синхронизация…" : "Обновить из Т-Банка"}
-      </button>
+      </Button>
 
       {syncErrorMessage && (
-        <div style={{ color: "var(--red)", fontSize: 13, marginTop: 12 }}>{syncErrorMessage}</div>
+        <div className="mt-3 text-sm text-red">{syncErrorMessage}</div>
       )}
 
       {syncResult && (
-        <div style={{ marginTop: 14, display: "grid", gap: 6 }}>
+        <div className="mt-3.5 grid gap-1.5">
           {syncResult.map((run) => (
-            <div key={run.account} style={{ fontSize: 12.5 }}>
-              <span style={{ color: run.status === "success" ? "var(--green)" : "var(--red)" }}>
+            <div key={run.account} className="text-xs">
+              <span className={run.status === "success" ? "text-green" : "text-red"}>
                 {run.status === "success" ? "✓" : "✕"}
               </span>{" "}
-              <span style={{ color: "var(--tx-2)" }}>{run.account}:</span>{" "}
+              <span className="text-muted">{run.account}:</span>{" "}
               {STATUS_LABEL[run.status] ?? run.status}
-              {run.error && <div style={{ color: "var(--tx-2)", marginLeft: 18 }}>{run.error}</div>}
+              {run.error && <div className="ml-[18px] text-muted">{run.error}</div>}
             </div>
           ))}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
