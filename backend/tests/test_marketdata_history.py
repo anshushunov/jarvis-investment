@@ -3,10 +3,10 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from app.marketdata.history import load_price_history
+from app.marketdata.history import load_fx_history, load_metal_history, load_price_history
 from app.marketdata.moex import MoexHistoryPoint
 from app.marketdata.yahoo import YahooHistory
-from app.models import Instrument, Price
+from app.models import FxRate, Instrument, Price
 
 START = date(2024, 6, 3)
 END = date(2024, 6, 4)
@@ -124,3 +124,55 @@ def test_repeated_load_updates_instead_of_duplicating(session):
     prices = _prices(session, instrument)
     assert len(prices) == 1
     assert prices[0].close == Decimal("1360.0000")
+
+
+class FakeCbr:
+    def __init__(self, rows: dict[str, list[tuple[date, Decimal]]]) -> None:
+        self.rows = rows
+        self.calls: list[str] = []
+
+    def rate_history(self, currency, start, end):
+        self.calls.append(currency)
+        return self.rows.get(currency, [])
+
+
+def _rates(session, currency) -> list[FxRate]:
+    return list(session.execute(
+        select(FxRate).where(FxRate.currency == currency).order_by(FxRate.on_date)
+    ).scalars())
+
+
+def test_fx_history_is_stored_under_the_published_date(session):
+    cbr = FakeCbr({"USD": [(date(2022, 3, 1), Decimal("93.55890000")),
+                           (date(2022, 3, 2), Decimal("91.74570000"))]})
+
+    written = load_fx_history(session, ["USD"], date(2022, 3, 1), date(2022, 3, 10), cbr=cbr)
+
+    assert written == 2
+    rows = _rates(session, "USD")
+    assert [(row.on_date, row.rate, row.source) for row in rows] == [
+        (date(2022, 3, 1), Decimal("93.55890000"), "cbr"),
+        (date(2022, 3, 2), Decimal("91.74570000"), "cbr"),
+    ]
+
+
+def test_fx_history_skips_the_base_currency(session):
+    """Рубль к рублю — единица, и она не хранится: строка, которая никогда не
+    меняется, лишь создаёт впечатление, что её можно не найти."""
+    cbr = FakeCbr({})
+    load_fx_history(session, ["RUB", "USD"], date(2022, 3, 1), date(2022, 3, 10), cbr=cbr)
+    assert cbr.calls == ["USD"]
+
+
+def test_metal_history_comes_from_the_exchange(session):
+    """У ЦБ драгоценных металлов нет вовсе, а в остатках Т-Банка золото лежит
+    наравне с валютами: курс берётся с MOEX, где GLDRUB_TOM котируется в
+    рублях за грамм."""
+    moex = FakeMoex([MoexHistoryPoint(on_date=date(2024, 6, 3), close=Decimal("6610.0000"))])
+
+    written = load_metal_history(session, date(2024, 6, 3), date(2024, 6, 4), moex=moex)
+
+    assert written == 1
+    rows = _rates(session, "XAU")
+    assert (rows[0].rate, rows[0].source) == (Decimal("6610.00000000"), "moex")
+    assert moex.calls == [("GLDRUB_TOM", "selt", "currency")]

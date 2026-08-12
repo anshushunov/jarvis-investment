@@ -12,13 +12,15 @@ from datetime import date
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.marketdata.fx import CBR_SOURCE, METAL_SECIDS
+from app.marketdata.fx import MOEX_SOURCE as FX_MOEX_SOURCE
 from app.marketdata.service import (
     ENGINE_MARKET_BY_KIND,
     MOEX_SOURCE,
     price_in_money,
 )
 from app.marketdata.symbols import priced_at_moex, yahoo_symbol
-from app.models import Instrument, Price
+from app.models import FxRate, Instrument, Price
 from app.money import BASE_CURRENCY
 
 logger = logging.getLogger(__name__)
@@ -99,3 +101,46 @@ def load_price_history(
     if priced_at_moex(instrument):
         return _store(session, instrument.id, _from_moex(instrument, start, end, moex), MOEX_SOURCE)
     return _store(session, instrument.id, _from_yahoo(instrument, start, end, yahoo), YAHOO_SOURCE)
+
+
+def _store_rate(session: Session, currency: str, on_date: date, rate, source: str) -> None:
+    statement = insert(FxRate).values(
+        currency=currency, on_date=on_date, rate=rate, source=source
+    ).on_conflict_do_update(
+        index_elements=[FxRate.currency, FxRate.on_date],
+        set_={"rate": rate, "source": source},
+    )
+    session.execute(statement)
+
+
+def load_fx_history(session: Session, currencies: list[str], start: date, end: date, *, cbr) -> int:
+    """Курсы ЦБ за период по каждой названной валюте. Возвращает число строк.
+
+    Базовая валюта пропускается: рубль к рублю — единица, и она не хранится
+    (см. `latest_rates`). Дни, в которые ЦБ курса не публиковал, остаются
+    пустыми — «курс, действующий на дату» выводит читающая сторона.
+    """
+    written = 0
+    for currency in currencies:
+        if currency.upper() == BASE_CURRENCY:
+            continue
+        for on_date, rate in cbr.rate_history(currency, start, end):
+            _store_rate(session, currency.upper(), on_date, rate, CBR_SOURCE)
+            written += 1
+    session.flush()
+    return written
+
+
+def load_metal_history(session: Session, start: date, end: date, *, moex) -> int:
+    """Курсы металлов за период с MOEX: у ЦБ их нет вовсе.
+
+    Тот же инструмент, которым фаза 2a считает золото сегодня (GLDRUB_TOM,
+    движок currency, рынок selt), — рубли за грамм.
+    """
+    written = 0
+    for currency, secid in METAL_SECIDS.items():
+        for point in moex.close_history(secid, start, end, market="selt", engine="currency"):
+            _store_rate(session, currency, point.on_date, point.close, FX_MOEX_SOURCE)
+            written += 1
+    session.flush()
+    return written
