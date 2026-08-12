@@ -1,5 +1,5 @@
-import { coverageWarning } from "../api/coverage";
 import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
+import { CoverageNotice } from "./CoverageNotice";
 import { MoneyValue } from "./MoneyValue";
 import type { Overview, SyncRunResult } from "../api/client";
 
@@ -41,39 +41,6 @@ function RestrictedNotice({ overview }: { overview: Overview }) {
       <span style={{ color: "var(--amber)" }}>
         {formatMoney(overview.restricted_value, BASE_CURRENCY)}
       </span>
-    </div>
-  );
-}
-
-// Совокупный капитал считается только по той части портфеля, которую удалось
-// перевести в рубли. Пока это не весь портфель, сама цифра об этом не говорит
-// ничего — предупреждение должно стоять вплотную к ней, читаться, а не теряться
-// мелким шрифтом, и называть настоящую причину: нет котировок и нет курсов —
-// это разные поломки, и чинятся они по-разному.
-function CoverageNotice({ overview }: { overview: Overview }) {
-  const warning = coverageWarning(overview);
-  if (warning === null) return null;
-
-  const style = {
-    margin: "10px 0 0", padding: "7px 10px", borderRadius: 8, fontSize: 13,
-  } as const;
-
-  if (warning.kind === "rates") {
-    return (
-      <div style={{ ...style, background: "rgba(224,108,108,0.14)", color: "var(--red)" }}>
-        Нет курса к рублю: {warning.currencies.join(", ")}. Всё, что в этих валютах, в
-        сумму не входит — ни бумаги, ни остатки, ни металлы. Курсы подтянутся сами
-        (ЦБ, ежедневно в 12:10 МСК; металлы — с MOEX) или вручную — см. README,
-        «Курсы, цены и оценка капитала». В рублях посчитаны {warning.valued} позиций
-        из {warning.total}.
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ ...style, background: "rgba(232,176,75,0.14)", color: "var(--amber)" }}>
-      Часть портфеля не оценена: цены есть только для {warning.valued} позиций из{" "}
-      {warning.total}. Остальные в эту сумму не входят.
     </div>
   );
 }
