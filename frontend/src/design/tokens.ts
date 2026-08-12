@@ -1,0 +1,82 @@
+/**
+ * Единственное место, где цвет и размер записаны значением.
+ *
+ * Источник — TypeScript, а не CSS: ECharts настраивается объектом и принимает
+ * цвет строкой, классов он не понимает, а достать значение переменной из CSS в
+ * JS можно только через getComputedStyle, которого в jsdom нет. Обратное
+ * направление (TS → переменные :root) выражается плагином Tailwind и
+ * проверяется сборкой.
+ */
+
+export const tokens = {
+  color: {
+    bg0: "#0a0e18",
+    bg1: "#0f1424",
+    card: "rgba(255, 255, 255, 0.035)",
+    line: "rgba(130, 150, 200, 0.16)",
+    tx: "#e7ecf9",
+    muted: "#9aa5c4",
+    blue: "#7b9cff",
+    green: "#4fd39a",
+    red: "#f2749a",
+    amber: "#e8b04b",
+  },
+
+  /**
+   * Цвета графиков. Оси и сетка своих токенов раньше не имели вовсе, а линия и
+   * метка неполноты были записаны литералами, отличавшимися от палитры на
+   * пару процентов яркости.
+   */
+  chart: {
+    axis: "#3a4763",
+    grid: "#1c2438",
+    get line() { return tokens.color.blue; },
+    area: "rgba(123,156,255,0.18)",
+    get incomplete() { return tokens.color.amber; },
+    get label() { return tokens.color.muted; },
+    get pieBorder() { return tokens.color.bg1; },
+  },
+
+  /**
+   * Палитра классов активов. Держится отдельно от семантики намеренно: цвет
+   * здесь про класс актива, а не про «хорошо или плохо», и свести её к
+   * семантическим токенам значило бы называть золото «вниманием».
+   */
+  assetClass: {
+    equity: "#3987e5",
+    bonds: "#d95926",
+    money_market: "#199e70",
+    gold: "#c98500",
+    silver: "#9aa5b8",
+    platinum: "#4fb0bf",
+    palladium: "#8f9a3f",
+    cash: "#d55181",
+    derivatives: "#008300",
+    mixed: "#9085e9",
+    other: "#e66767",
+  },
+
+  // Вся шкала интерфейса: замер 12.08.2026 нашёл ровно пять размеров, и 12–13
+  // покрывают 50 обращений из 58.
+  fontSize: {
+    "2xs": "11px",
+    xs: "12px",
+    sm: "13px",
+    title: "22px",
+    hero: "34px",
+  },
+
+  radius: {
+    sm: "8px",
+    md: "9px",
+    lg: "14px",
+  },
+} as const;
+
+/** Имя CSS-переменной → значение. Объявляются плагином Tailwind в :root. */
+export const cssVariables: Record<string, string> = Object.fromEntries(
+  Object.entries(tokens.color).map(([name, value]) => [
+    `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
+    value,
+  ]),
+);
