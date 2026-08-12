@@ -11,10 +11,13 @@ export function Table({ children }: { children: ReactNode }) {
   return <table className="w-full border-collapse text-sm">{children}</table>;
 }
 
+// Горизонтальных отступов у ячеек нет намеренно: восемь колонок таблицы
+// позиций и без них занимают всю ширину карточки, а padding по 8px с каждой
+// стороны выталкивал колонку «Результат» за её край.
 export function Th({ children, numeric = false }: { children: ReactNode; numeric?: boolean }) {
   return (
     <th
-      className={`border-b border-line px-2 py-2 font-normal text-xs text-muted ${
+      className={`border-b border-line py-2 pr-2 font-normal text-xs text-muted last:pr-0 ${
         numeric ? "text-right" : "text-left"
       }`}
     >
@@ -28,7 +31,7 @@ export function Td({ children, numeric = false }: { children: ReactNode; numeric
   // `line` записан как rgba(), а Tailwind умеет подмешивать альфу только к
   // цветам, заданным в формате с <alpha-value>. Рамка та же, что у шапки.
   return (
-    <td className={`border-b border-line px-2 py-2 ${numeric ? "text-right tabular-nums" : ""}`}>
+    <td className={`border-b border-line py-2 pr-2 last:pr-0 ${numeric ? "text-right tabular-nums" : ""}`}>
       {children}
     </td>
   );
