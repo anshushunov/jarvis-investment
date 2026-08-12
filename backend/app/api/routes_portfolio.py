@@ -18,7 +18,7 @@ from app.api.schemas import (
 from app.db import get_session
 from app.decisions.suggestions import suggestions_for_account
 from app.models import Account, DailySnapshot, Reconciliation
-from app.snapshots.service import snapshot_by_account
+from app.snapshots.service import snapshot_account_ids, snapshot_by_account
 from app.timeutils import moscow_today
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
@@ -95,29 +95,28 @@ def get_cash(session: Session = Depends(get_session)) -> list[CashOut]:
 
 
 @router.get("/portfolio/history", response_model=list[HistoryPointOut])
-def get_history(days: int = 90, session: Session = Depends(get_session)) -> list[HistoryPointOut]:
-    # Дата берётся в московском поясе явно: снимки пишутся под московской
-    # календарной датой (см. app/timeutils.py), и окно истории обязано
-    # отсчитываться от той же, а не от даты по поясу контейнера.
-    since = moscow_today() - timedelta(days=days)
-    rows = session.execute(
-        select(DailySnapshot).where(DailySnapshot.on_date >= since).order_by(DailySnapshot.on_date)
-    ).scalars().all()
+def get_history(
+    days: int | None = None, session: Session = Depends(get_session)
+) -> list[HistoryPointOut]:
+    # Без окна — вся история: после достройки график начинается датой первой
+    # операции, и девяностодневное окно по умолчанию прятало бы шесть лет.
+    query = select(DailySnapshot).order_by(DailySnapshot.on_date)
+    if days is not None:
+        # Дата берётся в московском поясе явно: снимки пишутся под московской
+        # календарной датой (см. app/timeutils.py), и окно истории обязано
+        # отсчитываться от той же, а не от даты по поясу контейнера.
+        query = query.where(DailySnapshot.on_date >= moscow_today() - timedelta(days=days))
+    rows = list(session.execute(query).scalars().all())
     # Счета выбираются один раз на весь ответ, а не на точку истории: снимок
     # снимается раз в сутки, и запрос без фильтра внутри цикла по строкам (как
     # было раньше — см. snapshot_by_account) превращал бы один обход окна в
     # 1 + N запросов. Тот же приём, что и у соседей выше (get_overview,
-    # get_positions, get_cash).
-    account_ids = {
-        int(key)
-        for row in rows
-        for key in (row.by_account or {})
-        if key.lstrip("-").isdigit()
-    }
+    # get_positions, get_cash). Какие ключи разбивки считать идентификаторами
+    # счетов, знает сторона, которая их пишет, — snapshot_account_ids.
     accounts = {
         account.id: account
         for account in session.execute(
-            select(Account).where(Account.id.in_(account_ids))
+            select(Account).where(Account.id.in_(snapshot_account_ids(rows)))
         ).scalars()
     }
     return [
@@ -125,6 +124,10 @@ def get_history(days: int = 90, session: Session = Depends(get_session)) -> list
             date=row.on_date,
             total_value=row.total_value,
             by_account=snapshot_by_account(accounts, row),
+            source=row.source,
+            valued_positions=row.valued_positions,
+            positions_total=row.positions_total,
+            unpriced=row.unpriced or [],
         )
         for row in rows
     ]

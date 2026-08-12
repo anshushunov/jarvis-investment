@@ -61,6 +61,29 @@ def take_snapshot(session: Session, on_date: date) -> DailySnapshot:
     return store_snapshot(session, on_date, portfolio_overview(session), SNAPSHOT_LIVE)
 
 
+def _is_account_id(key: str) -> bool:
+    """Числовой ключ разбивки — идентификатор счёта; нечисловой достался от
+    снимков старого формата, где ключом лежала готовая подпись."""
+    return key.lstrip("-").isdigit()
+
+
+def snapshot_account_ids(snapshots: list[DailySnapshot]) -> set[int]:
+    """Идентификаторы счетов, встречающиеся в разбивках этих снимков.
+
+    Живёт здесь, а не у читателя: правило «числовой ключ by_account — это
+    идентификатор счёта» знает пишущая сторона (`store_snapshot`), и второе
+    его изложение в обработчике API разъехалось бы ровно тогда, когда формат
+    ключа поменяется. Читателю (`/portfolio/history`) множество нужно, чтобы
+    выбрать счета одним запросом на весь ответ, а не по одному на точку.
+    """
+    return {
+        int(key)
+        for snapshot in snapshots
+        for key in (snapshot.by_account or {})
+        if _is_account_id(key)
+    }
+
+
 def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -> dict[str, Decimal]:
     """Разбивка снимка по счетам, подписанная для показа.
 
@@ -82,10 +105,10 @@ def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -
     """
     result: dict[str, Decimal] = {}
     for key, value in (snapshot.by_account or {}).items():
-        account = accounts.get(int(key)) if key.lstrip("-").isdigit() else None
+        account = accounts.get(int(key)) if _is_account_id(key) else None
         if account is not None:
             label = account_label(account)
-        elif key.lstrip("-").isdigit():
+        elif _is_account_id(key):
             # Счёт был удалён из базы, а снимок остался — подпись восстановить
             # не из чего, но сумму терять нельзя.
             label = UNKNOWN_ACCOUNT_LABEL
