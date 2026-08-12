@@ -25,10 +25,13 @@ MOEX_SOURCE = "moex"
 # при чтении.
 TBANK_SOURCE = "tbank"
 
-# Приоритет при одинаковой дате: биржа важнее брокера. Биржа — независимый
-# источник, брокер — тот самый, с чьим снимком мы сверяемся; оценивать портфель
-# его же числами можно, но только когда своих нет.
-SOURCE_PRIORITY = {MOEX_SOURCE: 0, TBANK_SOURCE: 1}
+# Приоритет при одинаковой дате: биржа важнее независимого источника, а тот
+# важнее брокера. Брокер — сторона, с чьим снимком мы сверяемся; оценивать
+# портфель его же числами можно, только когда своих нет.
+#
+# Yahoo указан литералом, а не импортом YAHOO_SOURCE: history.py импортирует
+# service.py, и обратный импорт замкнул бы круг.
+SOURCE_PRIORITY = {MOEX_SOURCE: 0, "yahoo": 1, TBANK_SOURCE: 2}
 _UNKNOWN_SOURCE_PRIORITY = 99
 
 # Ключи — доменные виды инструментов (app/instruments/kinds.py); их же кладёт
@@ -48,7 +51,9 @@ ENGINE_MARKET_BY_KIND = {
 FACE_UNIT_TO_ISO = {"SUR": BASE_CURRENCY}
 
 
-def _price_in_money(instrument: Instrument, quote: MoexQuote) -> tuple[Decimal, str] | None:
+def price_in_money(
+    kind: str, price: Decimal, face_value: Decimal | None, face_unit: str | None
+) -> tuple[Decimal, str] | None:
     """Цена одной бумаги и валюта этой цены.
 
     Акции и фонды MOEX котирует прямо в деньгах и всегда в рублях. Облигации —
@@ -58,16 +63,18 @@ def _price_in_money(instrument: Instrument, quote: MoexQuote) -> tuple[Decimal, 
 
     Накопленный купонный доход в цену не входит: он платится сверх неё и по
     смыслу ближе к начислению, чем к стоимости бумаги.
+
+    Функция берёт числа, а не котировку: живая цена приходит из блока
+    marketdata, историческая — из блока history, и правило перевода у них
+    обязано быть одно.
     """
-    if quote.price is None:
+    if kind != kinds.BOND:
+        return price, BASE_CURRENCY
+    if not face_value:
         return None
-    if instrument.kind != kinds.BOND:
-        return quote.price, BASE_CURRENCY
-    if not quote.face_value:
-        return None
-    face_unit = (quote.face_unit or "SUR").upper()
-    currency = FACE_UNIT_TO_ISO.get(face_unit, face_unit)
-    return money(quote.price / Decimal("100") * quote.face_value), currency
+    unit = (face_unit or "SUR").upper()
+    currency = FACE_UNIT_TO_ISO.get(unit, unit)
+    return money(price / Decimal("100") * face_value), currency
 
 
 def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> int:
@@ -90,7 +97,10 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
             )
             continue
 
-        priced = _price_in_money(instrument, quote)
+        priced = (
+            None if quote.price is None
+            else price_in_money(instrument.kind, quote.price, quote.face_value, quote.face_unit)
+        )
         if priced is None:
             continue
         price, currency = priced
