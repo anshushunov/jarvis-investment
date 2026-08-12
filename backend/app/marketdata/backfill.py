@@ -60,6 +60,23 @@ def history_currencies(session: Session) -> list[str]:
     return sorted(currencies)
 
 
+def _guarded(session: Session, what: str, load) -> int:
+    """Выполняет загрузку и закрепляет её своим коммитом.
+
+    Отказ источника возвращает ноль, а не роняет прогон: части загрузки
+    независимы, и недоступность одной биржи не должна отменять работу,
+    сделанную по другому источнику.
+    """
+    try:
+        written = load()
+    except httpx.HTTPError:
+        session.rollback()
+        logger.warning("Загрузка %s не удалась: источник недоступен", what, exc_info=True)
+        return 0
+    session.commit()
+    return written
+
+
 def _report_mapping(session: Session) -> None:
     instruments = list(session.execute(select(Instrument).order_by(Instrument.isin)).scalars())
     unresolved: list[Instrument] = []
@@ -126,10 +143,15 @@ def main() -> None:
                             instrument.isin or instrument.ticker, days)
             session.commit()
 
+        # Курсы и металлы идут разными источниками и коммитятся порознь: у ЦБ
+        # свой адрес, у металлов — MOEX. Общий коммит на оба однажды уже стоил
+        # всей загруженной истории курсов — MOEX отказал на золоте, и откат
+        # унёс шесть лет курсов ЦБ, которые к отказу отношения не имели.
         currencies = history_currencies(session)
-        rates = load_fx_history(session, currencies, start, end, cbr=cbr)
-        metals = load_metal_history(session, start, end, moex=moex)
-        session.commit()
+        rates = _guarded(session, "курсов ЦБ",
+                         lambda: load_fx_history(session, currencies, start, end, cbr=cbr))
+        metals = _guarded(session, "курсов металлов с MOEX",
+                          lambda: load_metal_history(session, start, end, moex=moex))
 
         logger.info("Загружено дней котировок: %s по %s инструментам", loaded, len(instruments))
         logger.info("Курсов: %s по валютам %s; металлов: %s", rates, ", ".join(currencies), metals)
