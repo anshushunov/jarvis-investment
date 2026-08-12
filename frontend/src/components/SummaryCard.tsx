@@ -1,4 +1,5 @@
 import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
+import { useAnimatedNumber } from "../design/animation";
 import { Button } from "../ui/Button";
 import { Card, CardTitle } from "../ui/Card";
 import { CoverageNotice } from "./CoverageNotice";
@@ -43,6 +44,14 @@ function RestrictedNotice({ overview }: { overview: Overview }) {
   );
 }
 
+// Капитал приходит строкой и строкой же форматируется — число здесь живёт
+// только внутри анимации. Четыре знака после точки сохраняются, чтобы
+// formatMoney получил ровно то же значение, что и без анимации.
+function AnimatedTotal({ amount }: { amount: string }) {
+  const value = useAnimatedNumber(Number.parseFloat(amount));
+  return <MoneyValue amount={value.toFixed(4)} currency={BASE_CURRENCY} />;
+}
+
 export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMessage }: {
   overview: Overview;
   onSync: () => void;
@@ -57,7 +66,7 @@ export function SummaryCard({ overview, onSync, syncing, syncResult, syncErrorMe
           6px — двухпиксельная разница здесь и есть цена одинаковой подписи у
           всех карточек. */}
       <div className="text-hero font-[650] tracking-[-0.025em]">
-        <MoneyValue amount={overview.total_value} currency={BASE_CURRENCY} />
+        <AnimatedTotal amount={overview.total_value} />
       </div>
       <CapitalParts overview={overview} />
       <RestrictedNotice overview={overview} />
