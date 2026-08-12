@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -132,15 +132,29 @@ class LatestPrice:
     source: str
 
 
-def latest_prices(session: Session) -> dict[int, LatestPrice]:
-    """Самая свежая цена по каждому инструменту.
+# Предельный возраст цены. Выходные, праздники и несовпадение календарей MOEX,
+# США и Гонконга закрываются молча — это устройство биржи, а не пробел в
+# данных. Настоящая остановка торгов (иностранные бумаги в 2022 году) за неделю
+# выходит, и позиция честно становится неоценённой: замороженная цена, которую
+# тянут месяцами, выглядит фактом и им не является.
+PRICE_MAX_AGE = timedelta(days=7)
+
+
+def prices_as_of(
+    session: Session, on_date: date, max_age: timedelta = PRICE_MAX_AGE
+) -> dict[int, LatestPrice]:
+    """Цена каждого инструмента на дату: самая свежая не позже неё.
 
     Свежесть решает первой, происхождение — вторым: вчерашняя биржевая цена
-    хуже сегодняшней брокерской, потому что вопрос стоит «сколько стоит
-    сейчас». При равной дате выигрывает биржа (SOURCE_PRIORITY).
+    хуже сегодняшней брокерской, потому что вопрос стоит «сколько стоит на эту
+    дату». При равной дате выигрывает биржа, затем независимый источник, и
+    только потом брокер (SOURCE_PRIORITY).
 
-    Фильтра по валюте здесь больше нет: валюта хранится у самой цены, и
-    пересчёт в рубли делает оценка (app/analytics/valuation.py).
+    Цена старше `max_age` не возвращается вовсе: инструмент считается
+    неоценённым, и покрытие снимка это назовёт.
+
+    Фильтра по валюте здесь нет: валюта хранится у самой цены, и пересчёт в
+    рубли делает оценка (app/analytics/valuation.py).
     """
     priority = case(SOURCE_PRIORITY, value=Price.source, else_=_UNKNOWN_SOURCE_PRIORITY)
     ranked = select(
@@ -153,6 +167,9 @@ def latest_prices(session: Session) -> dict[int, LatestPrice]:
             partition_by=Price.instrument_id,
             order_by=(Price.on_date.desc(), priority.asc()),
         ).label("rn"),
+    ).where(
+        Price.on_date <= on_date,
+        Price.on_date >= on_date - max_age,
     ).subquery()
 
     rows = session.execute(

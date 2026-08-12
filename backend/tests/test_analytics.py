@@ -12,6 +12,16 @@ from app.sync.holdings import store_holdings
 from app.timeutils import moscow_today
 
 
+def price_day(days_ago: int = 3) -> date:
+    """Дата котировки в тестах — от сегодняшней московской, а не зафиксированная
+    в прошлом: оценка не берёт цену старше `PRICE_MAX_AGE`
+    (app/marketdata/service.py), и дата из марта делала бы тест зелёным ровно до
+    истечения недели после неё. По той же причине к «сегодня» привязаны курсы
+    (см. add_rate ниже).
+    """
+    return moscow_today() - timedelta(days=days_ago)
+
+
 def seed(session):
     account = Account(broker="tbank", kind="brokerage", external_id="acc-1",
                       name="Брокерский", currency="RUB")
@@ -33,9 +43,9 @@ def seed(session):
                  quantity=Decimal("5"), average_price=Decimal("1000")),
     ])
     session.add_all([
-        Price(instrument_id=share.id, on_date=date(2026, 3, 12), close=Decimal("150"), source="moex"),
-        Price(instrument_id=fund.id, on_date=date(2026, 3, 12), close=Decimal("8"), source="moex"),
-        Price(instrument_id=bond.id, on_date=date(2026, 3, 12), close=Decimal("1010"), source="moex"),
+        Price(instrument_id=share.id, on_date=price_day(), close=Decimal("150"), source="moex"),
+        Price(instrument_id=fund.id, on_date=price_day(), close=Decimal("8"), source="moex"),
+        Price(instrument_id=bond.id, on_date=price_day(), close=Decimal("1010"), source="moex"),
     ])
     session.flush()
     return account
@@ -60,7 +70,7 @@ def add_priced_position(
     kind: str = "share",
     restricted: bool = False,
     average_price: Decimal = Decimal("0"),
-    on_date: date = date(2026, 3, 12),
+    on_date: date | None = None,
 ) -> Instrument:
     """Позиция на счёте вместе с её последней котировкой.
 
@@ -70,6 +80,7 @@ def add_priced_position(
     котируется в юанях). `price=None` — котировки нет вовсе, позиция остаётся
     неоценённой.
     """
+    on_date = on_date or price_day()
     instrument = Instrument(isin=isin, ticker=isin, secid=isin, kind=kind,
                             currency=reference_currency or currency,
                             trading_restricted=restricted)
@@ -138,7 +149,7 @@ def test_short_position_profit_percent_is_not_inverted(session):
     session.add_all([
         Position(account_id=account.id, instrument_id=shorted.id,
                  quantity=Decimal("-10"), average_price=Decimal("200")),
-        Price(instrument_id=shorted.id, on_date=date(2026, 3, 12),
+        Price(instrument_id=shorted.id, on_date=price_day(),
               close=Decimal("180"), source="moex"),
     ])
     session.flush()
@@ -212,7 +223,7 @@ def test_snapshot_same_day_is_overwritten(session):
 def test_overview_as_of_uses_max_price_date(session):
     seed(session)
     overview = portfolio_overview(session)
-    assert overview.as_of == date(2026, 3, 12)
+    assert overview.as_of == price_day()
 
 
 def test_overview_as_of_prefers_latest_of_mixed_dates(session):
@@ -223,12 +234,12 @@ def test_overview_as_of_prefers_latest_of_mixed_dates(session):
     session.flush()
     session.add(Position(account_id=account.id, instrument_id=later.id,
                          quantity=Decimal("1"), average_price=Decimal("10")))
-    session.add(Price(instrument_id=later.id, on_date=date(2026, 3, 15),
+    session.add(Price(instrument_id=later.id, on_date=price_day(0),
                        close=Decimal("20"), source="moex"))
     session.flush()
 
     overview = portfolio_overview(session)
-    assert overview.as_of == date(2026, 3, 15)
+    assert overview.as_of == price_day(0)
 
 
 def test_overview_as_of_empty_when_no_prices(session):
@@ -295,7 +306,7 @@ def test_position_with_zero_price_shows_full_loss(session):
     session.flush()
     session.add(Position(account_id=account.id, instrument_id=defaulted.id,
                          quantity=Decimal("10"), average_price=Decimal("50")))
-    session.add(Price(instrument_id=defaulted.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=defaulted.id, on_date=price_day(),
                        close=Decimal("0"), source="moex"))
     session.flush()
 
@@ -322,7 +333,7 @@ def test_by_account_keeps_distinct_names_as_own_rows(session):
         Position(account_id=second.id, instrument_id=share.id,
                  quantity=Decimal("2"), average_price=Decimal("100")),
     ])
-    session.add(Price(instrument_id=share.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=share.id, on_date=price_day(),
                        close=Decimal("150"), source="moex"))
     session.flush()
 
@@ -346,7 +357,7 @@ def _seed_foreign(session, account, source="manual"):
     session.flush()
     session.add(Position(account_id=account.id, instrument_id=foreign.id,
                          quantity=Decimal("10"), average_price=Decimal("150")))
-    session.add(Price(instrument_id=foreign.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=foreign.id, on_date=price_day(),
                        close=Decimal("200"), currency="USD", source=source))
     session.flush()
     return foreign
@@ -530,7 +541,7 @@ def test_by_account_keeps_same_name_accounts_apart(session):
         Position(account_id=second.id, instrument_id=share.id,
                  quantity=Decimal("2"), average_price=Decimal("100")),
     ])
-    session.add(Price(instrument_id=share.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=share.id, on_date=price_day(),
                        close=Decimal("150"), source="moex"))
     session.flush()
 
@@ -840,12 +851,12 @@ def test_fx_as_of_is_reported_separately_from_price_date(session):
     Одна дата «данные на» на двоих врала бы про свежесть одного из источников."""
     account = add_account(session)
     add_priced_position(session, account, isin="HK0000009866", quantity=Decimal("40"),
-                        price=Decimal("36.90"), currency="HKD", on_date=date(2026, 3, 12))
+                        price=Decimal("36.90"), currency="HKD", on_date=price_day())
     add_rate(session, "HKD", Decimal("10.4724"))
 
     overview = portfolio_overview(session)
 
-    assert overview.as_of == date(2026, 3, 12)
+    assert overview.as_of == price_day()
     assert overview.fx_as_of == moscow_today()
 
 

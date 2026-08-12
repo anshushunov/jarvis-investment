@@ -9,7 +9,7 @@ from app.accounts.cash import blocked_cash_by_account, cash_by_account
 from app.analytics.valuation import value_position
 from app.instruments import kinds
 from app.marketdata.fx import latest_rate_dates, latest_rates, to_base
-from app.marketdata.service import latest_prices
+from app.marketdata.service import prices_as_of
 from app.models import Account, Instrument, Position
 from app.money import BASE_CURRENCY, money
 from app.sync.holdings import blocked_by_instrument
@@ -157,8 +157,13 @@ def _currency_of(instrument: Instrument) -> str:
 
 
 def position_rows(session: Session) -> list[PositionRow]:
-    prices = latest_prices(session)
-    rates = latest_rates(session, moscow_today())
+    # Дата берётся один раз и передаётся обоим вызовам — по той же причине, по
+    # которой это уже сделано в portfolio_overview: два отдельных обращения к
+    # часам разошлись бы на сутки у прогона, начатого за миг до московской
+    # полуночи.
+    today = moscow_today()
+    prices = prices_as_of(session, today)
+    rates = latest_rates(session, today)
     blocked = blocked_by_instrument(session)
     result: list[PositionRow] = []
 
@@ -225,13 +230,13 @@ def position_rows(session: Session) -> list[PositionRow]:
 
 
 def portfolio_overview(session: Session) -> Overview:
-    # Один проход по таблице цен на весь показ дашборда: цена, её валюта и её
-    # дата приходят вместе (см. LatestPrice в app/marketdata/service.py).
-    prices = latest_prices(session)
     # Дата берётся один раз на весь обзор: два отдельных вызова разошлись бы на
     # сутки у прогона, начатого за миг до московской полуночи, и курсы оказались
     # бы датированы не тем днём, по которому посчитаны.
     today = moscow_today()
+    # Один проход по таблице цен на весь показ дашборда: цена, её валюта и её
+    # дата приходят вместе (см. LatestPrice в app/marketdata/service.py).
+    prices = prices_as_of(session, today)
     rates = latest_rates(session, today)
     blocked = blocked_by_instrument(session)
 

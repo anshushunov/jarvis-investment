@@ -32,6 +32,14 @@ def client(session):
     app.dependency_overrides.clear()
 
 
+def price_day(days_ago: int = 3) -> date:
+    """Дата котировки в тестах — от сегодняшней московской, а не зафиксированная
+    в прошлом: оценка не берёт цену старше `PRICE_MAX_AGE`
+    (app/marketdata/service.py), и дата из марта делала бы тест зелёным ровно до
+    истечения недели после неё. По той же причине к «сегодня» привязаны курсы."""
+    return moscow_today() - timedelta(days=days_ago)
+
+
 def seed(session):
     account = Account(broker="tbank", kind="brokerage", external_id="acc-1",
                       name="Брокерский", currency="RUB")
@@ -41,7 +49,7 @@ def seed(session):
     session.flush()
     session.add(Position(account_id=account.id, instrument_id=instrument.id,
                          quantity=Decimal("10"), average_price=Decimal("100")))
-    session.add(Price(instrument_id=instrument.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=instrument.id, on_date=price_day(),
                       close=Decimal("150"), source="moex"))
     session.flush()
     return account, instrument
@@ -61,7 +69,7 @@ def test_overview_returns_strings_not_floats(client, session):
 def test_overview_includes_as_of_date(client, session):
     seed(session)
     payload = client.get("/api/portfolio/overview").json()
-    assert payload["as_of"] == "2026-03-12"
+    assert payload["as_of"] == price_day().isoformat()
 
 
 def test_overview_as_of_is_none_for_empty_portfolio(client, session):
