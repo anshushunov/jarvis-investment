@@ -1,5 +1,8 @@
 import ReactECharts from "echarts-for-react";
 import { BASE_CURRENCY, formatMoney } from "../api/format";
+import { tokens } from "../design/tokens";
+import { Card, CardTitle } from "../ui/Card";
+import { CardState } from "../ui/CardState";
 
 // Металлы перечислены все четыре, а не одно золото: METAL_CURRENCIES в
 // аналитике бэкенда знает XAU, XAG, XPT и XPD, и остаток в любом из них
@@ -19,31 +22,6 @@ const LABELS: Record<string, string> = {
   other: "Прочее",
 };
 
-// Категориальная палитра, зафиксированная за классом актива (а не за
-// позицией в списке): при синхронизации набор присутствующих классов может
-// измениться, а цвет каждого конкретного класса должен оставаться прежним.
-// Восемь оттенков в этом порядке и шаге под тёмную поверхность прошли
-// проверку accessibility-валидатором dataviz: попарное CVD-разделение
-// (протанопия, дейтеранопия, тританопия) и контраст с фоном приложения.
-// Серебро, платина и палладий добавлены сверх проверенной восьмёрки: у них
-// взяты оттенки из свободных участков круга (нейтральный серый, голубой,
-// оливковый), не занятых ни одним из восьми. Класс без цвета echarts
-// раскрашивает своей палитрой по порядку — то есть цвет сектора менялся бы от
-// состава портфеля, ровно то, против чего заведена эта таблица.
-const COLORS: Record<string, string> = {
-  equity: "#3987e5",
-  bonds: "#d95926",
-  money_market: "#199e70",
-  gold: "#c98500",
-  silver: "#9aa5b8",
-  platinum: "#4fb0bf",
-  palladium: "#8f9a3f",
-  cash: "#d55181",
-  derivatives: "#008300",
-  mixed: "#9085e9",
-  other: "#e66767",
-};
-
 export function AllocationChart({ data }: {
   data: Record<string, string>;
 }) {
@@ -54,22 +32,20 @@ export function AllocationChart({ data }: {
     // ту же formatMoney, что и весь остальной интерфейс, а не через число.
     value: Number.parseFloat(value),
     raw: value,
-    itemStyle: { color: COLORS[key] },
+    itemStyle: { color: tokens.assetClass[key as keyof typeof tokens.assetClass] },
   }));
 
   if (entries.length === 0) {
     return (
-      <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>
+      <CardState kind="empty">
         Структура появится после первой успешной синхронизации и оценки позиций.
-      </div>
+      </CardState>
     );
   }
 
   return (
-    <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>
-        Структура портфеля
-      </div>
+    <Card>
+      <CardTitle>Структура портфеля</CardTitle>
       <ReactECharts
         style={{ height: 260 }}
         option={{
@@ -83,16 +59,16 @@ export function AllocationChart({ data }: {
             formatter: (params: { marker: string; name: string; data: { raw: string } }) =>
               `${params.marker}${params.name}: ${formatMoney(params.data.raw, BASE_CURRENCY)}`,
           },
-          legend: { bottom: 0, textStyle: { color: "#9aa5c4" } },
+          legend: { bottom: 0, textStyle: { color: tokens.chart.label } },
           series: [{
             type: "pie",
             radius: ["52%", "78%"],
-            itemStyle: { borderColor: "#0f1424", borderWidth: 2 },
+            itemStyle: { borderColor: tokens.chart.pieBorder, borderWidth: 2 },
             label: { show: false },
             data: entries,
           }],
         }}
       />
-    </div>
+    </Card>
   );
 }
