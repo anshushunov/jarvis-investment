@@ -58,7 +58,9 @@ export function CashCard({ rows, error, loading }: {
         {rows.map((row) => (
           <div
             key={`${row.account}-${row.currency}`}
-            className="flex justify-between text-sm"
+            // gap, а не только justify-between: в узкой колонке длинное имя
+            // счёта вплотную прижимало к себе сумму.
+            className="flex justify-between gap-2 text-sm"
           >
             <span className="text-muted">
               {row.account}
