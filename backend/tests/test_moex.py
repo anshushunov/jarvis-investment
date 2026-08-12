@@ -5,9 +5,10 @@ import httpx
 import pytest
 import respx
 
-from app.marketdata.moex import MoexClient
+from app.marketdata.moex import MoexClient, MoexHistoryPoint
 
 BASE = "https://iss.moex.com/iss"
+HISTORY = f"{BASE}/history/engines/stock/markets/shares/securities/SBER.json"
 
 
 def _payload(marketdata: dict, securities: dict | None = None) -> dict:
@@ -86,18 +87,95 @@ def test_quote_returns_no_price_on_empty_data():
     assert MoexClient(BASE).quote("NOPE").price is None
 
 
+def _history(rows: list[list], columns: list[str], cursor: list[int] | None = None) -> dict:
+    payload = {"history": {"columns": columns, "data": rows}}
+    if cursor is not None:
+        payload["history.cursor"] = {"columns": ["INDEX", "TOTAL", "PAGESIZE"], "data": [cursor]}
+    return payload
+
+
 @respx.mock
 def test_close_history_parses_rows():
-    respx.get(f"{BASE}/history/engines/stock/markets/shares/securities/SBER.json").mock(
-        return_value=httpx.Response(200, json={
-            "history": {
-                "columns": ["TRADEDATE", "SECID", "CLOSE"],
-                "data": [["2026-03-10", "SBER", 310.5], ["2026-03-11", "SBER", 314.28]],
-            }
-        })
-    )
+    respx.get(HISTORY).mock(return_value=httpx.Response(200, json=_history(
+        [["TQBR", "2026-03-10", 310.5, 1000.0], ["TQBR", "2026-03-11", 314.28, 1000.0]],
+        ["BOARDID", "TRADEDATE", "CLOSE", "VALUE"],
+    )))
+    assert MoexClient(BASE).close_history("SBER", date(2026, 3, 10), date(2026, 3, 11)) == [
+        MoexHistoryPoint(on_date=date(2026, 3, 10), close=Decimal("310.5000")),
+        MoexHistoryPoint(on_date=date(2026, 3, 11), close=Decimal("314.2800")),
+    ]
+
+
+@respx.mock
+def test_close_history_walks_all_pages():
+    """ISS отдаёт по сто строк на страницу и сообщает это курсором: у SBER за
+    шесть лет строк 2851. Без добора страниц метод возвращал первые сто дней и
+    выглядел успешным."""
+    first = _history([["TQBR", "2026-03-10", 310.5, 1.0]], ["BOARDID", "TRADEDATE", "CLOSE", "VALUE"], [0, 2, 1])
+    second = _history([["TQBR", "2026-03-11", 314.28, 1.0]], ["BOARDID", "TRADEDATE", "CLOSE", "VALUE"], [1, 2, 1])
+    route = respx.get(HISTORY).mock(side_effect=[httpx.Response(200, json=first),
+                                                 httpx.Response(200, json=second)])
+
     rows = MoexClient(BASE).close_history("SBER", date(2026, 3, 10), date(2026, 3, 11))
-    assert rows == [(date(2026, 3, 10), Decimal("310.5000")), (date(2026, 3, 11), Decimal("314.2800"))]
+
+    assert [row.on_date for row in rows] == [date(2026, 3, 10), date(2026, 3, 11)]
+    assert route.call_count == 2
+    assert route.calls[1].request.url.params["start"] == "1"
+
+
+@respx.mock
+def test_close_history_takes_the_board_with_the_largest_turnover():
+    """Живой замер 03.06.2024: у SBER борд SMAL дал закрытие 315 при обороте
+    32 960 ₽, а основной TQBR — 310.95 при девятнадцати миллиардах. Первая
+    строка ответа — SMAL, и брать её значит ошибаться на процент с лишним."""
+    respx.get(HISTORY).mock(return_value=httpx.Response(200, json=_history(
+        [["SMAL", "2024-06-03", 315, 32960.77], ["TQBR", "2024-06-03", 310.95, 19130763055.2]],
+        ["BOARDID", "TRADEDATE", "CLOSE", "VALUE"],
+    )))
+    rows = MoexClient(BASE).close_history("SBER", date(2024, 6, 3), date(2024, 6, 3))
+    assert [row.close for row in rows] == [Decimal("310.9500")]
+
+
+@respx.mock
+def test_close_history_skips_zero_and_missing_closes():
+    """Ноль на валютном рынке означает «не торговалось», а не «стоило ноль»:
+    живой замер по GLDRUB_TOM 03.06.2024 — CETS 6610, CNGD 0, LICU 0, SPEC 0.
+    Колонки VALUE на этом рынке нет вовсе, поэтому при равном обороте
+    побеждает первая строка ответа."""
+    respx.get(f"{BASE}/history/engines/currency/markets/selt/securities/GLDRUB_TOM.json").mock(
+        return_value=httpx.Response(200, json=_history(
+            [["CETS", "2024-06-03", 6610], ["CNGD", "2024-06-03", 0],
+             ["LICU", "2024-06-03", None], ["CETS", "2024-06-04", 6585], ["CNGD", "2024-06-04", 6617]],
+            ["BOARDID", "TRADEDATE", "CLOSE"],
+        ))
+    )
+    rows = MoexClient(BASE).close_history(
+        "GLDRUB_TOM", date(2024, 6, 3), date(2024, 6, 4), market="selt", engine="currency"
+    )
+    assert [(row.on_date, row.close) for row in rows] == [
+        (date(2024, 6, 3), Decimal("6610.0000")),
+        (date(2024, 6, 4), Decimal("6585.0000")),
+    ]
+
+
+@respx.mock
+def test_close_history_carries_face_value_of_the_day():
+    """Номинал приходит на каждую дату, и у амортизируемого выпуска он
+    меняется по ходу истории: пересчитывать старую цену нынешним номиналом
+    нельзя. Живой замер по RU000A1054W1 03.06.2024: FACEVALUE 1000, FACEUNIT
+    CNY — облигация российского эмитента с юаневым номиналом."""
+    respx.get(f"{BASE}/history/engines/stock/markets/bonds/securities/RU000A1054W1.json").mock(
+        return_value=httpx.Response(200, json=_history(
+            [["TQCB", "2024-06-03", 91.3995, 2221429.39, 1000, "CNY"],
+             ["TQOY", "2024-06-03", 92.7794, 1181540.36, 1000, "CNY"]],
+            ["BOARDID", "TRADEDATE", "CLOSE", "VALUE", "FACEVALUE", "FACEUNIT"],
+        ))
+    )
+    rows = MoexClient(BASE).close_history(
+        "RU000A1054W1", date(2024, 6, 3), date(2024, 6, 3), market="bonds"
+    )
+    assert rows == [MoexHistoryPoint(on_date=date(2024, 6, 3), close=Decimal("91.3995"),
+                                     face_value=Decimal("1000.0000"), face_unit="CNY")]
 
 
 @respx.mock
