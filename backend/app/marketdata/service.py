@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.instruments import kinds
 from app.marketdata.moex import MoexClient, MoexQuote
+from app.marketdata.symbols import moex_filter
 from app.models import Instrument, Price
 from app.money import BASE_CURRENCY, money
 
@@ -47,16 +48,6 @@ ENGINE_MARKET_BY_KIND = {
 FACE_UNIT_TO_ISO = {"SUR": BASE_CURRENCY}
 
 
-# У MOEX запрашиваются только инструменты, номинированные в рублях. Дело не в
-# пересчёте — он теперь есть, — а в том, что гонконгских и американских бумаг
-# на MOEX нет вовсе: запрос по ним гарантированно возвращает пустоту и только
-# засоряет журнал предупреждениями. Облигации с валютным номиналом сюда входят:
-# в справочнике брокера они числятся рублёвыми (расчёты по ним рублёвые), а
-# котирует их MOEX — и валюту номинала сообщает сама.
-def _priced_at_moex(column) -> object:
-    return func.upper(func.coalesce(column, BASE_CURRENCY)) == BASE_CURRENCY
-
-
 def _price_in_money(instrument: Instrument, quote: MoexQuote) -> tuple[Decimal, str] | None:
     """Цена одной бумаги и валюта этой цены.
 
@@ -83,7 +74,7 @@ def refresh_last_prices(session: Session, client: MoexClient, on_date: date) -> 
     instruments = session.execute(
         select(Instrument).where(
             Instrument.secid.is_not(None),
-            _priced_at_moex(Instrument.currency),
+            moex_filter(Instrument.isin, Instrument.currency),
         )
     ).scalars().all()
 
