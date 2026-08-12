@@ -108,6 +108,17 @@ class HistoryPointOut(BaseModel):
     # что и везде (app/accounts/labels.py). В самом снимке лежит устойчивый
     # идентификатор счёта — подпись строится при чтении.
     by_account: dict[str, Decimal] = {}
+    # Происхождение точки: снята живьём в свой день или восстановлена задним
+    # числом. Разные утверждения о мире, и на экране они не должны выглядеть
+    # одинаково уверенно.
+    source: str
+    # Покрытие оценкой. None — неизвестно: у точек, снятых до фазы 2c, его
+    # никто не считал, и ноль тут был бы враньём.
+    valued_positions: int | None = None
+    positions_total: int | None = None
+    # Бумаги без цены на эту дату, поимённо: пара чисел говорит «сколько», а
+    # искать глазами владелец будет по имени.
+    unpriced: list[str] = []
 
     @field_serializer("total_value")
     def serialize_total(self, value: Decimal) -> str:

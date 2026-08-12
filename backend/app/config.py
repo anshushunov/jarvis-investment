@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     tbank_token: str = ""
     moex_base_url: str = "https://iss.moex.com/iss"
     cbr_base_url: str = "https://www.cbr.ru"
+    yahoo_base_url: str = "https://query1.finance.yahoo.com"
 
 
 @lru_cache

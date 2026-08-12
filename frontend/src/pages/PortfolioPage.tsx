@@ -13,7 +13,7 @@ export function PortfolioPage() {
   const overview = useQuery({ queryKey: ["overview"], queryFn: api.overview });
   const positions = useQuery({ queryKey: ["positions"], queryFn: api.positions });
   const cash = useQuery({ queryKey: ["cash"], queryFn: api.cash });
-  const history = useQuery({ queryKey: ["history"], queryFn: () => api.history(90) });
+  const history = useQuery({ queryKey: ["history"], queryFn: () => api.history() });
   const reconciliations = useQuery({ queryKey: ["reconciliations"], queryFn: api.reconciliations });
 
   const sync = useMutation({

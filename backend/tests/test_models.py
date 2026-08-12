@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -177,3 +177,39 @@ def test_dedup_key_has_exactly_one_index(session):
     )).scalars().all()
 
     assert indexes == ["uq_transaction_dedup_key"]
+
+
+def test_snapshot_carries_origin_and_coverage(session):
+    """Снимок, снятый живьём, и снимок, восстановленный задним числом, — разные
+    утверждения о мире, и различать их обязана сама строка."""
+    from app.models import SNAPSHOT_BACKFILL, DailySnapshot
+
+    snapshot = DailySnapshot(
+        on_date=date(2024, 6, 3), total_value=Decimal("100.0000"),
+        by_asset_class={}, by_account={}, source=SNAPSHOT_BACKFILL,
+        positions_total=59, valued_positions=57, unpriced=["ТКС Холдинг", "Block"],
+    )
+    session.add(snapshot)
+    session.flush()
+    session.expire(snapshot)
+
+    assert snapshot.source == "backfill"
+    assert (snapshot.valued_positions, snapshot.positions_total) == (57, 59)
+    assert snapshot.unpriced == ["ТКС Холдинг", "Block"]
+
+
+def test_snapshot_coverage_is_unknown_by_default(session):
+    """У снимков, снятых до этой фазы, покрытие неизвестно, и NULL здесь
+    означает ровно это. Заполнить его сегодняшним числом значило бы сочинить
+    прошлое."""
+    from app.models import DailySnapshot
+
+    snapshot = DailySnapshot(on_date=date(2024, 6, 4), total_value=Decimal("100.0000"),
+                             by_asset_class={}, by_account={})
+    session.add(snapshot)
+    session.flush()
+    session.expire(snapshot)
+
+    assert snapshot.source == "live"
+    assert snapshot.valued_positions is None
+    assert snapshot.unpriced == []

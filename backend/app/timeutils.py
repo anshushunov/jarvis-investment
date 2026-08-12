@@ -9,7 +9,7 @@
 одна задача не попадает, но связь была неявной и держалась на расписании.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -22,3 +22,14 @@ def moscow_now() -> datetime:
 def moscow_today() -> date:
     """Календарная дата по московскому поясу — явно, а не по поясу процесса."""
     return moscow_now().date()
+
+
+def moscow_day_end(on_date: date) -> datetime:
+    """Момент, до которого операция считается совершённой в этот день.
+
+    Это начало следующих московских суток: операция 21:30 UTC — уже 00:30
+    следующего дня по Москве, и в снимок сегодняшнего дня она попадать не
+    должна. Снимки живут в московской календарной дате (см. moscow_today), и
+    граница дня обязана считаться в том же поясе.
+    """
+    return datetime.combine(on_date + timedelta(days=1), time.min, tzinfo=MOSCOW_TZ)

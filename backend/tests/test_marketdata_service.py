@@ -1,11 +1,18 @@
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
 
 from app.marketdata.moex import MoexQuote
-from app.marketdata.service import MOEX_SOURCE, TBANK_SOURCE, LatestPrice, latest_prices, refresh_last_prices
+from app.marketdata.service import (
+    MOEX_SOURCE,
+    PRICE_MAX_AGE,
+    TBANK_SOURCE,
+    LatestPrice,
+    prices_as_of,
+    refresh_last_prices,
+)
 from app.models import Instrument, Price
 
 
@@ -105,10 +112,48 @@ def test_latest_prices_takes_most_recent_date(session):
     # Цена, её дата, валюта и источник приходят одним проходом: аналитике
     # нужны все четыре, и раньше она ради даты делала второй такой же оконный
     # запрос.
-    assert latest_prices(session) == {
+    assert prices_as_of(session, date(2026, 3, 12)) == {
         instrument.id: LatestPrice(close=Decimal("314.2800"), on_date=date(2026, 3, 12),
                                    currency="RUB", source=MOEX_SOURCE)
     }
+
+
+def _price(session, instrument, on_date, close, source=MOEX_SOURCE, currency="RUB") -> None:
+    session.add(Price(instrument_id=instrument.id, on_date=on_date, close=close,
+                      currency=currency, source=source))
+    session.flush()
+
+
+def test_price_of_the_day_ignores_later_quotes(session):
+    """Точка истории обязана считаться ценой своего дня: завтрашняя котировка
+    в ней — это знание из будущего, от которого график поедет вверх ровно там,
+    где рынок падал."""
+    instrument = add_instrument(session, "SBER")
+    _price(session, instrument, date(2024, 6, 3), Decimal("100.0000"))
+    _price(session, instrument, date(2024, 6, 5), Decimal("120.0000"))
+
+    prices = prices_as_of(session, date(2024, 6, 4))
+
+    assert prices[instrument.id].close == Decimal("100.0000")
+    assert prices[instrument.id].on_date == date(2024, 6, 3)
+
+
+def test_price_older_than_the_limit_is_not_a_price(session):
+    """Бумага не торговалась две недели — цены на дату нет. Показать
+    двухнедельную как сегодняшнюю значит выдать остановку торгов за факт."""
+    instrument = add_instrument(session, "SBER")
+    _price(session, instrument, date(2024, 6, 3), Decimal("100.0000"))
+
+    assert prices_as_of(session, date(2024, 6, 3) + PRICE_MAX_AGE + timedelta(days=1)) == {}
+
+
+def test_price_within_the_limit_survives_a_weekend(session):
+    instrument = add_instrument(session, "SBER")
+    _price(session, instrument, date(2024, 6, 3), Decimal("100.0000"))
+
+    prices = prices_as_of(session, date(2024, 6, 3) + PRICE_MAX_AGE)
+
+    assert prices[instrument.id].close == Decimal("100.0000")
 
 
 def test_instrument_without_secid_is_not_requested(session):
@@ -257,7 +302,7 @@ def test_moex_wins_over_broker_on_the_same_day(session):
     ])
     session.flush()
 
-    latest = latest_prices(session)[instrument.id]
+    latest = prices_as_of(session, date(2026, 8, 9))[instrument.id]
 
     assert latest.close == Decimal("314.28")
     assert latest.source == MOEX_SOURCE
@@ -275,7 +320,7 @@ def test_fresher_broker_price_beats_stale_exchange_price(session):
     ])
     session.flush()
 
-    latest = latest_prices(session)[instrument.id]
+    latest = prices_as_of(session, date(2026, 8, 9))[instrument.id]
 
     assert latest.close == Decimal("315.00")
     assert latest.source == TBANK_SOURCE
@@ -293,6 +338,6 @@ def test_price_of_foreign_instrument_is_no_longer_filtered_out(session):
                       close=Decimal("36.90"), currency="HKD", source=TBANK_SOURCE))
     session.flush()
 
-    latest = latest_prices(session)[instrument.id]
+    latest = prices_as_of(session, date(2026, 8, 9))[instrument.id]
 
     assert latest.currency == "HKD"

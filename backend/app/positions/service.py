@@ -11,7 +11,14 @@ from app.models import (
 from app.positions.engine import LedgerEntry, fold
 
 
-def _entries(session: Session, account: Account) -> list[LedgerEntry]:
+def ledger_entries(session: Session, account: Account) -> list[LedgerEntry]:
+    """Записи журнала счёта в виде, понятном движку позиций.
+
+    Публичная: тем же входом пользуется восстановление состава на прошлую дату
+    (app/positions/history.py). Собирать LedgerEntry в двух местах нельзя —
+    разъедется трактовка payload, и одна из сторон перестанет видеть решения
+    владельца.
+    """
     transactions = session.execute(
         select(Transaction).where(Transaction.account_id == account.id)
     ).scalars().all()
@@ -41,7 +48,7 @@ def _entries(session: Session, account: Account) -> list[LedgerEntry]:
 
 
 def rebuild_positions(session: Session, account: Account) -> int:
-    result = fold(_entries(session, account), currency=account.currency)
+    result = fold(ledger_entries(session, account), currency=account.currency)
 
     # Delete and re-insert happen inside the caller's transaction (no commit here), so
     # a crash or exception between them leaves the old rows intact under rollback —

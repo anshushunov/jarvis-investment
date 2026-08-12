@@ -1,17 +1,28 @@
 from datetime import date
 from decimal import Decimal
 
+from sqlalchemy import or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.accounts.labels import UNKNOWN_ACCOUNT_LABEL, account_label
-from app.analytics.service import portfolio_overview
-from app.models import Account, DailySnapshot
+from app.analytics.service import Overview, portfolio_overview
+from app.models import SNAPSHOT_LIVE, Account, DailySnapshot
 
 
-def take_snapshot(session: Session, on_date: date) -> DailySnapshot:
-    overview = portfolio_overview(session)
+def store_snapshot(
+    session: Session, on_date: date, overview: Overview, source: str
+) -> DailySnapshot:
+    """Записывает точку истории, не затирая более полную.
 
+    Правило одно: перезаписать можно свою же точку (повторный прогон обязан
+    обновлять то, что сам записал) либо чужую, у которой покрытие меньше или
+    неизвестно вовсе. Живой снимок не свят — свято покрытие: точка 09.08.2026
+    снята живьём, но кодом, не знавшим ни денег, ни двух третей позиций.
+
+    Выражено правилом, а не разовой правкой руками: прогон повторяется, и через
+    месяц никто не вспомнит, какие даты правились.
+    """
     values = {
         "on_date": on_date,
         "total_value": overview.total_value,
@@ -21,21 +32,56 @@ def take_snapshot(session: Session, on_date: date) -> DailySnapshot:
         # снимки, снятые до и после переименования (или до и после появления
         # второго счёта с тем же именем), переставали склеиваться по счёту.
         # JSONB хранит ключи строками, поэтому идентификатор здесь — строка.
+        # Читающая сторона знает это же правило — snapshot_by_account ниже.
         "by_account": {str(account_id): str(value) for account_id, value in overview.by_account.items()},
+        "source": source,
+        "positions_total": overview.positions_total,
+        "valued_positions": overview.valued_positions,
+        "unpriced": overview.unpriced,
     }
 
-    statement = insert(DailySnapshot).values(**values).on_conflict_do_update(
+    statement = insert(DailySnapshot).values(**values)
+    statement = statement.on_conflict_do_update(
         index_elements=[DailySnapshot.on_date],
-        set_={
-            "total_value": values["total_value"],
-            "by_asset_class": values["by_asset_class"],
-            "by_account": values["by_account"],
-        },
+        set_={key: value for key, value in values.items() if key != "on_date"},
+        where=or_(
+            DailySnapshot.source == source,
+            DailySnapshot.valued_positions.is_(None),
+            DailySnapshot.valued_positions < statement.excluded.valued_positions,
+        ),
     )
     session.execute(statement)
     session.flush()
 
     return session.query(DailySnapshot).filter(DailySnapshot.on_date == on_date).one()
+
+
+def take_snapshot(session: Session, on_date: date) -> DailySnapshot:
+    """Снимок сегодняшнего состояния — тот, что снимает планировщик."""
+    return store_snapshot(session, on_date, portfolio_overview(session), SNAPSHOT_LIVE)
+
+
+def _is_account_id(key: str) -> bool:
+    """Числовой ключ разбивки — идентификатор счёта; нечисловой достался от
+    снимков старого формата, где ключом лежала готовая подпись."""
+    return key.lstrip("-").isdigit()
+
+
+def snapshot_account_ids(snapshots: list[DailySnapshot]) -> set[int]:
+    """Идентификаторы счетов, встречающиеся в разбивках этих снимков.
+
+    Живёт здесь, а не у читателя: правило «числовой ключ by_account — это
+    идентификатор счёта» знает пишущая сторона (`store_snapshot`), и второе
+    его изложение в обработчике API разъехалось бы ровно тогда, когда формат
+    ключа поменяется. Читателю (`/portfolio/history`) множество нужно, чтобы
+    выбрать счета одним запросом на весь ответ, а не по одному на точку.
+    """
+    return {
+        int(key)
+        for snapshot in snapshots
+        for key in (snapshot.by_account or {})
+        if _is_account_id(key)
+    }
 
 
 def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -> dict[str, Decimal]:
@@ -59,10 +105,10 @@ def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -
     """
     result: dict[str, Decimal] = {}
     for key, value in (snapshot.by_account or {}).items():
-        account = accounts.get(int(key)) if key.lstrip("-").isdigit() else None
+        account = accounts.get(int(key)) if _is_account_id(key) else None
         if account is not None:
             label = account_label(account)
-        elif key.lstrip("-").isdigit():
+        elif _is_account_id(key):
             # Счёт был удалён из базы, а снимок остался — подпись восстановить
             # не из чего, но сумму терять нельзя.
             label = UNKNOWN_ACCOUNT_LABEL

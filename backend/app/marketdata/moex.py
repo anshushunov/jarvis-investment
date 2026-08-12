@@ -22,6 +22,29 @@ class MoexQuote:
     face_unit: str | None = None
 
 
+@dataclass(frozen=True)
+class MoexHistoryPoint:
+    """Закрытие торгового дня как его отдаёт MOEX, без интерпретации.
+
+    `close` для акций и фондов — цена бумаги, для облигаций — процент от
+    номинала; `face_value` и `face_unit` относятся к той же дате. Перевод в
+    деньги делает вызывающий (app/marketdata/service.py): он знает вид
+    инструмента, а клиент — нет.
+    """
+
+    on_date: date
+    close: Decimal
+    face_value: Decimal | None = None
+    face_unit: str | None = None
+
+
+# Колонки истории. Оборот нужен, чтобы выбрать борд (см. _best_of_day); номинал
+# — чтобы пересчитать процент облигации в деньги. Рынок, на котором такой
+# колонки нет (валютный), молча отдаёт пересечение — поэтому все обращения к
+# строке идут через .get().
+HISTORY_COLUMNS = "BOARDID,TRADEDATE,CLOSE,VALUE,FACEVALUE,FACEUNIT"
+
+
 # Поля цены из блока marketdata в порядке предпочтения. Сделка текущей сессии
 # (LAST) — лучшее, что есть; за ней последняя текущая цена, затем расчётная
 # рыночная цена MOEX и цена закрытия. Одного LAST недостаточно: инструмент,
@@ -58,6 +81,41 @@ def _face_value(rows: list[dict]) -> tuple[Decimal | None, str | None]:
     return None, None
 
 
+def _cursor(block: dict | None) -> tuple[int, int, int] | None:
+    """Позиция, всего строк и размер страницы. None — курсора в ответе нет,
+    добирать нечем."""
+    if not block or not block.get("data"):
+        return None
+    row = dict(zip(block["columns"], block["data"][0]))
+    return int(row["INDEX"]), int(row["TOTAL"]), int(row["PAGESIZE"])
+
+
+def _turnover(row: dict) -> Decimal:
+    value = row.get("VALUE")
+    return Decimal(str(value)) if value else Decimal("0")
+
+
+def _best_of_day(rows: list[dict]) -> dict[date, dict]:
+    """Одна строка на дату: та, где реально торговали.
+
+    Инструмент приходит сразу с нескольких бордов. Замер 03.06.2024 по SBER:
+    борд SMAL дал закрытие 315 при обороте 32 960 ₽, основной TQBR — 310.95
+    при девятнадцати миллиардах; первая строка ответа — SMAL. Нулевое и пустое
+    закрытие отбрасывается до выбора: ноль на бирже означает «не торговалось»,
+    а не «стоило ноль». При равном обороте (на валютном рынке колонки оборота
+    нет вовсе) остаётся первая строка ответа.
+    """
+    best: dict[date, dict] = {}
+    for row in rows:
+        close = row.get("CLOSE")
+        if close is None or close == 0:
+            continue
+        traded = datetime.strptime(row["TRADEDATE"], "%Y-%m-%d").date()
+        if traded not in best or _turnover(row) > _turnover(best[traded]):
+            best[traded] = row
+    return best
+
+
 class MoexClient:
     def __init__(self, base_url: str | None = None, timeout: float = 10.0) -> None:
         self.base_url = (base_url or get_settings().moex_base_url).rstrip("/")
@@ -87,21 +145,44 @@ class MoexClient:
 
     def close_history(
         self, secid: str, start: date, end: date, market: str = "shares", engine: str = "stock"
-    ) -> list[tuple[date, Decimal]]:
-        payload = self._get(
-            f"/history/engines/{engine}/markets/{market}/securities/{secid}.json",
-            params={
-                "iss.meta": "off",
-                "iss.only": "history",
-                "history.columns": "TRADEDATE,SECID,CLOSE",
-                "from": start.isoformat(),
-                "till": end.isoformat(),
-            },
-        )
-        result: list[tuple[date, Decimal]] = []
-        for row in _rows(payload["history"]):
-            if row.get("CLOSE") is None:
-                continue
-            traded = datetime.strptime(row["TRADEDATE"], "%Y-%m-%d").date()
-            result.append((traded, money(str(row["CLOSE"]))))
-        return result
+    ) -> list[MoexHistoryPoint]:
+        """Закрытия торговых дней за период, по одной строке на дату.
+
+        ISS отдаёт историю страницами по сто строк и сообщает об этом курсором:
+        у SBER за шесть лет строк 2851. Без добора страниц метод возвращал
+        первые сто дней и выглядел работающим — дефект не проявляется на
+        коротком диапазоне, а именно такими его и проверяли.
+        """
+        rows: list[dict] = []
+        position = 0
+        while True:
+            payload = self._get(
+                f"/history/engines/{engine}/markets/{market}/securities/{secid}.json",
+                params={
+                    "iss.meta": "off",
+                    "iss.only": "history,history.cursor",
+                    "history.columns": HISTORY_COLUMNS,
+                    "from": start.isoformat(),
+                    "till": end.isoformat(),
+                    "start": str(position),
+                },
+            )
+            page = _rows(payload["history"])
+            rows.extend(page)
+            cursor = _cursor(payload.get("history.cursor"))
+            if not page or cursor is None:
+                break
+            index, total, page_size = cursor
+            position = index + page_size
+            if position >= total:
+                break
+
+        return [
+            MoexHistoryPoint(
+                on_date=traded,
+                close=money(str(row["CLOSE"])),
+                face_value=money(str(row["FACEVALUE"])) if row.get("FACEVALUE") else None,
+                face_unit=row.get("FACEUNIT"),
+            )
+            for traded, row in sorted(_best_of_day(rows).items())
+        ]

@@ -71,6 +71,14 @@ export interface HistoryPoint {
   // Разбивка итога по счетам на эту дату; ключ — подпись счёта. Пусто у
   // снимков, снятых до появления разбивки.
   by_account: Record<string, string>;
+  // "live" — точка снята в свой день, "backfill" — восстановлена задним числом.
+  source: string;
+  // Покрытие оценкой. null — неизвестно: у снимков, снятых до достройки, его
+  // не считали, и это не то же самое, что ноль.
+  valued_positions: number | null;
+  positions_total: number | null;
+  // Бумаги без цены на эту дату, поимённо.
+  unpriced: string[];
 }
 
 export interface Suggestion {
@@ -175,7 +183,10 @@ export const api = {
   overview: () => request<Overview>("/portfolio/overview"),
   positions: () => request<PositionRow[]>("/portfolio/positions"),
   cash: () => request<CashRow[]>("/portfolio/cash"),
-  history: (days = 90) => request<HistoryPoint[]>(`/portfolio/history?days=${days}`),
+  // Без окна — вся история: после достройки она начинается датой первой
+  // операции, и девяностодневное окно по умолчанию прятало бы шесть лет.
+  history: (days?: number) =>
+    request<HistoryPoint[]>(`/portfolio/history${days ? `?days=${days}` : ""}`),
   reconciliations: () => request<ReconciliationRow[]>("/reconciliations"),
   syncTbank: () => request<SyncRunResult[]>("/sync/tbank", { method: "POST" }),
   decisions: () => request<Decision[]>("/decisions"),

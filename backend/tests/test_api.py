@@ -32,6 +32,14 @@ def client(session):
     app.dependency_overrides.clear()
 
 
+def price_day(days_ago: int = 3) -> date:
+    """Дата котировки в тестах — от сегодняшней московской, а не зафиксированная
+    в прошлом: оценка не берёт цену старше `PRICE_MAX_AGE`
+    (app/marketdata/service.py), и дата из марта делала бы тест зелёным ровно до
+    истечения недели после неё. По той же причине к «сегодня» привязаны курсы."""
+    return moscow_today() - timedelta(days=days_ago)
+
+
 def seed(session):
     account = Account(broker="tbank", kind="brokerage", external_id="acc-1",
                       name="Брокерский", currency="RUB")
@@ -41,7 +49,7 @@ def seed(session):
     session.flush()
     session.add(Position(account_id=account.id, instrument_id=instrument.id,
                          quantity=Decimal("10"), average_price=Decimal("100")))
-    session.add(Price(instrument_id=instrument.id, on_date=date(2026, 3, 12),
+    session.add(Price(instrument_id=instrument.id, on_date=price_day(),
                       close=Decimal("150"), source="moex"))
     session.flush()
     return account, instrument
@@ -61,7 +69,7 @@ def test_overview_returns_strings_not_floats(client, session):
 def test_overview_includes_as_of_date(client, session):
     seed(session)
     payload = client.get("/api/portfolio/overview").json()
-    assert payload["as_of"] == "2026-03-12"
+    assert payload["as_of"] == price_day().isoformat()
 
 
 def test_overview_as_of_is_none_for_empty_portfolio(client, session):
@@ -666,3 +674,49 @@ def test_reconciliation_suggestions_are_scoped_per_account(client, session):
     by_account_isin = {(row["account"], row["isin"]): row for row in rows}
     assert by_account_isin[("Счёт А (acc-a)", "HK0000310034")]["suggestions"]
     assert by_account_isin[("Счёт Б (acc-b)", "HK0000310034")]["suggestions"] == []
+
+
+def test_history_returns_the_whole_period_by_default(client, session):
+    """По умолчанию окно было девяносто дней, и достроенной истории за шесть
+    лет в нём не видно вовсе."""
+    session.add_all([
+        DailySnapshot(on_date=date(2020, 7, 16), total_value=Decimal("1000.0000"),
+                      by_asset_class={}, by_account={}, source="backfill",
+                      positions_total=1, valued_positions=1, unpriced=[]),
+        DailySnapshot(on_date=moscow_today(), total_value=Decimal("2000.0000"),
+                      by_asset_class={}, by_account={}, source="live",
+                      positions_total=2, valued_positions=1, unpriced=["ТКС Холдинг"]),
+    ])
+    session.commit()
+
+    rows = client.get("/api/portfolio/history").json()
+
+    assert [row["date"] for row in rows] == ["2020-07-16", moscow_today().isoformat()]
+
+
+def test_history_point_carries_origin_and_coverage(client, session):
+    session.add(DailySnapshot(on_date=date(2024, 6, 3), total_value=Decimal("1000.0000"),
+                              by_asset_class={}, by_account={}, source="backfill",
+                              positions_total=59, valued_positions=57,
+                              unpriced=["ТКС Холдинг", "Block"]))
+    session.commit()
+
+    row = client.get("/api/portfolio/history").json()[0]
+
+    assert row["source"] == "backfill"
+    assert (row["valued_positions"], row["positions_total"]) == (57, 59)
+    assert row["unpriced"] == ["ТКС Холдинг", "Block"]
+
+
+def test_history_window_still_works_when_asked(client, session):
+    session.add_all([
+        DailySnapshot(on_date=date(2020, 7, 16), total_value=Decimal("1000.0000"),
+                      by_asset_class={}, by_account={}),
+        DailySnapshot(on_date=moscow_today(), total_value=Decimal("2000.0000"),
+                      by_asset_class={}, by_account={}),
+    ])
+    session.commit()
+
+    rows = client.get("/api/portfolio/history?days=30").json()
+
+    assert [row["date"] for row in rows] == [moscow_today().isoformat()]

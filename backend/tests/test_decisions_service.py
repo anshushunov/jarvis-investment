@@ -80,9 +80,9 @@ def _book(session, account) -> dict[int, list[tuple]]:
     вернула чужие даты и чужую себестоимость.
     """
     from app.positions.engine import fold
-    from app.positions.service import _entries
+    from app.positions.service import ledger_entries
 
-    result = fold(_entries(session, account), currency=account.currency)
+    result = fold(ledger_entries(session, account), currency=account.currency)
     return {
         instrument_id: [
             (lot.quantity_left, lot.price, lot.opened_at, lot.cost_known)
@@ -799,7 +799,7 @@ def test_generated_entry_is_read_back_through_the_shared_payload_key(session):
     """
     from app.decisions.service import record_decision
     from app.models.ledger_decision import DECISION_PAYLOAD_KEY
-    from app.positions.service import _entries
+    from app.positions.service import ledger_entries
 
     account = _account(session)
     instrument = _instrument(session, "RU000A107UL4")
@@ -812,7 +812,7 @@ def test_generated_entry_is_read_back_through_the_shared_payload_key(session):
         note="Редомициляция ТКС", proposed={},
     ))
 
-    generated = _entries(session, account)
+    generated = ledger_entries(session, account)
     assert [entry.link_id for entry in generated] == [decision.id]
     assert DECISION_PAYLOAD_KEY == "decision_id"
 
