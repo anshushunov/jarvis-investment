@@ -64,18 +64,17 @@ export function ValueChart({ points, error, loading }: {
                    axisLabel: { color: "#9aa5c4" } },
           tooltip: {
             trigger: "axis",
+            // Только дата и сумма. Покрытие и список неоценённых бумаг отсюда
+            // убраны намеренно: подсказка следует за курсором и перекрывает
+            // половину экрана, а перечень из десятка названий читать в ней
+            // всё равно невозможно. Сам факт неполноты передаёт метка на
+            // линии, разбираться с составом — не задача графика.
             formatter: (params: Array<{ dataIndex: number }>) => {
               const point = points[params[0].dataIndex];
               const value = Number.parseFloat(point.total_value).toLocaleString("ru-RU", {
                 maximumFractionDigits: 0,
               });
-              const head = `${formatDate(point.date) ?? point.date}<br/>${value} ₽`;
-              if (!isIncomplete(point)) return head;
-              // Названия бумаг, а не только счёт: искать глазами владелец
-              // будет по имени, а «оценено 57 из 59» не говорит, каких.
-              const names = point.unpriced.join(", ");
-              return `${head}<br/>оценено ${point.valued_positions} из ${point.positions_total}` +
-                     (names ? `<br/>нет цены: ${names}` : "");
+              return `${formatDate(point.date) ?? point.date}<br/>${value} ₽`;
             },
           },
           series: [

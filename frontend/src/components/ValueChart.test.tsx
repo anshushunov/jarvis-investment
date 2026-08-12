@@ -65,6 +65,21 @@ describe("ValueChart", () => {
     expect(series.find((item) => item.type === "scatter")!.data).toEqual([]);
   });
 
+  it("подсказка говорит только дату и сумму", () => {
+    // Перечень неоценённых бумаг в подсказке перекрывал половину экрана и
+    // читаться всё равно не мог: неполноту показывает метка на линии.
+    render(<ValueChart points={[FULL, PARTIAL]} error={null} loading={false} />);
+
+    const tooltip = captured.option!.tooltip as {
+      formatter: (params: Array<{ dataIndex: number }>) => string;
+    };
+    const text = tooltip.formatter([{ dataIndex: 1 }]);
+
+    expect(text).toContain("900");
+    expect(text).not.toContain("ТКС Холдинг");
+    expect(text).not.toContain("оценено");
+  });
+
   it("показывает график по одной точке", () => {
     // Заглушка про «накопится два снимка» после достройки перестала быть
     // правдой: история приходит целиком, а не копится по дню.
