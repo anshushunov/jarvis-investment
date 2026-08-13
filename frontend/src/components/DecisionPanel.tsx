@@ -3,6 +3,14 @@ import { useState } from "react";
 
 import { api, type DecisionInput, type ReconciliationRow, type Suggestion } from "../api/client";
 import { formatQuantity } from "../api/format";
+import { Button } from "../ui/Button";
+import { Field, FieldLabel } from "../ui/Field";
+
+// Выпадающий список и многострочное пояснение — не Field (тот про input), но
+// выглядеть обязаны так же: до фазы 3 оба рисовались системными элементами
+// браузера и выпадали из интерфейса белым пятном.
+const CONTROL =
+  "block w-full rounded-sm border border-line bg-bg1/60 px-2.5 py-1.5 text-sm text-tx outline-none focus:border-blue";
 
 const KINDS = [
   { value: "CONVERSION", label: "Конвертация: одна бумага стала другой" },
@@ -177,14 +185,14 @@ export function DecisionPanel({ row, onDone }: {
   }
 
   return (
-    <div style={{ marginTop: 8, padding: 10, border: "1px solid var(--line)", borderRadius: 6 }}>
+    <div className="mt-2 rounded-[6px] border border-line p-2.5">
       {certainSuggestion && (
-        <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+        <div className="mb-2 text-xs">
           Похоже на конвертацию: {formatQuantity(certainSuggestion.from_quantity)} шт.{" "}
           {certainSuggestion.from_isin} → {formatQuantity(certainSuggestion.to_quantity)} шт.{" "}
           {certainSuggestion.to_isin}
           {certainSuggestion.blocked_fully && (
-            <div style={{ color: "var(--amber)", fontSize: 11.5 }}>
+            <div className="text-2xs text-amber">
               Бумага-получатель заблокирована у брокера целиком — частый след
               корпоративного действия.
             </div>
@@ -193,20 +201,19 @@ export function DecisionPanel({ row, onDone }: {
       )}
 
       {needsChoice && (
-        <fieldset style={{
-          fontSize: 12.5, marginBottom: 8, border: "1px solid var(--line)",
-          borderRadius: 6, padding: 8,
-        }}>
-          <legend style={{ fontSize: 12, color: "var(--amber)" }}>
+        <fieldset className="mb-2 rounded-[6px] border border-line p-2 text-xs">
+          <legend className="text-xs text-amber">
             Подходящих бумаг несколько: выбор за вами, система не угадывает.
           </legend>
           {suggestions.map((candidate, index) => (
             <label key={`${candidate.from_isin}-${candidate.to_isin}-${index}`}
-                   style={{ display: "block", padding: "2px 0" }}>
+                   className="block py-0.5">
+              {/* Выбор одного из нескольких — радиогруппа, а не поле ввода:
+                  Field к ней не применяется. */}
               <input type="radio" name="suggestion-choice"
                      checked={selectedSuggestion === candidate}
                      onChange={() => chooseSuggestion(candidate)}
-                     style={{ marginRight: 6 }} />
+                     className="mr-1.5" />
               {formatQuantity(candidate.from_quantity)} шт. {candidate.from_isin} →{" "}
               {formatQuantity(candidate.to_quantity)} шт. {candidate.to_isin}
               {candidate.blocked_fully && " · получатель заблокирован целиком"}
@@ -215,121 +222,119 @@ export function DecisionPanel({ row, onDone }: {
         </fieldset>
       )}
 
-      <label style={{ display: "block", fontSize: 12, marginBottom: 6 }}>
+      <FieldLabel className="mb-1.5 block">
         Что произошло
         <select value={kind} onChange={(event) => changeKind(event.target.value as Kind)}
-                style={{ display: "block", marginTop: 3, width: "100%" }}>
+                className={`mt-[3px] ${CONTROL}`}>
           {KINDS.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
-      </label>
+      </FieldLabel>
 
       {kind === "CONVERSION" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
-          <label style={{ fontSize: 12 }}>
+        <div className="mb-1.5 grid grid-cols-2 gap-1.5">
+          <FieldLabel>
             Из какой бумаги
-            <input value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
-                   style={{ display: "block", width: "100%" }} />
-          </label>
-          <label style={{ fontSize: 12 }}>
+            <Field value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
+                   className="block w-full" />
+          </FieldLabel>
+          <FieldLabel>
             Сколько списать
-            <input value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
-                   style={{ display: "block", width: "100%" }} />
-          </label>
-          <label style={{ fontSize: 12 }}>
+            <Field value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
+                   className="block w-full" />
+          </FieldLabel>
+          <FieldLabel>
             В какую бумагу
-            <input value={toIsin} onChange={(e) => setToIsin(e.target.value)}
-                   style={{ display: "block", width: "100%" }} />
-          </label>
-          <label style={{ fontSize: 12 }}>
+            <Field value={toIsin} onChange={(e) => setToIsin(e.target.value)}
+                   className="block w-full" />
+          </FieldLabel>
+          <FieldLabel>
             Сколько зачислить
-            <input value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
-                   style={{ display: "block", width: "100%" }} />
-          </label>
+            <Field value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
+                   className="block w-full" />
+          </FieldLabel>
         </div>
       )}
 
       {kind === "ADJUSTMENT" && (
-        <div style={{ marginBottom: 6 }}>
-          <div style={{ display: "flex", gap: 12, marginBottom: 6, fontSize: 12 }}>
+        <div className="mb-1.5">
+          <div className="mb-1.5 flex gap-3 text-xs">
             <label>
               <input type="radio" name="adjustment-direction" checked={direction === "CREDIT"}
-                     onChange={() => changeDirection("CREDIT")} style={{ marginRight: 4 }} />
+                     onChange={() => changeDirection("CREDIT")} className="mr-1" />
               Зачислить бумагу
             </label>
             <label>
               <input type="radio" name="adjustment-direction" checked={direction === "DEBIT"}
-                     onChange={() => changeDirection("DEBIT")} style={{ marginRight: 4 }} />
+                     onChange={() => changeDirection("DEBIT")} className="mr-1" />
               Списать бумагу
             </label>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <div className="grid grid-cols-2 gap-1.5">
             {direction === "DEBIT" ? (
               <>
-                <label style={{ fontSize: 12 }}>
+                <FieldLabel>
                   Из какой бумаги
-                  <input value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
-                         style={{ display: "block", width: "100%" }} />
-                </label>
-                <label style={{ fontSize: 12 }}>
+                  <Field value={fromIsin} onChange={(e) => setFromIsin(e.target.value)}
+                         className="block w-full" />
+                </FieldLabel>
+                <FieldLabel>
                   Сколько списать
-                  <input value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
-                         style={{ display: "block", width: "100%" }} />
-                </label>
+                  <Field value={fromQuantity} onChange={(e) => setFromQuantity(e.target.value)}
+                         className="block w-full" />
+                </FieldLabel>
               </>
             ) : (
               <>
-                <label style={{ fontSize: 12 }}>
+                <FieldLabel>
                   В какую бумагу
-                  <input value={toIsin} onChange={(e) => setToIsin(e.target.value)}
-                         style={{ display: "block", width: "100%" }} />
-                </label>
-                <label style={{ fontSize: 12 }}>
+                  <Field value={toIsin} onChange={(e) => setToIsin(e.target.value)}
+                         className="block w-full" />
+                </FieldLabel>
+                <FieldLabel>
                   Сколько зачислить
-                  <input value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
-                         style={{ display: "block", width: "100%" }} />
-                </label>
-                <label style={{ fontSize: 12, gridColumn: "1 / -1" }}>
+                  <Field value={toQuantity} onChange={(e) => setToQuantity(e.target.value)}
+                         className="block w-full" />
+                </FieldLabel>
+                <FieldLabel className="col-span-full">
                   Себестоимость всей партии, в валюте бумаги — если знаете
-                  <input value={costBasis} onChange={(e) => setCostBasis(e.target.value)}
+                  <Field value={costBasis} onChange={(e) => setCostBasis(e.target.value)}
                          placeholder="не знаю"
-                         style={{ display: "block", width: "100%" }} />
-                  <span style={{ display: "block", fontSize: 11, color: "var(--tx-2)" }}>
+                         className="block w-full" />
+                  <span className="block text-2xs text-muted">
                     Пусто — себестоимость останется неизвестной, и по позиции не
                     будет ни средней цены, ни доходности.
                   </span>
-                </label>
+                </FieldLabel>
               </>
             )}
           </div>
         </div>
       )}
 
-      <label style={{ display: "block", fontSize: 12, marginBottom: 6 }}>
+      <FieldLabel className="mb-1.5 block">
         Дата события
-        <input type="date" value={effectiveAt}
+        <Field type="date" value={effectiveAt}
                onChange={(event) => setEffectiveAt(event.target.value)}
-               style={{ display: "block", marginTop: 3 }} />
-      </label>
+               className="mt-[3px] block" />
+      </FieldLabel>
 
-      <label style={{ display: "block", fontSize: 12, marginBottom: 6 }}>
+      <FieldLabel className="mb-1.5 block">
         Пояснение
         <textarea value={note} onChange={(event) => setNote(event.target.value)}
-                  rows={2} style={{ display: "block", marginTop: 3, width: "100%" }} />
-      </label>
+                  rows={2} className={`mt-[3px] ${CONTROL}`} />
+      </FieldLabel>
 
-      {validation && (
-        <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 6 }}>{validation}</div>
-      )}
+      {validation && <div className="mb-1.5 text-xs text-red">{validation}</div>}
       {submit.isError && (
-        <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 6 }}>
+        <div className="mb-1.5 text-xs text-red">
           {(submit.error as Error).message}
         </div>
       )}
 
       {rejecting && (
-        <div style={{ color: "var(--amber)", fontSize: 12, marginBottom: 6 }}>
+        <div className="mb-1.5 text-xs text-amber">
           Отклонение необратимо: эту пару система больше не предложит никогда, а
           отменить отклонённое решение нельзя — отмена рассчитана только на
           подтверждённые. Если сомневаетесь, закройте разбор и вернитесь к нему
@@ -337,32 +342,32 @@ export function DecisionPanel({ row, onDone }: {
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8 }}>
-        <button type="button" onClick={() => confirm("CONFIRMED")}
-                disabled={submit.isPending}>
+      <div className="flex gap-2">
+        <Button onClick={() => confirm("CONFIRMED")} disabled={submit.isPending}>
           {submit.isPending ? "Отправляем…" : "Подтвердить"}
-        </button>
+        </Button>
         {selectedSuggestion && !rejecting && (
-          <button type="button" onClick={() => setRejecting(true)}
-                  disabled={submit.isPending}>
+          <Button onClick={() => setRejecting(true)} disabled={submit.isPending}>
             Это не конвертация
-          </button>
+          </Button>
         )}
         {selectedSuggestion && rejecting && (
           <>
-            <button type="button" onClick={() => confirm("REJECTED")}
+            {/* Необратимое действие обязано отличаться видом от «Передумал»:
+                отклонённую пару система больше никогда не предложит. */}
+            <Button variant="danger" onClick={() => confirm("REJECTED")}
                     disabled={submit.isPending}>
               Отклонить навсегда
-            </button>
-            <button type="button" onClick={() => setRejecting(false)}
+            </Button>
+            <Button variant="ghost" onClick={() => setRejecting(false)}
                     disabled={submit.isPending}>
               Передумал
-            </button>
+            </Button>
           </>
         )}
-        <button type="button" onClick={onDone} disabled={submit.isPending}>
+        <Button variant="ghost" onClick={onDone} disabled={submit.isPending}>
           Отмена
-        </button>
+        </Button>
       </div>
     </div>
   );

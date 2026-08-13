@@ -13,13 +13,15 @@ export function MoneyValue({ amount, currency, className = "" }: {
 export function ChangeValue({ percent }: { percent: string | null }) {
   // Оценки нет — показываем прочерк, а не «• 0,0%»: нулевой результат и
   // отсутствие результата это разные вещи.
-  if (percent === null) return <span style={{ color: "var(--tx-2)" }}>—</span>;
+  if (percent === null) return <span className="text-muted">—</span>;
 
   const value = Number.parseFloat(percent);
-  const color = value > 0 ? "var(--green)" : value < 0 ? "var(--red)" : "var(--tx-2)";
+  // Цвет и стрелка вместе: цвет в одиночку ничего не сообщает тому, кто его
+  // не различает.
+  const tone = value > 0 ? "text-green" : value < 0 ? "text-red" : "text-muted";
   const arrow = value > 0 ? "▲" : value < 0 ? "▼" : "•";
   return (
-    <span style={{ color }}>
+    <span className={tone}>
       {arrow} {formatPercent(percent)}
     </span>
   );

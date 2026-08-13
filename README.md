@@ -102,8 +102,9 @@ uv run alembic upgrade head   # один раз после новых мигра
 uv run uvicorn app.main:app --reload --port 8001
 ```
 
-Фронтенд с hot reload (Vite dev-сервер, порт по умолчанию 5173, обращается к
-бэкенду на `localhost:8001` — см. `frontend/src/api/client.ts`):
+Фронтенд с hot reload (Vite dev-сервер на порту 3000 — см. `server.port` в
+`frontend/vite.config.ts`; обращается к бэкенду на `localhost:8001`, см.
+`frontend/src/api/client.ts`):
 
 ```bash
 cd frontend
@@ -111,11 +112,60 @@ pnpm install
 pnpm dev
 ```
 
+## Дизайн-система фронтенда
+
+Интерфейс собирается из готовых частей, а не рисуется заново на каждом экране.
+Правило простое: **цвет и размер записаны значением ровно в одном месте**, и
+это `frontend/src/design/tokens.ts`.
+
+Источник в TypeScript, а не в CSS, по трём причинам разом: ECharts
+настраивается объектом и принимает цвет строкой (классов он не понимает),
+достать значение CSS-переменной из JS можно только через `getComputedStyle`,
+которого в jsdom нет, а обратное направление — TS → переменные `:root` —
+выражается плагином Tailwind в `tailwind.config.js` и проверяется сборкой.
+Оттуда же Tailwind берёт утилиты (`text-muted`, `bg-card`, `rounded-lg`,
+`text-hero`).
+
+Токены разделены по смыслу: `color` — семантическая палитра, `chart` — оси,
+сетка и линия графиков, `assetClass` — цвета классов активов (это про класс
+актива, а не про «хорошо или плохо», поэтому к семантике не сводится),
+`fontSize`, `radius`.
+
+**Примитивы** — `frontend/src/ui/`:
+
+| Примитив | Для чего |
+|---|---|
+| `Card`, `CardTitle` | подложка карточки и её подпись |
+| `CardState`, `StateMessage` | «загрузка / пусто / ошибка» — три состояния, различимые и цветом, и текстом |
+| `Button` | `primary`, `ghost`, `danger`; необратимое действие обязано отличаться видом |
+| `Field`, `FieldLabel` | поле ввода с табличными цифрами и связанная с ним подпись |
+| `Table`, `Th`, `Td` | таблица; числовые ячейки помечаются `numeric` и получают `tabular-nums` |
+| `Badge` | цветная метка статуса |
+| `SegmentedControl` | выбор одного из нескольких (под капотом радиогруппа) |
+
+Рядом, в `frontend/src/components/`, живут два компонента о качестве данных:
+`AsOfLabel` (возраст котировок и курсов — две даты, а не одна) и
+`CoverageNotice` (какой частью портфеля посчитан капитал).
+
+Новый примитив кладётся в `frontend/src/ui/` вместе с тестом рядом; всё, что
+знает о доменных сущностях портфеля, — не примитив, ему место в
+`components/`.
+
+**Проверка, что дизайн-система не размывается:**
+
+```bash
+cd frontend && pnpm check:styles --strict
+```
+
+Скрипт считает две вещи и требует нулей: инлайновых `style={{…}}` вне
+`ValueChart.tsx` и `AllocationChart.tsx` (там ECharts, и инлайн неизбежен) и
+hex-литералов вне `tokens.ts`. Без `--strict` он просто печатает счётчики.
+
 ## Тесты
 
 ```bash
 cd backend && uv run pytest
-cd frontend && pnpm vitest run
+cd frontend && pnpm exec vitest run
 ```
 
 Тесты бэкенда поднимают отдельную базу `jarvis_test` на том же Postgres (порт

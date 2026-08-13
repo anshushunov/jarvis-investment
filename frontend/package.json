@@ -7,14 +7,17 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "check:styles": "node scripts/check-styles.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
+    "class-variance-authority": "^0.7.1",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^7.0.0",

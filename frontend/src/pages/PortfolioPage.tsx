@@ -1,37 +1,51 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { Link } from "react-router";
+
 import { api } from "../api/client";
-import { formatDate } from "../api/format";
 import { AllocationChart } from "../components/AllocationChart";
+import { AsOfLabel } from "../components/AsOfLabel";
 import { CashCard } from "../components/CashCard";
-import { PositionsTable } from "../components/PositionsTable";
-import { ReconciliationBanner } from "../components/ReconciliationBanner";
 import { SummaryCard } from "../components/SummaryCard";
 import { ValueChart } from "../components/ValueChart";
+import { Card } from "../ui/Card";
+import { CardState } from "../ui/CardState";
+import { SegmentedControl } from "../ui/SegmentedControl";
+
+// После достройки истории график рисует больше двух тысяч точек одной линией —
+// отдельный год в ней не разглядеть.
+const PERIODS = [
+  { value: 30, label: "Месяц" },
+  { value: 365, label: "Год" },
+  { value: 0, label: "Всё время" },
+];
 
 export function PortfolioPage() {
-  const queryClient = useQueryClient();
+  // Период — состояние экрана, а не часть адреса: это не место, а взгляд на
+  // него.
+  const [days, setDays] = useState(0);
+
   const overview = useQuery({ queryKey: ["overview"], queryFn: api.overview });
-  const positions = useQuery({ queryKey: ["positions"], queryFn: api.positions });
   const cash = useQuery({ queryKey: ["cash"], queryFn: api.cash });
-  const history = useQuery({ queryKey: ["history"], queryFn: () => api.history() });
+  // 0 — «всё время»: бэкенд без параметра days отдаёт весь период (фаза 2c).
+  const history = useQuery({
+    queryKey: ["history", days],
+    queryFn: () => api.history(days || undefined),
+  });
   const reconciliations = useQuery({ queryKey: ["reconciliations"], queryFn: api.reconciliations });
 
-  const sync = useMutation({
-    mutationFn: api.syncTbank,
-    onSuccess: () => queryClient.invalidateQueries(),
-  });
+  if (overview.isLoading) return <CardState kind="loading">Загрузка…</CardState>;
+  if (overview.isError) {
+    return (
+      <CardState kind="error">Бэкенд недоступен. Запущен ли он на порту 8001?</CardState>
+    );
+  }
 
-  if (overview.isLoading) return <div style={{ padding: 32 }}>Загрузка…</div>;
-  if (overview.isError) return <div style={{ padding: 32 }}>Бэкенд недоступен. Запущен ли он на порту 8001?</div>;
-
-  const asOf = formatDate(overview.data!.as_of);
   // Сбой запроса — не то же самое, что легитимно пустой ответ (нет позиций,
   // нет истории, нет расхождений): каждый компонент получает сообщение об
   // ошибке отдельно и решает, как его показать, отличимо от пустого состояния.
-  const positionsError = positions.isError ? (positions.error as Error).message : null;
   const cashError = cash.isError ? (cash.error as Error).message : null;
   const historyError = history.isError ? (history.error as Error).message : null;
-  const reconciliationsError = reconciliations.isError ? (reconciliations.error as Error).message : null;
 
   // Пока запрос ещё идёт, у него нет данных — и без этого признака компонент
   // показывал своё пустое состояние («позиций пока нет», «график появится,
@@ -40,35 +54,37 @@ export function PortfolioPage() {
   // же класс лжи пустым состоянием, что уже чинили для ошибок запроса.
 
   return (
-    <div style={{ maxWidth: 1180, margin: "0 auto", padding: "32px 24px", display: "grid", gap: 14 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 640, margin: 0 }}>Портфель</h1>
-        <span style={{ fontSize: 12.5, color: "var(--tx-2)" }}>
-          {asOf ? `данные на ${asOf}` : "данные ещё не рассчитаны — нет котировок"}
-          {overview.data!.fx_as_of ? ` · курсы на ${formatDate(overview.data!.fx_as_of)}` : ""}
-        </span>
-      </div>
+    <div className="grid gap-3.5">
+      <AsOfLabel asOf={overview.data!.as_of} fxAsOf={overview.data!.fx_as_of} />
 
-      <ReconciliationBanner rows={reconciliations.data ?? []} error={reconciliationsError} />
+      {/* Расхождения на этом экране только объявляются числом: разбор — работа
+          отдельная и долгая, и её место там, где живут сделки. */}
+      {(reconciliations.data?.length ?? 0) > 0 && (
+        <Card>
+          <div className="flex items-center justify-between text-sm">
+            <span>Расхождения с данными брокера: {reconciliations.data?.length ?? 0}</span>
+            <Link to="/trades" className="text-blue">разобрать</Link>
+          </div>
+        </Card>
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
-        <div style={{ display: "grid", gap: 14 }}>
-          <SummaryCard
-            overview={overview.data!}
-            onSync={() => sync.mutate()}
-            syncing={sync.isPending}
-            syncResult={sync.data ?? null}
-            syncErrorMessage={sync.isError ? (sync.error as Error).message : null}
-          />
+      {/* Колонка со сводкой шире прежней (2fr к 3fr, а не 1fr к 2fr): боковое
+          меню забрало 190px, и при старой пропорции «Бумаги … · деньги …»
+          переносилось на вторую строку. */}
+      <div className="grid grid-cols-[2fr_3fr] gap-3.5">
+        <div className="grid gap-3.5">
+          <SummaryCard overview={overview.data!} />
           <CashCard rows={cash.data ?? []} error={cashError} loading={cash.isPending} />
         </div>
-        <ValueChart points={history.data ?? []} error={historyError} loading={history.isPending} />
+        <ValueChart
+          points={history.data ?? []}
+          error={historyError}
+          loading={history.isPending}
+          action={<SegmentedControl options={PERIODS} value={days} onChange={setDays} />}
+        />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 14 }}>
-        <AllocationChart data={overview.data!.by_asset_class} />
-        <PositionsTable rows={positions.data ?? []} error={positionsError} loading={positions.isPending} />
-      </div>
+      <AllocationChart data={overview.data!.by_asset_class} />
     </div>
   );
 }

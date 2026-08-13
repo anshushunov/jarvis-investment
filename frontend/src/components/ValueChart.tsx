@@ -1,5 +1,10 @@
 import ReactECharts from "echarts-for-react";
+import type { ReactNode } from "react";
+
 import { formatDate } from "../api/format";
+import { tokens } from "../design/tokens";
+import { Card, CardTitle } from "../ui/Card";
+import { StateMessage } from "../ui/CardState";
 import type { HistoryPoint } from "../api/client";
 
 // Точка неполна, когда оценены не все позиции. Неизвестное покрытие (null у
@@ -13,34 +18,45 @@ function isIncomplete(point: HistoryPoint): boolean {
   );
 }
 
-export function ValueChart({ points, error, loading }: {
+/** Шапка карточки: подпись и, если есть, действие справа от неё. */
+function ChartHeader({ action }: { action?: ReactNode }) {
+  if (action === undefined) return <CardTitle>Стоимость портфеля</CardTitle>;
+
+  return (
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <span className="text-xs text-muted">Стоимость портфеля</span>
+      {action}
+    </div>
+  );
+}
+
+export function ValueChart({ points, error, loading, action }: {
   points: HistoryPoint[];
   error: string | null;
   loading: boolean;
+  // Переключатель периода стоит в шапке самой карточки: он про этот график и
+  // ни про что больше. Виден и в состояниях — иначе из выбранного периода,
+  // где данных нет, не выбраться.
+  action?: ReactNode;
 }) {
   // Сбой запроса — не то же самое, что «истории ещё нет»: заглушка про
-  // накопление снимков при реальном сбое сети была бы враньём.
-  if (error) {
-    return (
-      <div className="card" style={{ color: "var(--red)", fontSize: 13 }}>
-        Не удалось загрузить историю стоимости: {error}
-      </div>
-    );
-  }
+  // накопление снимков при реальном сбое сети была бы враньём. То же и для
+  // идущего запроса: пока история не пришла, «истории нет» — неправда, а не
+  // осторожная формулировка.
+  const state = error !== null
+    ? { kind: "error" as const, text: `Не удалось загрузить историю стоимости: ${error}` }
+    : loading
+      ? { kind: "loading" as const, text: "Загрузка истории…" }
+      : points.length === 0
+        ? { kind: "empty" as const, text: "Истории пока нет: достройте её прогоном app.snapshots.backfill." }
+        : null;
 
-  // То же и для идущего запроса: пока история не пришла, «истории нет» —
-  // неправда, а не осторожная формулировка.
-  if (loading) {
+  if (state !== null) {
     return (
-      <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>Загрузка истории…</div>
-    );
-  }
-
-  if (points.length === 0) {
-    return (
-      <div className="card" style={{ color: "var(--tx-2)", fontSize: 13 }}>
-        Истории пока нет: достройте её прогоном app.snapshots.backfill.
-      </div>
+      <Card>
+        <ChartHeader action={action} />
+        <StateMessage kind={state.kind}>{state.text}</StateMessage>
+      </Card>
     );
   }
 
@@ -50,8 +66,8 @@ export function ValueChart({ points, error, loading }: {
     .filter((item): item is number[] => item !== null);
 
   return (
-    <div className="card">
-      <div style={{ color: "var(--tx-2)", fontSize: 12, marginBottom: 8 }}>Стоимость портфеля</div>
+    <Card>
+      <ChartHeader action={action} />
       <ReactECharts
         style={{ height: 260 }}
         option={{
@@ -59,9 +75,10 @@ export function ValueChart({ points, error, loading }: {
           // Та же функция форматирования даты, что и в шапке страницы —
           // подписи оси не должны расходиться по формату с остальным интерфейсом.
           xAxis: { type: "category", data: points.map((p) => formatDate(p.date) ?? p.date),
-                   axisLine: { lineStyle: { color: "#3a4763" } } },
-          yAxis: { type: "value", scale: true, splitLine: { lineStyle: { color: "#1c2438" } },
-                   axisLabel: { color: "#9aa5c4" } },
+                   axisLine: { lineStyle: { color: tokens.chart.axis } } },
+          yAxis: { type: "value", scale: true,
+                   splitLine: { lineStyle: { color: tokens.chart.grid } },
+                   axisLabel: { color: tokens.chart.label } },
           tooltip: {
             trigger: "axis",
             // Только дата и сумма. Покрытие и список неоценённых бумаг отсюда
@@ -80,8 +97,8 @@ export function ValueChart({ points, error, loading }: {
           series: [
             {
               type: "line", smooth: true, showSymbol: false,
-              lineStyle: { color: "#638cff", width: 2 },
-              areaStyle: { color: "rgba(99,140,255,0.18)" },
+              lineStyle: { color: tokens.chart.line, width: 2 },
+              areaStyle: { color: tokens.chart.area },
               data: values,
             },
             {
@@ -89,17 +106,17 @@ export function ValueChart({ points, error, loading }: {
               // чтобы факт и предположение различались, а цвет в одиночку не
               // различает их для того, кто его не видит.
               type: "scatter", symbol: "triangle", symbolSize: 8,
-              itemStyle: { color: "#e2b93b" },
+              itemStyle: { color: tokens.chart.incomplete },
               data: incomplete,
             },
           ],
         }}
       />
       {incomplete.length > 0 && (
-        <div style={{ color: "var(--tx-2)", fontSize: 12, marginTop: 8 }}>
+        <div className="mt-2 text-xs text-muted">
           ▲ — дни, где оценены не все позиции: цены на эти бумаги нет ни на бирже, ни у брокера.
         </div>
       )}
-    </div>
+    </Card>
   );
 }
