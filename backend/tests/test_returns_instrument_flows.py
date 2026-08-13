@@ -55,6 +55,19 @@ def test_fee_of_a_trade_belongs_to_that_trade(session, account):
     assert flows[instrument.id][0].amount == Decimal("-50150.0000")
 
 
+def test_fee_of_a_sale_reduces_the_proceeds(session, account):
+    """У продажи комиссия уменьшает выручку, а не увеличивает её: знак у
+    потока противоположный покупке, и общее правило «комиссия всегда против
+    владельца» проверяется именно здесь."""
+    instrument = add_instrument(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2024, 6, 10), amount="60000", fee="180",
+           quantity="-100", price="600", instrument_id=instrument.id)
+
+    flows = instrument_flows(session, RateBook.load(session))
+    assert flows[instrument.id][0].amount == Decimal("59820.0000")
+
+
 def test_flows_without_instrument_go_to_unattributed(session, account):
     """718 комиссий и 20 налогов живых данных не относятся ни к какой бумаге.
     Их место — отдельная строка, а не молчание."""
@@ -96,6 +109,23 @@ def test_currency_flows_use_rate_of_their_day(session, account):
 
     flows = instrument_flows(session, RateBook.load(session))
     assert flows[instrument.id][0].amount == Decimal("-74000.0000")
+
+
+def test_trade_without_rate_is_reported_not_dropped(session, account):
+    """Покупка в валюте, у которой нет курса на её дату, выпадает из потоков
+    бумаги — и обязана быть названа: иначе сумма по бумагам разойдётся с
+    портфелем, а объяснить расхождение будет нечем."""
+    from app.returns.flows import unconverted_flows
+
+    instrument = add_instrument(session, isin="HK0000123577", ticker="MEITUAN",
+                                currency="HKD")
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2021, 6, 1), amount="-5000", currency="HKD",
+           quantity="100", price="50", instrument_id=instrument.id)
+
+    book = RateBook.load(session)
+    assert instrument_flows(session, book) == {}
+    assert unconverted_flows(session, book) == ["HKD"]
 
 
 def test_period_filters_instrument_flows(session, account):

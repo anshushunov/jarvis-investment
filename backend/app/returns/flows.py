@@ -140,14 +140,22 @@ def account_flows(session: Session, book: RateBook, account_id: int,
 def unconverted_flows(session: Session, book: RateBook) -> list[str]:
     """Валюты потоков, которым не нашлось курса на их дату.
 
-    Такой поток в расчёт не входит — и обязан быть назван: молча выпавшее
-    пополнение завышает доходность ровно на свою величину, и по экрану этого не
-    видно никак.
+    Периметра два, и оба обязаны быть названы. Молча выпавшее движение денег
+    (`_cash_moves`) завышает доходность портфеля ровно на свою величину.
+    Молча выпавшая сделка или выплата (`_result_rows`) — например, покупка в
+    валюте без курса на её день — исчезает из потока бумаги, и сумма по
+    бумагам перестаёт сходиться с прибылью портфеля на ту же величину. Ни то,
+    ни другое не видно на экране никак, если не назвать валюту явно.
     """
     missing = {
         move.currency.upper()
         for move in _cash_moves(session)
         if book.rate(move.currency, moscow_date(move.executed_at)) is None
+    }
+    missing |= {
+        row.currency.upper()
+        for row in _result_rows(session)
+        if book.rate(row.currency, moscow_date(row.executed_at)) is None
     }
     return sorted(missing)
 
