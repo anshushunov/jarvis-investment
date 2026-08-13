@@ -139,14 +139,25 @@ def test_empty_and_single_flow():
 
 
 def test_zero_result_is_minus_one_hundred_percent():
-    """Вложил и не вернул ничего: ставка упирается в нижнюю границу поиска."""
+    """Вложил и почти ничего не вернул: ставка у нижней границы поиска."""
     flows = [
         Flow(date(2021, 1, 1), Decimal("-1000")),
-        Flow(date(2022, 1, 1), Decimal("0.01")),
+        Flow(date(2022, 1, 1), Decimal("1")),
     ]
     rate = xirr(flows)
     assert rate is not None
     assert rate < Decimal("-0.99")
+
+
+def test_root_outside_search_range_has_no_rate():
+    """Убыток настолько полный, что ставка уходит ниже границы поиска
+    (−1000 → +0,01 за год даёт −99,999 %). Вернуть край отрезка значило бы
+    выдать границу поиска за результат расчёта — поэтому None."""
+    flows = [
+        Flow(date(2021, 1, 1), Decimal("-1000")),
+        Flow(date(2022, 1, 1), Decimal("0.01")),
+    ]
+    assert xirr(flows) is None
 
 
 def test_result_satisfies_its_own_definition():
