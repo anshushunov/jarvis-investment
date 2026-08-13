@@ -6,10 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analytics.service import asset_class_of, portfolio_overview
-from app.marketdata.service import prices_as_of
+from app.analytics.valuation import value_position
+from app.marketdata.service import LatestPrice, prices_as_of
 from app.models import Account, DailySnapshot, Instrument
-from app.money import money
-from app.positions.engine import OpenLot, fold
+from app.money import BASE_CURRENCY, money
+from app.positions.engine import LedgerEntry, OpenLot
+from app.positions.history import holdings_at
 from app.positions.service import ledger_entries
 from app.returns.flows import (
     CashFlow,
@@ -20,10 +22,11 @@ from app.returns.flows import (
     unattributed_flows,
     unconverted_flows,
 )
-from app.returns.fx_split import split_position
+from app.returns.fx_split import REASON_NO_PRICE, REASON_NO_RATE, split_position
 from app.returns.rates import RateBook
 from app.returns.twr import PRECISION, Chain, annualize, twr
-from app.returns.xirr import Flow, xirr
+from app.returns.xirr import DAYS_IN_YEAR, Flow, xirr
+from app.snapshots.service import snapshot_account_values
 from app.timeutils import moscow_today
 
 PERIOD_ALL = "all"
@@ -31,15 +34,10 @@ PERIOD_12M = "12m"
 PERIOD_YTD = "ytd"
 PERIODS = (PERIOD_ALL, PERIOD_12M, PERIOD_YTD)
 
-# Порог аннуализации. Ставка XIRR по устройству годовая, и на периоде короче
-# года она врёт кратно: два процента за полтора месяца превращаются в двадцать
-# семь годовых. Короткий период показывается как есть, за период (дизайн,
-# раздел 4.3), — годовая подпись под ним снимается вместе с пересчётом.
-DAYS_IN_YEAR = 365
-
 # Причины отсутствия числа. Каждая переводится в слова на экране.
 REASON_NO_FLOWS = "no_flows"
 REASON_NO_HISTORY = "no_history"
+REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
 
 CASH_CLASS = "cash"
@@ -81,8 +79,11 @@ class InstrumentRow:
     ticker: str | None
     name: str
     xirr: Decimal | None
-    profit: Decimal
-    value: Decimal
+    # None — не ноль: прибыль неизвестна, потому что позицию не удалось оценить
+    # на конец периода или на его начало. Ноль означал бы «бумага не принесла
+    # ничего», а на деле неизвестно, принесла ли.
+    profit: Decimal | None
+    value: Decimal | None
     closed: bool
     price_part: Decimal | None
     fx_part: Decimal | None
@@ -93,8 +94,10 @@ class InstrumentRow:
 class Coverage:
     days_total: int
     days_valued: int
-    positions_total: int
-    positions_valued: int
+    # None — покрытие позиций на последний день периода никто не считал (снимки
+    # старше фазы 2c). Ноль означал бы «позиций нет вовсе», а это другое.
+    positions_total: int | None
+    positions_valued: int | None
     unpriced: list[str]
     chain_breaks: int
     currencies_without_rate: list[str]
@@ -113,14 +116,24 @@ class ReturnsReport:
 
 
 def period_bounds(period_key: str, today: date, first_day: date | None) -> Period:
+    """Границы периода и признак «показывать в годовых».
+
+    Порог аннуализации — годовая база XIRR (`app.returns.xirr.DAYS_IN_YEAR`),
+    общая с ним и с `twr.annualize`: две константы «365» в двух модулях
+    расходятся ровно тогда, когда одну из них поправят, а `_over_period` и
+    `annualize` обязаны остаться обратными друг другу.
+
+    Период короче года аннуализировать нельзя: ставка врёт кратно — два
+    процента за полтора месяца превращаются в двадцать семь годовых, — и такой
+    период показывается за период (дизайн, раздел 4.3).
+    """
     if period_key == PERIOD_12M:
-        since = today - timedelta(days=DAYS_IN_YEAR)
+        since = today - timedelta(days=int(DAYS_IN_YEAR))
     elif period_key == PERIOD_YTD:
         since = date(today.year, 1, 1)
     else:
         since = first_day
 
-    # Период короче года аннуализировать нельзя — см. комментарий у DAYS_IN_YEAR.
     length = (today - since).days if since is not None else 0
     return Period(key=period_key, since=since, until=today, annualized=length >= DAYS_IN_YEAR)
 
@@ -131,17 +144,21 @@ def _period_days(period: Period) -> int:
     return (period.until - period.since).days
 
 
-def _over_period(rate: Decimal, days: int) -> Decimal:
+def _over_period(rate: Decimal, days: int) -> Decimal | None:
     """Годовая ставка, пересчитанная в доходность за период.
 
     Обратна `twr.annualize` и нужна XIRR: тот по устройству отвечает годовой
     ставкой, а на периоде короче года годовая величина врёт кратно. Прятать
     число вовсе нельзя — оно известно, врёт только годовая подпись под ним
     (дизайн, раздел 4.3).
+
+    None у периода нулевой длины: доходности за нулевой период не существует, а
+    вернуть годовую ставку под подписью «за период» значило бы соврать ровно на
+    ту величину, ради которой пересчёт и делается.
     """
     if days <= 0:
-        return rate.quantize(PRECISION)
-    exponent = Decimal(days) / Decimal(DAYS_IN_YEAR)
+        return None
+    exponent = Decimal(days) / DAYS_IN_YEAR
     return ((Decimal("1") + rate) ** exponent - Decimal("1")).quantize(PRECISION)
 
 
@@ -164,7 +181,8 @@ def _opening(session: Session, since: date | None) -> DailySnapshot | None:
     минус 70 000.
 
     Пусто — периметра до периода не существовало, и ноль здесь законное начало
-    отсчёта, а не пропуск данных.
+    отсчёта, а не пропуск данных. Так всегда у периода «всё время»: он начинается
+    с первого дня истории.
     """
     if since is None:
         return None
@@ -189,6 +207,15 @@ def _series(snapshots: list[DailySnapshot], pick) -> list[tuple[date, Decimal]]:
         if value is not None:
             result.append((snapshot.on_date, Decimal(str(value))))
     return result
+
+
+def _series_start(opening: DailySnapshot | None, pick) -> Decimal:
+    """Стоимость периметра на начало периода. Ноль — периметра тогда не
+    существовало, и это законное начало отсчёта, а не пропуск данных."""
+    if opening is None:
+        return Decimal("0")
+    value = pick(opening)
+    return Decimal(str(value)) if value is not None else Decimal("0")
 
 
 def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
@@ -217,37 +244,70 @@ def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
     if twr_rate is not None and period.annualized:
         twr_rate = annualize(twr_rate, chain.days)
 
-    # Причина именуется по главному числу экрана — ставке владельца. Молчаливый
-    # прочерк вместо неё запрещён: у каждого пустого места есть названная
-    # причина. Потоков в периоде не было вовсе — ставки не существует; потоки
-    # были, а ставка не нашлась — считать её не из чего (одного знака, один
-    # день, корень вне разумных границ).
-    reason = None
-    if rate is None:
-        reason = REASON_NO_FLOWS if not flows else REASON_NO_HISTORY
-    elif twr_rate is None:
-        # Ряда стоимостей нет: цепочке не из чего строиться.
-        reason = REASON_NO_HISTORY
-
     return Metric(xirr=rate, twr=twr_rate, profit=profit, invested=invested,
-                  value=money(value_now), reason=reason), chain
+                  value=money(value_now), reason=_reason(rate, twr_rate, flows)), chain
 
 
-def _lots_by_instrument(session: Session) -> dict[int, list[OpenLot]]:
-    """Открытые партии по всем счетам, сведённые по бумаге.
+def _reason(rate: Decimal | None, twr_rate: Decimal | None,
+            flows: list[CashFlow]) -> str | None:
+    """Почему числа нет. Молчаливый прочерк запрещён: у каждого пустого места на
+    экране есть названная причина.
 
-    Партии считает движок позиций — тот же, что строит саму позицию. Второй
-    свёртки журнала в проекте быть не должно: разъедется трактовка решений
-    владельца.
+    Три случая — три разных ответа владельцу, и подменять их одним нельзя:
+    потоков в периоде не было вовсе (ставки не существует); потоки были, а
+    корня у уравнения нет — все одного знака, все одним днём, ставка за
+    пределами разумных границ (дизайн, раздел 4.5: «недостаточно данных для
+    расчёта»); ряда стоимостей нет, и цепочке TWR не из чего строиться. Раньше
+    второй случай отвечал «истории нет» — счёт с одними пополнениями и нулевой
+    стоимостью обвинял историю, которая на месте.
+    """
+    if rate is None:
+        return REASON_NO_FLOWS if not flows else REASON_NO_SOLUTION
+    if twr_rate is None:
+        return REASON_NO_HISTORY
+    return None
+
+
+def _rates_at(book: RateBook, prices: dict[int, LatestPrice], on_date: date) -> dict[str, Decimal]:
+    """Курсы валют котировок на дату — в том виде, в каком их ждёт оценка
+    позиции (`app/analytics/valuation.py`). Берутся из уже прочитанной книги
+    курсов, а не отдельным запросом на каждую дату."""
+    rates: dict[str, Decimal] = {}
+    for currency in {price.currency.upper() for price in prices.values()} | {BASE_CURRENCY}:
+        rate = book.rate(currency, on_date)
+        if rate is not None:
+            rates[currency] = rate
+    return rates
+
+
+def _lots_at(journals: list[list[LedgerEntry]], on_date: date) -> dict[int, list[OpenLot]]:
+    """Открытые партии всех счетов на конец дня, сведённые по бумаге.
+
+    Состав на дату восстанавливает `app/positions/history.py::holdings_at` — та
+    же свёртка журнала, что строит и сегодняшнюю позицию. Второй свёртки в
+    проекте быть не должно: разъедется трактовка решений владельца.
     """
     result: dict[int, list[OpenLot]] = {}
-    for account in session.execute(select(Account)).scalars():
-        folded = fold(ledger_entries(session, account), currency=account.currency)
-        for instrument_id, state in folded.positions.items():
-            if state.quantity == 0:
-                continue
+    for entries in journals:
+        for instrument_id, state in holdings_at(entries, on_date).items():
             result.setdefault(instrument_id, []).extend(state.lots)
     return result
+
+
+def _position_value(lots: list[OpenLot], price: LatestPrice | None,
+                    rates: dict[str, Decimal]) -> Decimal | None:
+    """Стоимость набора партий в рублях.
+
+    Ноль — партий нет: позиции на эту дату не существовало, и это точное знание.
+    None — оценить нечем: нет цены на дату или нет курса её валюты. Ноль вместо
+    None означал бы «бумага ничего не стоит», и позиция исчезала бы и из
+    стоимости, и из прибыли, не оставив следа, — ровно то, ради чего в проекте
+    существует раздельный `ValuedPosition.value_base`.
+    """
+    if not lots:
+        return Decimal("0")
+    quantity = sum((lot.quantity_left for lot in lots), Decimal("0"))
+    return value_position(quantity, price, rates).value_base
 
 
 def returns_report(session: Session, period_key: str, today: date | None = None,
@@ -286,19 +346,25 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
                                value_now, total_series, period)
 
     accounts = list(session.execute(select(Account)).scalars())
+    # Какие ключи разбивки считать идентификаторами счетов, знает сторона,
+    # которая их пишет (app/snapshots/service.py) — здесь это правило не
+    # повторяется. Разбор снимка делается один раз на снимок, а не по разу на
+    # каждый счёт: снимков в окне «всё время» больше двух тысяч.
+    chart_values = [(row.on_date, snapshot_account_values(row)) for row in chart]
+    opening_values = snapshot_account_values(opening) if opening is not None else {}
+
     by_account = []
     for account in accounts:
-        def pick(row, key=str(account.id)):
-            return (row.by_account or {}).get(key)
-
+        series = [(day, values[account.id]) for day, values in chart_values
+                  if account.id in values]
         metric, _ = _metric(account_flows(session, book, account.id, period.since, period.until),
-                            _series_start(opening, pick),
-                            by_account_now.get(account.id, Decimal("0")),
-                            _series(chart, pick), period)
+                            opening_values.get(account.id, Decimal("0")),
+                            by_account_now.get(account.id, Decimal("0")), series, period)
         by_account.append(AccountRow(account_id=account.id, metric=metric))
 
     instrument_rows, by_class = _instrument_and_class_rows(
-        session, book, period, chart, opening, by_class_now)
+        session, book, period, chart, opening,
+        [ledger_entries(session, account) for account in accounts], by_class_now)
 
     # Полнота оценки дня — только там, где её вообще считали: у снимков старше
     # фазы 2c покрытие NULL, и «NULL равен NULL» записало бы день с неизвестным
@@ -310,8 +376,8 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     coverage = Coverage(
         days_total=len(snapshots),
         days_valued=valued,
-        positions_total=(last.positions_total or 0) if last else 0,
-        positions_valued=(last.valued_positions or 0) if last else 0,
+        positions_total=last.positions_total if last else None,
+        positions_valued=last.valued_positions if last else None,
         unpriced=list(last.unpriced or []) if last else [],
         chain_breaks=chain.breaks,
         currencies_without_rate=unconverted_flows(session, book),
@@ -324,17 +390,9 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     )
 
 
-def _series_start(opening: DailySnapshot | None, pick) -> Decimal:
-    """Стоимость периметра на начало периода. Ноль — периметра тогда не
-    существовало, и это законное начало отсчёта, а не пропуск данных."""
-    if opening is None:
-        return Decimal("0")
-    value = pick(opening)
-    return Decimal(str(value)) if value is not None else Decimal("0")
-
-
 def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                                chart: list[DailySnapshot], opening: DailySnapshot | None,
+                               journals: list[list[LedgerEntry]],
                                by_class_now: dict[str, Decimal]):
     """Строки по бумагам и по классам активов за один проход.
 
@@ -342,14 +400,28 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
     выдумывать её здесь нельзя. Упрощение названо на экране.
     """
     flows_by_instrument = instrument_flows(session, book, period.since, period.until)
-    lots = _lots_by_instrument(session)
-    prices = prices_as_of(session, period.until)
+
+    # Состав и цены — на одну и ту же дату, оба раза. Партии на сегодня против
+    # цен на конец периода дали бы строку, в которой количество из одного дня
+    # умножено на цену другого; сегодня `until` и есть сегодня, и дефект был бы
+    # незаметен ровно до первого отчёта за прошлый период.
+    end_lots = _lots_at(journals, period.until)
+    end_prices = prices_as_of(session, period.until)
+    end_rates = _rates_at(book, end_prices, period.until)
+
+    # Начало периода — тот же день, от которого считает свою прибыль портфель
+    # (снимок-точка отсчёта). Нет его — периметра до периода не существовало,
+    # и начальной стоимости у бумаги тоже нет: так у периода «всё время».
+    start_day = opening.on_date if opening is not None else None
+    start_lots = _lots_at(journals, start_day) if start_day is not None else {}
+    start_prices = prices_as_of(session, start_day) if start_day is not None else {}
+    start_rates = _rates_at(book, start_prices, start_day) if start_day is not None else {}
 
     instruments = {
         row.id: row
         for row in session.execute(
             select(Instrument).where(Instrument.id.in_(
-                set(flows_by_instrument) | set(lots)))
+                set(flows_by_instrument) | set(end_lots) | set(start_lots)))
         ).scalars()
     }
 
@@ -358,14 +430,12 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
 
     for instrument_id, instrument in instruments.items():
         flows = flows_by_instrument.get(instrument_id, [])
-        open_lots = lots.get(instrument_id, [])
-        price = prices.get(instrument_id)
+        open_lots = end_lots.get(instrument_id, [])
+        price = end_prices.get(instrument_id)
 
-        value = Decimal("0")
-        if open_lots and price is not None:
-            quantity = sum((lot.quantity_left for lot in open_lots), Decimal("0"))
-            in_base = book.to_base(quantity * price.close, price.currency, period.until)
-            value = in_base if in_base is not None else Decimal("0")
+        value = _position_value(open_lots, price, end_rates)
+        value_start = _position_value(start_lots.get(instrument_id, []),
+                                      start_prices.get(instrument_id), start_rates)
 
         split = split_position(
             lots=open_lots, price=price,
@@ -373,25 +443,27 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
             cost_currency=instrument.currency, book=book, on_date=period.until,
         ) if open_lots else None
 
-        rate_flows = [Flow(on_date=flow.on_date, amount=flow.amount) for flow in flows]
-        if value != 0:
-            rate_flows.append(Flow(on_date=period.until, amount=value))
-        rate = xirr(rate_flows)
-        if rate is not None and not period.annualized:
-            rate = _over_period(rate, _period_days(period))
+        reason = split.reason if split else None
+        if value is None:
+            # Оценить нечем — прибыль и ставка неизвестны, а не равны нулю.
+            reason = REASON_NO_PRICE if price is None else REASON_NO_RATE
+        elif value_start is None:
+            # Конец периода известен, начало — нет: прибыль периода не из чего
+            # вычесть. Причина именно про историю, а не про сегодняшнюю цену.
+            reason = REASON_NO_HISTORY
 
-        profit = money(value + sum((flow.amount for flow in flows), Decimal("0")))
         rows.append(InstrumentRow(
             instrument_id=instrument_id,
             ticker=instrument.ticker,
             name=instrument.issuer or instrument.ticker or instrument.isin or "—",
-            xirr=rate,
-            profit=profit,
-            value=money(value),
+            xirr=_instrument_rate(flows, value_start, value, period),
+            profit=(money(value - value_start + sum((flow.amount for flow in flows), Decimal("0")))
+                    if value is not None and value_start is not None else None),
+            value=money(value) if value is not None else None,
             closed=not open_lots,
             price_part=split.price_part if split else None,
             fx_part=split.fx_part if split else None,
-            reason=(split.reason if split else None),
+            reason=reason,
         ))
 
         klass = asset_class_of(instrument)
@@ -422,3 +494,30 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
         by_class.append(AssetClassRow(asset_class=klass, metric=metric))
 
     return rows, by_class
+
+
+def _instrument_rate(flows: list[CashFlow], value_start: Decimal | None,
+                     value_end: Decimal | None, period: Period) -> Decimal | None:
+    """Ставка по одной бумаге за период.
+
+    Стоимость на начало периода входит вложением, на конец — изъятием: тем же
+    способом, что и у портфеля. Без начальной стоимости бумага, купленная до
+    периода, показывала бы прибылью всю свою стоимость, а ставка считалась бы по
+    единственному потоку и молча выходила бы `None`.
+
+    Неизвестная стоимость на любом из концов — не ноль: ставки в этом случае
+    нет вовсе, и причина названа в строке.
+    """
+    if value_start is None or value_end is None:
+        return None
+
+    rate_flows = [Flow(on_date=flow.on_date, amount=flow.amount) for flow in flows]
+    if value_start != 0 and period.since is not None:
+        rate_flows.append(Flow(on_date=period.since, amount=-value_start))
+    if value_end != 0:
+        rate_flows.append(Flow(on_date=period.until, amount=value_end))
+
+    rate = xirr(rate_flows)
+    if rate is not None and not period.annualized:
+        rate = _over_period(rate, _period_days(period))
+    return rate

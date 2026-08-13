@@ -1,18 +1,28 @@
 from datetime import date
 from decimal import Decimal
 
-from app.models import DailySnapshot, FxRate, OperationType
+from app.models import DailySnapshot, FxRate, OperationType, Price
 from app.returns.service import PERIOD_12M, PERIOD_ALL, PERIOD_YTD, period_bounds, returns_report
-from tests.test_returns_flows import add_tx
+from tests.test_returns_flows import add_tx, second_account
 from tests.test_returns_instrument_flows import add_instrument
 
 
 def add_snapshot(session, day: date, total: str, by_account: dict | None = None,
-                 valued: int = 1, total_positions: int = 1) -> None:
+                 valued: int | None = 1, total_positions: int | None = 1) -> None:
+    """Точка истории для теста. `valued`/`total_positions` принимают None —
+    так покрытие лежит в снимках, снятых до фазы 2c, и «неизвестно» обязано
+    отличаться от «ноль»."""
     session.add(DailySnapshot(
         on_date=day, total_value=Decimal(total), by_asset_class={"equity": total},
         by_account=by_account or {}, source="backfill",
         positions_total=total_positions, valued_positions=valued, unpriced=[]))
+    session.flush()
+
+
+def add_price(session, instrument_id: int, day: date, close: str,
+              currency: str = "RUB") -> None:
+    session.add(Price(instrument_id=instrument_id, on_date=day, close=Decimal(close),
+                      currency=currency, source="moex"))
     session.flush()
 
 
@@ -192,6 +202,103 @@ def test_coverage_reports_unvalued_days_and_currencies(session, account):
     assert report.coverage.days_total == 2
     assert report.coverage.days_valued == 1
     assert report.coverage.currencies_without_rate == ["HKD"]
+
+
+def test_twr_is_the_growth_when_nothing_was_added(session, account):
+    """Без пополнений и изъятий TWR — это в точности рост стоимости: очищать
+    цепочку не от чего."""
+    add_snapshot(session, date(2026, 8, 11), "100000")
+    add_snapshot(session, date(2026, 8, 13), "110000")
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("110000"), by_account_now={},
+                            by_class_now={})
+    assert report.portfolio.twr == Decimal("0.1000")
+    assert report.coverage.chain_breaks == 0
+
+
+def test_accounts_are_split_by_identifier(session, account):
+    """Два счёта с разными потоками дают разные строки, и строка ищется по
+    идентификатору счёта — тому же, каким разбивка лежит в снимке."""
+    other = second_account(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 1, 10), amount="100000")
+    add_tx(session, account_id=other.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 1, 10), amount="50000")
+    add_snapshot(session, date(2024, 1, 10), "150000",
+                 by_account={str(account.id): "100000", str(other.id): "50000"})
+    add_snapshot(session, date(2026, 8, 13), "180000",
+                 by_account={str(account.id): "130000", str(other.id): "50000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("180000"),
+                            by_account_now={account.id: Decimal("130000"),
+                                            other.id: Decimal("50000")},
+                            by_class_now={})
+    rows = {row.account_id: row.metric for row in report.by_account}
+    assert rows[account.id].invested == Decimal("100000.0000")
+    assert rows[other.id].invested == Decimal("50000.0000")
+    assert rows[account.id].profit == Decimal("30000.0000")
+    assert rows[other.id].profit == Decimal("0.0000")
+
+
+def test_day_with_unknown_coverage_is_not_a_valued_day(session, account):
+    """У снимков старше фазы 2c покрытие не считали вовсе. «Неизвестно» — не
+    «полно»: NULL == NULL в Python истина, и такой день записывался в полностью
+    оценённые."""
+    add_snapshot(session, date(2024, 2, 1), "100000", valued=None, total_positions=None)
+    add_snapshot(session, date(2026, 8, 13), "100000", valued=2, total_positions=2)
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("100000"), by_account_now={},
+                            by_class_now={})
+    assert report.coverage.days_total == 2
+    assert report.coverage.days_valued == 1
+
+
+def test_instrument_bought_before_the_period_shows_only_its_growth(session, account):
+    """Бумага, купленная до периода, за двенадцать месяцев заработала рост
+    цены, а не всю свою стоимость: начальная стоимость вычитается так же, как у
+    портфеля."""
+    instrument = add_instrument(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-100000", quantity="100", price="1000",
+           instrument_id=instrument.id)
+    add_price(session, instrument.id, date(2025, 8, 12), "1000")
+    add_price(session, instrument.id, date(2026, 8, 13), "1200")
+    add_snapshot(session, date(2025, 8, 12), "100000")
+    add_snapshot(session, date(2026, 8, 13), "120000")
+
+    report = returns_report(session, PERIOD_12M, today=date(2026, 8, 13),
+                            value_now=Decimal("120000"), by_account_now={},
+                            by_class_now={"equity": Decimal("120000")})
+    row = next(row for row in report.by_instrument if row.instrument_id == instrument.id)
+    assert row.value == Decimal("120000.0000")
+    assert row.profit == Decimal("20000.0000")
+    assert row.xirr is not None
+    assert row.reason is None
+
+
+def test_position_without_a_rate_is_not_worth_zero(session, account):
+    """Гонконгская бумага без курса на дату: стоимость неизвестна, а не равна
+    нулю. Ноль вычел бы её из прибыли целиком и молча."""
+    instrument = add_instrument(session, isin="HK0001000123", ticker="0001",
+                                currency="HKD")
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-100000", quantity="100", price="1000",
+           instrument_id=instrument.id)
+    add_price(session, instrument.id, date(2026, 8, 13), "1200", currency="HKD")
+    add_snapshot(session, date(2024, 1, 11), "100000")
+    add_snapshot(session, date(2026, 8, 13), "100000")
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("100000"), by_account_now={},
+                            by_class_now={})
+    row = next(row for row in report.by_instrument if row.instrument_id == instrument.id)
+    assert row.value is None
+    assert row.profit is None
+    assert row.xirr is None
+    assert row.reason == "no_rate"
 
 
 def test_period_cuts_off_earlier_flows(session, account):
