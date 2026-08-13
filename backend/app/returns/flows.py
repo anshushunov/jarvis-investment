@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.money import money
 from app.models import OperationType, Transaction
 from app.returns.rates import RateBook
 from app.timeutils import moscow_date
@@ -149,3 +150,95 @@ def unconverted_flows(session: Session, book: RateBook) -> list[str]:
         if book.rate(move.currency, moscow_date(move.executed_at)) is None
     }
     return sorted(missing)
+
+
+# Типы, движущие деньги внутри периметра: они не капитал владельца, а результат
+# и издержки. В потоки бумаги входят все, привязанные к ней; непривязанные
+# собираются отдельной строкой (см. unattributed_flows).
+RESULT_TYPES = {
+    OperationType.BUY, OperationType.SELL, OperationType.DIVIDEND,
+    OperationType.COUPON, OperationType.AMORTIZATION, OperationType.REDEMPTION,
+    OperationType.FEE, OperationType.TAX, OperationType.VARIATION_MARGIN,
+    OperationType.OTHER,
+}
+
+FEE_TYPES = {OperationType.FEE}
+TAX_TYPES = {OperationType.TAX}
+
+
+@dataclass(frozen=True)
+class Unattributed:
+    """Комиссии, налоги и возвраты, не относящиеся ни к одной бумаге.
+
+    Живой замер 13.08.2026: 770 записей на −103 тыс. ₽. Без этой строки сумма
+    разреза по бумагам не сходится с прибылью портфеля ровно на неё, и объяснить
+    расхождение было бы нечем.
+    """
+
+    profit: Decimal
+    fees: Decimal
+    taxes: Decimal
+    other: Decimal
+
+
+def _result_rows(session: Session) -> list[Transaction]:
+    return list(session.execute(
+        select(Transaction)
+        .where(Transaction.op_type.in_(RESULT_TYPES))
+        .order_by(Transaction.executed_at, Transaction.id)
+    ).scalars().all())
+
+
+def _trade_flow(transaction: Transaction, book: RateBook) -> CashFlow | None:
+    """Поток сделки или выплаты. Комиссия записи входит в её же поток: она часть
+    цены сделки, и отдельным событием её показывать не за что."""
+    day = moscow_date(transaction.executed_at)
+    # Знак `amount` уже такой, как у движения денег: покупка отрицательна.
+    # Комиссия хранится положительной величиной и всегда уменьшает поток.
+    total = transaction.amount - abs(transaction.fee)
+    in_base = book.to_base(total, transaction.currency, day)
+    if in_base is None:
+        return None
+    return CashFlow(on_date=day, amount=in_base, account_id=transaction.account_id,
+                    transaction_id=transaction.id)
+
+
+def instrument_flows(session: Session, book: RateBook, since: date | None = None,
+                     until: date | None = None) -> dict[int, list[CashFlow]]:
+    """Потоки по каждой бумаге. Ключ — instrument_id; записи без него сюда не
+    попадают вовсе и учитываются строкой «Прочее»."""
+    result: dict[int, list[CashFlow]] = {}
+    for row in _result_rows(session):
+        if row.instrument_id is None:
+            continue
+        if _is_cash_move(row):
+            # INP_MULTI/OUT_MULTI с привязкой к бумаге — это движение денег, а
+            # не результат по бумаге. Такого в живых данных нет, но правило
+            # обязано быть одним и тем же для обоих периметров.
+            continue
+        flow = _trade_flow(row, book)
+        if flow is None or not _in_period(flow.on_date, since, until):
+            continue
+        result.setdefault(row.instrument_id, []).append(flow)
+    return result
+
+
+def unattributed_flows(session: Session, book: RateBook, since: date | None = None,
+                       until: date | None = None) -> Unattributed:
+    """Итог по записям без бумаги, разложенный на комиссии, налоги и прочее."""
+    fees = taxes = other = Decimal("0")
+    for row in _result_rows(session):
+        if row.instrument_id is not None or _is_cash_move(row):
+            continue
+        flow = _trade_flow(row, book)
+        if flow is None or not _in_period(flow.on_date, since, until):
+            continue
+        if row.op_type in FEE_TYPES:
+            fees += flow.amount
+        elif row.op_type in TAX_TYPES:
+            taxes += flow.amount
+        else:
+            other += flow.amount
+
+    return Unattributed(profit=money(fees + taxes + other), fees=money(fees),
+                        taxes=money(taxes), other=money(other))
