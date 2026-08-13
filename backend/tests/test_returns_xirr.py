@@ -63,6 +63,24 @@ def test_root_outside_search_range_has_no_rate():
     assert xirr(flows) is None
 
 
+def test_flows_on_a_single_date_have_no_rate():
+    """Все потоки одного дня: дисконтировать нечего, и подходит любая ставка.
+    Вернуть начальное приближение значило бы выдать догадку за расчёт."""
+    flows = [
+        Flow(date(2021, 1, 1), Decimal("-1000")),
+        Flow(date(2021, 1, 1), Decimal("1000")),
+    ]
+    assert xirr(flows) is None
+
+
+def test_flows_on_a_single_date_with_profit_have_no_rate():
+    flows = [
+        Flow(date(2021, 1, 1), Decimal("-1000")),
+        Flow(date(2021, 1, 1), Decimal("1200")),
+    ]
+    assert xirr(flows) is None
+
+
 def test_result_satisfies_its_own_definition():
     """Признак готовности фазы, пункт 1: дисконтирование потоков по найденной
     ставке даёт ноль в пределах копейки. Набор нарочно неровный — семь лет,

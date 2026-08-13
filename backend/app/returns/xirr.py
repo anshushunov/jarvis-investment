@@ -97,6 +97,14 @@ def xirr(flows: list[Flow]) -> Decimal | None:
     if len(flows) < 2 or not _has_both_signs(flows):
         return None
 
+    # Все потоки в одну дату: дисконтировать нечего — база степени всегда
+    # (1 + rate) ** 0 == 1, ставка на приведённую стоимость не влияет вовсе,
+    # и NPV равно нулю (или не равно, если сумма не нулевая) при ЛЮБОЙ ставке.
+    # Задача вырождена, а не решена: подходящая ставка либо любая, либо не
+    # существует — и то и другое законно только как None.
+    if min(flow.on_date for flow in flows) == max(flow.on_date for flow in flows):
+        return None
+
     rate = Decimal("0.1")
     for _ in range(NEWTON_STEPS):
         value = npv(flows, rate)
