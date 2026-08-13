@@ -72,6 +72,18 @@ def test_parts_always_sum_to_total():
     assert split.price_part + split.fx_part == split.total
 
 
+def test_parts_sum_to_total_on_a_rounding_boundary():
+    """Тождество «части = целое» обязано держаться и там, где округление
+    решает судьбу пятого знака. Прежний набор чисел до этой границы не
+    доставал, и равенство выполнялось по удаче, а не по устройству."""
+    book = book_with({("USD", date(2024, 1, 10)): "70.00005",
+                      ("USD", date(2026, 8, 13)): "80.00005"})
+    split = split_position(lots=[lot("100.00005", "3", date(2024, 1, 10))],
+                           price=price_at("120.00005", "USD"), price_currency="USD",
+                           cost_currency="USD", book=book, on_date=date(2026, 8, 13))
+    assert split.price_part + split.fx_part == split.total
+
+
 def test_short_position_keeps_its_sign():
     """У короткой позиции количество отрицательное: рост цены — убыток."""
     split = split_position(lots=[lot("100", "-10", date(2024, 1, 10))],

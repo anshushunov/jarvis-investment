@@ -42,6 +42,10 @@ def split_position(lots: list[OpenLot], price: LatestPrice | None, price_currenc
     Партии считаются по отдельности и складываются: у позиции, набранной за три
     года, единой даты покупки не существует, а курс на дату покупки — половина
     ответа.
+
+    Позиция без открытых партий (`lots` пуст) даёт нули, а не `None`: у неё
+    нет нереализованной прибыли, но это не тот же случай, что «прибыль
+    неизвестна» — `reason` в этом случае тоже `None`.
     """
     if price is None:
         return _unknown(REASON_NO_PRICE)
@@ -57,8 +61,8 @@ def split_position(lots: list[OpenLot], price: LatestPrice | None, price_currenc
     if rate_now is None:
         return _unknown(REASON_NO_RATE)
 
-    price_part = Decimal("0")
-    fx_part = Decimal("0")
+    raw_price_part = Decimal("0")
+    raw_fx_part = Decimal("0")
     for lot in lots:
         opened = moscow_date(lot.opened_at)
         rate_then = book.rate(cost_currency, opened)
@@ -66,8 +70,15 @@ def split_position(lots: list[OpenLot], price: LatestPrice | None, price_currenc
             return _unknown(REASON_NO_RATE)
 
         quantity = lot.quantity_left
-        price_part += quantity * (price.close - lot.price) * rate_then
-        fx_part += quantity * price.close * (rate_now - rate_then)
+        raw_price_part += quantity * (price.close - lot.price) * rate_then
+        raw_fx_part += quantity * price.close * (rate_now - rate_then)
 
-    return Split(price_part=money(price_part), fx_part=money(fx_part),
-                 total=money(price_part + fx_part), reason=None)
+    total = money(raw_price_part + raw_fx_part)
+    price_part = money(raw_price_part)
+    # Валютная часть получается вычитанием, а не собственным округлением:
+    # только так «части = целое» держится копейка в копейку при любых числах,
+    # а не на удачных. Остаток округления достаётся ей же — туда уже отнесён
+    # перекрёстный член (дизайн, раздел 4.4), и второе такое решение сюда не
+    # добавляется.
+    return Split(price_part=price_part, fx_part=total - price_part,
+                 total=total, reason=None)
