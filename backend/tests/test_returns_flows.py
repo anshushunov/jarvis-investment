@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone, tzinfo as TzInfo
 from decimal import Decimal
 from itertools import count
 
@@ -13,7 +13,8 @@ _ids = count(1)
 def add_tx(session, *, account_id: int, op_type: OperationType, day: date, amount: str,
            currency: str = "RUB", instrument_id: int | None = None,
            quantity: str = "0", price: str = "0", fee: str = "0",
-           payload: dict | None = None, at_hour: int = 12) -> Transaction:
+           payload: dict | None = None, at_hour: int = 12,
+           tz: TzInfo = MOSCOW_TZ) -> Transaction:
     """Запись журнала для теста. Тесты потоков поднимают данные ИЗ БАЗЫ, а не
     строят LedgerEntry в памяти: op_type приходит из строковой колонки, и
     сравнение с членом enum на объекте из памяти ничего не доказывает
@@ -21,7 +22,7 @@ def add_tx(session, *, account_id: int, op_type: OperationType, day: date, amoun
     number = next(_ids)
     tx = Transaction(
         account_id=account_id, instrument_id=instrument_id, op_type=op_type,
-        executed_at=datetime.combine(day, time(at_hour, 0), tzinfo=MOSCOW_TZ),
+        executed_at=datetime.combine(day, time(at_hour, 0), tzinfo=tz),
         quantity=Decimal(quantity), price=Decimal(price), amount=Decimal(amount),
         currency=currency, fee=Decimal(fee), external_id=f"ext-{number}",
         source="test", dedup_key=f"dedup-{number}", payload=payload or {},
@@ -155,9 +156,28 @@ def test_period_bounds_are_inclusive(session, account):
 
 
 def test_late_evening_operation_belongs_to_moscow_day(session, account):
-    """23:30 по Москве — это ещё сегодня, хотя по UTC уже 20:30. Дата потока
-    обязана считаться в том же поясе, что и дата снимка (app/timeutils.py)."""
+    """21:00 UTC — это уже 00:00 следующих суток по Москве (UTC+3). Дата потока
+    обязана считаться в том же поясе, что и дата снимка (app/timeutils.py), а
+    не совпадать с календарной датой хранимого момента."""
     add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
-           day=date(2024, 3, 1), amount="1000", at_hour=23)
+           day=date(2024, 3, 1), amount="1000", at_hour=21, tz=timezone.utc)
     flows = portfolio_flows(session, RateBook.load(session))
-    assert flows[0].on_date == date(2024, 3, 1)
+    assert flows[0].on_date == date(2024, 3, 2)
+
+
+def test_pairing_survives_a_same_account_lookalike(session, account):
+    """В один день на одном счёте два пополнения и вывод той же суммы: одно
+    пополнение — настоящая половина перевода с другого счёта, второе к нему
+    отношения не имеет. Подбор пары не должен зависеть от того, в каком порядке
+    записи легли в журнал."""
+    other = second_account(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 5, 20), amount="30000")
+    add_tx(session, account_id=other.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 5, 20), amount="30000")
+    add_tx(session, account_id=account.id, op_type=OperationType.WITHDRAWAL,
+           day=date(2024, 5, 20), amount="-30000")
+
+    flows = portfolio_flows(session, RateBook.load(session))
+    # Гасится пара «счёт 1 → счёт 2»; непарное пополнение остаётся вложением.
+    assert [flow.amount for flow in flows] == [Decimal("-30000.0000")]

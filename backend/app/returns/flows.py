@@ -68,7 +68,10 @@ def _paired_ids(moves: list[Transaction]) -> set[int]:
     валюте, на РАЗНЫХ счетах. Подбор жадный, каждая запись входит не более чем в
     одну пару. Замер 13.08.2026 на живых данных: за шесть лет таких пар две, и
     обе настоящие. Ложное срабатывание завысило бы доходность, приняв пополнение
-    за перекладывание, — поэтому условие узкое, а не «похоже по сумме».
+    за перекладывание, — поэтому условие узкое, а не «похоже по сумме». Для
+    каждого прихода ищем первый ещё не занятый расход с ДРУГИМ счётом, а не
+    берущийся по позиции: позиционное сопоставление теряло настоящую пару,
+    когда рядом лежала запись того же дня и суммы на том же счёте.
     """
     by_key: dict[tuple[date, str, Decimal], list[Transaction]] = {}
     for move in moves:
@@ -78,13 +81,19 @@ def _paired_ids(moves: list[Transaction]) -> set[int]:
     for group in by_key.values():
         incoming = [move for move in group if move.amount > 0]
         outgoing = [move for move in group if move.amount < 0]
-        for income, outcome in zip(incoming, outgoing):
-            if income.account_id == outcome.account_id:
-                # Один счёт — перекладывать некуда: это настоящие ввод и вывод,
-                # случайно совпавшие по сумме и дню.
-                continue
-            paired.add(income.id)
-            paired.add(outcome.id)
+        used_outcome_ids: set[int] = set()
+        for income in incoming:
+            for outcome in outgoing:
+                if outcome.id in used_outcome_ids:
+                    continue
+                if income.account_id == outcome.account_id:
+                    # Один счёт — перекладывать некуда: это настоящие ввод и
+                    # вывод, случайно совпавшие по сумме и дню.
+                    continue
+                used_outcome_ids.add(outcome.id)
+                paired.add(income.id)
+                paired.add(outcome.id)
+                break
     return paired
 
 
