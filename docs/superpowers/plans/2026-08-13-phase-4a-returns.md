@@ -1224,7 +1224,7 @@ def test_days_counts_calendar_span():
 def test_annualize_shrinks_a_short_period():
     """Два процента за месяц — это не двадцать четыре процента годовых, а
     двадцать семь: рост складывается сам с собой."""
-    assert abs(annualize(Decimal("0.02"), 30) - Decimal("0.2708")) < Decimal("0.001")
+    assert abs(annualize(Decimal("0.02"), 30) - Decimal("0.2724")) < Decimal("0.0001")
 
 
 def test_annualize_leaves_a_year_alone():
