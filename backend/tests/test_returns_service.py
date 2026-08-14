@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.models import DailySnapshot, FxRate, OperationType, Price
 from app.returns.service import (
+    MONEY_CLASSES,
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
@@ -337,6 +338,27 @@ def test_money_row_earns_the_revaluation_of_the_balance(session, account):
     assert row.metric.reason == "cash"
     # Разрезы сходятся с целым: бумаг нет, «Прочего» нет, всё в деньгах.
     assert row.metric.profit + report.unattributed.profit == report.portfolio.profit
+
+
+def test_money_row_does_not_swallow_an_unattributed_record(session, account):
+    """Строка «Деньги» считается по журналу, а не зеркалом посчитанных потоков.
+    Запись, которую разрез по бумагам не увидел (тип вне известных), обязана
+    остаться расхождением, а не превратиться в убыток денег: иначе «Расхождение
+    с прибылью портфеля» перестаёт ловить ошибки атрибуции вовсе."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 12), amount="100000")
+    add_tx(session, account_id=account.id, op_type=OperationType.ADJUSTMENT,
+           day=date(2026, 8, 12), amount="-7000")
+    add_snapshot(session, date(2026, 8, 12), "93000", by_class={"cash": "93000"})
+    add_snapshot(session, date(2026, 8, 13), "93000", by_class={"cash": "93000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("93000"), by_account_now={},
+                            by_class_now={"cash": Decimal("93000")})
+    row = next(row for row in report.by_asset_class if row.asset_class in MONEY_CLASSES)
+    # Деньги пришли и ушли по журналу: 100 000 − 7 000 = 93 000, столько и
+    # стоит остаток. Заработано ноль. Зеркальная формула показала бы −7 000.
+    assert row.metric.profit == Decimal("0.0000")
 
 
 def test_metal_balance_is_counted_in_the_money_row(session, account):

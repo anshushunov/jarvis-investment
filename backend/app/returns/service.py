@@ -22,6 +22,7 @@ from app.returns.flows import (
     CashFlow,
     Unattributed,
     account_flows,
+    cash_movement,
     instrument_flows,
     portfolio_flows,
     unattributed_flows,
@@ -432,7 +433,7 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     instrument_rows, by_class = _instrument_and_class_rows(
         session, book, period, chart, opening,
         [ledger_entries(session, account) for account in accounts], by_class_now,
-        incomplete, flows, unattributed)
+        incomplete, cash_movement(session, book, period.since, period.until))
 
     # Полных дней — столько, сколько снимков периода не попало в неполные.
     # Правило «какой день полный» живёт в `_incomplete_days` и только там: две
@@ -461,16 +462,15 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                                chart: list[DailySnapshot], opening: DailySnapshot | None,
                                journals: list[list[LedgerEntry]],
                                by_class_now: dict[str, Decimal],
-                               incomplete: frozenset[date] = frozenset(),
-                               outer_flows: list[CashFlow] | None = None,
-                               unattributed: Unattributed | None = None):
+                               incomplete: frozenset[date],
+                               movement: Decimal):
     """Строки по бумагам и по классам активов за один проход.
 
     Класс бумаги берётся сегодняшний: истории смены класса система не хранит, и
     выдумывать её здесь нельзя. Упрощение названо на экране.
 
-    `outer_flows` и `unattributed` нужны строке «Деньги»: её потоки — зеркало
-    всего остального (см. `_money_row`).
+    Все параметры обязательные: у функции один вызывающий, а забытое движение
+    денег дало бы неверную строку «Деньги» молча.
     """
     flows_by_instrument = instrument_flows(session, book, period.since, period.until)
 
@@ -561,10 +561,7 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                             value_now, _series(chart, pick), period, incomplete)
         by_class.append(AssetClassRow(asset_class=klass, metric=metric))
 
-    money_row = _money_row(
-        by_class_now, opening, period,
-        outer_flows or [], unattributed or Unattributed(*(Decimal("0"),) * 4),
-        [flow for flows in flows_by_instrument.values() for flow in flows])
+    money_row = _money_row(by_class_now, opening, movement)
     if money_row is not None:
         by_class.append(money_row)
 
@@ -572,17 +569,19 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
 
 
 def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
-               period: Period, outer_flows: list[CashFlow], unattributed: Unattributed,
-               trade_flows: list[CashFlow]) -> AssetClassRow | None:
+               movement: Decimal) -> AssetClassRow | None:
     """Строка «Деньги» — остатки и металлы одним периметром.
 
-    Прибыль считается так же, как у любого класса: стоимость на конец минус
-    стоимость на начало плюс потоки. Потоки денег — зеркало всего остального
-    (дизайн, раздел 4.2): пополнение владельца входит в периметр вложением,
-    покупка бумаги уходит из него изъятием, комиссия — тоже (её результат уже
-    посчитан строкой «Прочее», и второй раз его вычитать нельзя). Иначе
-    рублёвая переоценка валютного остатка не видна нигде: замер 14.08.2026 —
-    16 044,58 ₽ необъяснённого остатка при сходимости разрезов.
+    Прибыль считается независимо от всего остального отчёта: стоимость
+    периметра на конец минус стоимость на начало минус чистое движение денег по
+    журналу (`app/returns/flows.py::cash_movement`). Зеркало посчитанных
+    потоков — «внешние минус бумаги минус Прочее» — давало ту же величину, но
+    тождественно равную невязке разрезов: любая ошибка атрибуции молча
+    становилась прибылью денег, и расхождение переставало ловить что-либо
+    (дизайн, раздел 7: строка не свалка для остатка).
+
+    Без этой строки рублёвая переоценка валютного остатка не видна нигде: замер
+    14.08.2026 — 16 044,58 ₽ необъяснённого остатка при сходимости разрезов.
 
     Доходности у денег нет и не будет: решение владельца № 3. Остаток не растёт
     сам, а проценты на него приходят записями без бумаги — они в «Прочем».
@@ -592,10 +591,7 @@ def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
     value_start = sum(
         (_series_start(opening, lambda row, key=klass: (row.by_asset_class or {}).get(key))
          for klass in MONEY_CLASSES), Decimal("0"))
-    mirrored = (sum((flow.amount for flow in outer_flows), Decimal("0"))
-                - sum((flow.amount for flow in trade_flows), Decimal("0"))
-                - unattributed.profit)
-    profit = money(value_now - value_start + mirrored)
+    profit = money(value_now - value_start - movement)
 
     if not value_now and not value_start and not profit:
         # Денег в портфеле нет вовсе — строки тоже быть не должно: пустая строка

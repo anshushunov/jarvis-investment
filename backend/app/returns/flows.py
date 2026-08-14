@@ -137,32 +137,67 @@ def account_flows(session: Session, book: RateBook, account_id: int,
     return flows
 
 
+def _journal_rows(session: Session) -> list[Transaction]:
+    """Весь журнал по порядку. Денежный периметр считается по нему целиком, а
+    не по известным типам операций: запись неизвестного типа, двигающая деньги,
+    обязана остаться расхождением, а не потеряться."""
+    return list(session.execute(
+        select(Transaction).order_by(Transaction.executed_at, Transaction.id)
+    ).scalars().all())
+
+
+def cash_movement(session: Session, book: RateBook, since: date | None = None,
+                  until: date | None = None) -> Decimal:
+    """Чистое движение денег за период, в рублях: сколько денег пришло в
+    денежный периметр и сколько ушло. Положительное — пришло.
+
+    Считается прямой суммой по журналу, а НЕ зеркалом посчитанных потоков
+    («внешние потоки минус потоки бумаг минус Прочее»). Зеркало тождественно
+    равно невязке разрезов: любая ошибка атрибуции по бумагам молча становилась
+    прибылью денег, и «Расхождение с прибылью портфеля» переставало ловить
+    что-либо вовсе (дизайн, раздел 7: строка не свалка для остатка).
+
+    Правило движения — то же, что у движка позиций (`app/positions/engine.py`:
+    `cash[currency] + entry.amount - entry.fee`), второго правила в проекте нет.
+
+    Конверсии исключены: перекладывание рублей в юани или в золото остаётся
+    внутри периметра, а записан у него только один бок — рублёвый, и сумма
+    приняла бы обмен за уход денег на все 1,5 млн ₽ живого журнала.
+    """
+    total = Decimal("0")
+    for row in _journal_rows(session):
+        if _is_conversion(row):
+            continue
+        day = moscow_date(row.executed_at)
+        if not _in_period(day, since, until):
+            continue
+        moved = book.to_base(row.amount - row.fee, row.currency, day)
+        if moved is not None:
+            total += moved
+    return total
+
+
 def unconverted_flows(session: Session, book: RateBook) -> list[str]:
     """Валюты потоков, которым не нашлось курса на их дату.
 
-    Периметра два, и оба обязаны быть названы. Молча выпавшее движение денег
-    (`_cash_moves`) завышает доходность портфеля ровно на свою величину.
-    Молча выпавшая сделка или выплата (`_result_rows`) — например, покупка в
-    валюте без курса на её день — исчезает из потока бумаги, и сумма по
-    бумагам перестаёт сходиться с прибылью портфеля на ту же величину. Ни то,
-    ни другое не видно на экране никак, если не назвать валюту явно.
+    Смотрится весь журнал, а не известные типы операций: молча выпавшее
+    движение денег завышает доходность портфеля ровно на свою величину; молча
+    выпавшая сделка исчезает из потока бумаги, и сумма по бумагам перестаёт
+    сходиться с портфелем на ту же величину; молча выпавшая запись любого
+    другого типа искажает строку «Деньги», которая считается по журналу
+    целиком (`cash_movement`). Ни одно из трёх не видно на экране никак, если
+    не назвать валюту явно.
 
     Конверсии сюда не попадают: они исключены из расчёта решением, а не
     отсутствием курса, и жаловаться на их валюту значило бы поднимать тревогу
     там, где ничего не потеряно.
     """
-    missing = {
-        move.currency.upper()
-        for move in _cash_moves(session)
-        if book.rate(move.currency, moscow_date(move.executed_at)) is None
-    }
-    missing |= {
+    return sorted({
         row.currency.upper()
-        for row in _result_rows(session)
+        for row in _journal_rows(session)
         if not _is_conversion(row)
         and book.rate(row.currency, moscow_date(row.executed_at)) is None
-    }
-    return sorted(missing)
+    })
 
 
 # Типы, движущие деньги внутри периметра: они не капитал владельца, а результат
