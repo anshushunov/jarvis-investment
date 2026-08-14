@@ -33,6 +33,10 @@ export function PortfolioPage() {
     queryFn: () => api.history(days || undefined),
   });
   const reconciliations = useQuery({ queryKey: ["reconciliations"], queryFn: api.reconciliations });
+  // Тот же обработчик и тот же ключ кэша, что на «Аналитике» (period="all"):
+  // отдельной ручки под две цифры не существует, а TanStack Query отдаёт
+  // ответ из кэша при переходе между экранами вместо повторного запроса.
+  const returns = useQuery({ queryKey: ["returns", "all"], queryFn: () => api.returns("all") });
 
   if (overview.isLoading) return <CardState kind="loading">Загрузка…</CardState>;
   if (overview.isError) {
@@ -73,7 +77,7 @@ export function PortfolioPage() {
           переносилось на вторую строку. */}
       <div className="grid grid-cols-[2fr_3fr] gap-3.5">
         <div className="grid gap-3.5">
-          <SummaryCard overview={overview.data!} />
+          <SummaryCard overview={overview.data!} returns={returns.data?.portfolio ?? null} />
           <CashCard rows={cash.data ?? []} error={cashError} loading={cash.isPending} />
         </div>
         <ValueChart

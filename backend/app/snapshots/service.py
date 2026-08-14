@@ -84,6 +84,28 @@ def snapshot_account_ids(snapshots: list[DailySnapshot]) -> set[int]:
     }
 
 
+def snapshot_account_values(snapshot: DailySnapshot) -> dict[int, Decimal]:
+    """Разбивка снимка по счетам, ключ — идентификатор счёта.
+
+    Живёт здесь по той же причине, что и `snapshot_account_ids`: правило «ключ
+    `by_account` — это строковый идентификатор счёта» знает пишущая сторона
+    (`store_snapshot`), и третье его изложение — теперь в расчёте доходности
+    (`app/returns/service.py`) — разъехалось бы с первыми двумя ровно тогда,
+    когда формат ключа поменяется.
+
+    Отличается от `snapshot_by_account` вопросом, а не реализацией: там нужна
+    подпись для показа, здесь — ряд стоимостей одного счёта по датам, который
+    подписывать нечем и незачем. Ключи старого формата (готовая подпись) сюда
+    не попадают: сопоставить их со счётом нельзя, а угадывать по имени значило
+    бы склеить два счёта с одинаковым названием.
+    """
+    return {
+        int(key): Decimal(value)
+        for key, value in (snapshot.by_account or {}).items()
+        if _is_account_id(key)
+    }
+
+
 def snapshot_by_account(accounts: dict[int, Account], snapshot: DailySnapshot) -> dict[str, Decimal]:
     """Разбивка снимка по счетам, подписанная для показа.
 
