@@ -18,7 +18,6 @@ from app.returns.xirr import DAYS_IN_YEAR, Flow, xirr
 PERIOD_ALL = "all"
 PERIOD_12M = "12m"
 PERIOD_YTD = "ytd"
-PERIODS = (PERIOD_ALL, PERIOD_12M, PERIOD_YTD)
 
 # Причины отсутствия числа. Каждая переводится в слова на экране.
 REASON_NO_FLOWS = "no_flows"
@@ -88,12 +87,6 @@ def period_bounds(period_key: str, today: date, first_day: date | None) -> Perio
 
     length = (today - since).days if since is not None else 0
     return Period(key=period_key, since=since, until=today, annualized=length >= DAYS_IN_YEAR)
-
-
-def period_days(period: Period) -> int:
-    if period.since is None:
-        return 0
-    return (period.until - period.since).days
 
 
 def over_period(rate: Decimal, days: int) -> Decimal | None:

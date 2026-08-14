@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.db import get_session
 from app.ledger.schemas import RawOperation
+from app.main import app
 from app.models import Account, Base, OperationType
 
 ADMIN_URL = os.environ.get("TEST_ADMIN_URL", "postgresql+psycopg://jarvis:jarvis@localhost:5433/postgres")
@@ -38,6 +41,20 @@ def session(test_engine):
     if transaction.is_active:
         transaction.rollback()
     connection.close()
+
+
+@pytest.fixture
+def client(session):
+    """Клиент API поверх тестовой сессии.
+
+    Живёт здесь, а не в tests/test_api.py: фикстура нужна и тестам доходности
+    (tests/test_returns_api.py), и импортировать её из чужого файла тестов —
+    значит тянуть за собой весь его модуль ради одной строки. Место фикстуры,
+    у которой больше одного потребителя, — conftest.
+    """
+    app.dependency_overrides[get_session] = lambda: session
+    yield TestClient(app)
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

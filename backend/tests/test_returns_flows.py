@@ -146,6 +146,19 @@ def test_flow_without_rate_is_reported_not_dropped(session, account):
     assert unconverted_flows(session, book) == ["HKD"]
 
 
+def test_currency_outside_the_period_is_not_reported(session, account):
+    """Покрытие показывается рядом с цифрой ЗА ПЕРИОД, и жаловаться на валюту,
+    потоков в которой в этом периоде не было, — тревога о числе, на которое она
+    не влияет: «с начала года» винил гонконгский доллар за сделку 2021 года."""
+    from app.returns.flows import unconverted_flows
+
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2021, 6, 1), amount="1000", currency="HKD")
+    book = RateBook.load(session)
+    assert unconverted_flows(session, book, date(2026, 1, 1), date(2026, 8, 13)) == []
+    assert unconverted_flows(session, book, date(2021, 1, 1), date(2021, 12, 31)) == ["HKD"]
+
+
 def test_period_bounds_are_inclusive(session, account):
     for day in (date(2024, 1, 1), date(2024, 6, 1), date(2024, 12, 31)):
         add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,

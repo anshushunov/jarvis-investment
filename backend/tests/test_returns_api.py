@@ -1,7 +1,6 @@
 from datetime import date
 
 from app.models import OperationType
-from tests.test_api import client
 from tests.test_returns_flows import add_tx
 from tests.test_returns_service import add_snapshot
 

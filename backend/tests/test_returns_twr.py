@@ -6,7 +6,7 @@ from app.returns.twr import annualize, twr
 
 
 def flow(day: date, amount: str) -> CashFlow:
-    return CashFlow(on_date=day, amount=Decimal(amount), account_id=1, transaction_id=1)
+    return CashFlow(on_date=day, amount=Decimal(amount))
 
 
 def test_growth_without_flows_is_plain_growth():

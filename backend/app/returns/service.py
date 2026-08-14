@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session
 from app.analytics.service import portfolio_overview
 from app.models import Account, DailySnapshot
 from app.returns.breakdown import (  # noqa: F401 — часть публичного лица пакета
-    MONEY_CLASSES,
     MONEY_ROW_CLASS,
     AssetClassRow,
     InstrumentRow,
@@ -41,7 +40,6 @@ from app.returns.metrics import (  # noqa: F401 — часть публично�
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
-    PERIODS,
     REASON_CASH,
     REASON_EMPTY_PERIOD,
     REASON_NO_FLOWS,
@@ -231,7 +229,8 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
         unpriced=list(last.unpriced or []) if last else [],
         chain_breaks=chain.breaks,
         chain_days=chain.days,
-        currencies_without_rate=unconverted_flows(session, book),
+        currencies_without_rate=unconverted_flows(session, book, period.since,
+                                                  period.until),
     )
 
     return ReturnsReport(

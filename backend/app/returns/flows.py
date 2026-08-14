@@ -27,12 +27,16 @@ CASH_MOVE_TYPES = {OperationType.DEPOSIT, OperationType.WITHDRAWAL}
 class CashFlow:
     """Денежный поток периметра, в рублях. Знак — с точки зрения владельца:
     вложение отрицательно, изъятие положительно. Это ровно минус движение денег
-    на счёте: пополнение счёта — вложение владельца."""
+    на счёте: пополнение счёта — вложение владельца.
+
+    Дата и сумма — всё, что нужно и XIRR, и цепочке TWR, и прибыли. Счёт и
+    запись журнала здесь лежали и не читались никем: периметр, к которому поток
+    относится, задаёт та функция, которая его собрала (`account_flows`,
+    `instrument_flows`), а не поле внутри потока.
+    """
 
     on_date: date
     amount: Decimal
-    account_id: int
-    transaction_id: int
 
 
 def _is_cash_move(transaction: Transaction) -> bool:
@@ -104,8 +108,7 @@ def _to_flow(transaction: Transaction, book: RateBook) -> CashFlow | None:
     in_base = book.to_base(-transaction.amount, transaction.currency, day)
     if in_base is None:
         return None
-    return CashFlow(on_date=day, amount=in_base, account_id=transaction.account_id,
-                    transaction_id=transaction.id)
+    return CashFlow(on_date=day, amount=in_base)
 
 
 def portfolio_flows(session: Session, book: RateBook, since: date | None = None,
@@ -171,14 +174,24 @@ def cash_movement(session: Session, book: RateBook, since: date | None = None,
         day = moscow_date(row.executed_at)
         if not _in_period(day, since, until):
             continue
-        moved = book.to_base(row.amount - row.fee, row.currency, day)
+        # abs(fee) — как в трёх соседних местах (_trade_flow, движок позиций,
+        # прогон сверки): комиссия хранится положительной величиной и ВСЕГДА
+        # уменьшает движение. Знак минус у неё в журнале означал бы возврат
+        # комиссии, а `- row.fee` молча превратил бы такой возврат в списание.
+        moved = book.to_base(row.amount - abs(row.fee), row.currency, day)
         if moved is not None:
             total += moved
     return total
 
 
-def unconverted_flows(session: Session, book: RateBook) -> list[str]:
-    """Валюты потоков, которым не нашлось курса на их дату.
+def unconverted_flows(session: Session, book: RateBook, since: date | None = None,
+                      until: date | None = None) -> list[str]:
+    """Валюты потоков ПЕРИОДА, которым не нашлось курса на их дату.
+
+    Границы обязательны по смыслу: покрытие показывается рядом с цифрой за
+    период, и валюта, потоков в которой в этом периоде не было вовсе, поднимала
+    бы тревогу о числе, на которое она не влияет. «С начала года» жаловался на
+    гонконгский доллар из-за сделки 2021 года.
 
     Смотрится весь журнал, а не известные типы операций: молча выпавшее
     движение денег завышает доходность портфеля ровно на свою величину; молча
@@ -196,6 +209,7 @@ def unconverted_flows(session: Session, book: RateBook) -> list[str]:
         row.currency.upper()
         for row in _journal_rows(session)
         if not _is_conversion(row)
+        and _in_period(moscow_date(row.executed_at), since, until)
         and book.rate(row.currency, moscow_date(row.executed_at)) is None
     })
 
@@ -203,6 +217,34 @@ def unconverted_flows(session: Session, book: RateBook) -> list[str]:
 # Типы, движущие деньги внутри периметра: они не капитал владельца, а результат
 # и издержки. В потоки бумаги входят все, привязанные к ней; непривязанные
 # собираются отдельной строкой (см. unattributed_flows).
+#
+# ЧЕГО ЗДЕСЬ НЕТ И КУДА ДЕВАЮТСЯ СУММЫ ЭТИХ ЗАПИСЕЙ:
+#
+# - DEPOSIT и WITHDRAWAL — не результат, а капитал владельца: они и есть потоки
+#   портфеля (`portfolio_flows`), и попасть сюда не могут по смыслу. Войди они
+#   в поток бумаги — пополнение счёта стало бы её убытком.
+# - TRANSFER_IN/TRANSFER_OUT, CONVERSION_IN/CONVERSION_OUT — движение
+#   КОЛИЧЕСТВА, не денег: перевод бумаг от другого брокера и две стороны
+#   корпоративного действия (`app/decisions/service.py`). Денег они не несут, а
+#   результат такого события виден стоимостью позиции — сама бумага никуда не
+#   девалась.
+# - ADJUSTMENT — корректировка операции, переписанной брокером задним числом
+#   (`app/ledger/service.py::_correction_for`). Такая запись создаётся с
+#   `instrument_id` исходной операции и НЕСЁТ настоящую денежную разницу
+#   переписанной сделки, а порождается каждой синхронизацией.
+#
+# Сумма записи, не попавшей в RESULT_TYPES, не теряется молча и не оседает в
+# строке «Деньги»: `cash_movement` читает журнал целиком, поэтому в прибыли
+# денежного периметра она взаимно уничтожается (пришла на счёт — и учтена как
+# движение), в поток бумаги не входит, в «Прочее» тоже. В прибыли портфеля она
+# при этом есть — портфель считается по стоимости и внешним потокам. Значит,
+# ненулевая сумма такой записи выходит наружу «Расхождением с прибылью
+# портфеля» в прогоне (`app/returns/check.py`) — видимой, а не спрятанной.
+#
+# Замер 14.08.2026: в журнале один ADJUSTMENT, и он с нулевой суммой (решение
+# владельца № 2 — поправка количества), поэтому сегодня цифры верны. Должен ли
+# ADJUSTMENT с ненулевой суммой входить в поток своей бумаги — решение
+# владельца, а не уборка: оно меняет прибыль конкретных бумаг задним числом.
 RESULT_TYPES = {
     OperationType.BUY, OperationType.SELL, OperationType.DIVIDEND,
     OperationType.COUPON, OperationType.AMORTIZATION, OperationType.REDEMPTION,
@@ -265,8 +307,7 @@ def _trade_flow(transaction: Transaction, book: RateBook) -> CashFlow | None:
     in_base = book.to_base(total, transaction.currency, day)
     if in_base is None:
         return None
-    return CashFlow(on_date=day, amount=in_base, account_id=transaction.account_id,
-                    transaction_id=transaction.id)
+    return CashFlow(on_date=day, amount=in_base)
 
 
 def instrument_flows(session: Session, book: RateBook, since: date | None = None,
