@@ -1551,8 +1551,15 @@ def split_position(lots: list[OpenLot], price: LatestPrice | None, price_currenc
         price_part += quantity * (price.close - lot.price) * rate_then
         fx_part += quantity * price.close * (rate_now - rate_then)
 
-    return Split(price_part=money(price_part), fx_part=money(fx_part),
-                 total=money(price_part + fx_part), reason=None)
+    total = money(price_part + fx_part)
+    price_in_base = money(price_part)
+    # Валютная часть получается вычитанием, а не собственным округлением:
+    # только так «части = целое» держится копейка в копейку при любых числах, а
+    # не на удачных. Остаток округления достаётся ей же — туда уже отнесён
+    # перекрёстный член (дизайн, раздел 4.4), и второго такого решения здесь не
+    # появляется.
+    return Split(price_part=price_in_base, fx_part=total - price_in_base,
+                 total=total, reason=None)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
