@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.money import money
+from app.returns.flows import instrument_flows
+from app.returns.rates import RateBook
 from app.returns.service import PERIOD_12M, PERIOD_ALL, PERIOD_YTD, returns_report
 
 PERIOD_TITLES = {PERIOD_ALL: "всё время", PERIOD_12M: "12 месяцев", PERIOD_YTD: "с начала года"}
@@ -56,7 +58,37 @@ def check_returns(session: Session) -> list[str]:
                      f"{report.unattributed.taxes} ₽, прочее {report.unattributed.other} ₽): "
                      f"{report.unattributed.profit} ₽")
         lines.append(f"Сумма по бумагам {money(instruments_profit)} ₽ + Прочее = {parts} ₽")
-        lines.append(f"Расхождение с прибылью портфеля: {money(parts - report.portfolio.profit)} ₽")
+        mismatch = money(parts - report.portfolio.profit)
+        lines.append(f"Расхождение с прибылью портфеля: {mismatch} ₽")
+
+        # Признак готовности, пункт 3: расхождение обязано объясняться поимённо,
+        # а не оставаться невязкой. Бумага, прибыль которой посчитать нечем,
+        # выпадает из суммы целиком — и называется здесь вместе с причиной и
+        # своей стоимостью, чтобы остаток читался списком причин, а не одним
+        # числом. На живых данных это четыре редомицилированные бумаги, чья
+        # цена лежит под новым тикером.
+        unknown = [row for row in report.by_instrument if row.profit is None]
+        if unknown:
+            lines.append(f"Прибыль не посчитана у бумаг ({len(unknown)}):")
+            moves = instrument_flows(session, RateBook.load(session),
+                                     period.since, period.until)
+            explained = Decimal("0")
+            for row in unknown:
+                moved = sum((flow.amount for flow in moves.get(row.instrument_id, [])),
+                            Decimal("0"))
+                # Вклад — то, что сумма по бумагам получила бы, посчитай мы
+                # бумагу по известным частям: потоки периода плюс сегодняшняя
+                # стоимость. У бумаги без начальной стоимости (no_history) он
+                # завышен ровно на неё — она неизвестна, потому строка и здесь.
+                known = moved + (row.value or Decimal("0"))
+                explained += known
+                value = f"{row.value} ₽" if row.value is not None else "стоимость неизвестна"
+                lines.append(f"  {row.name} ({row.reason}): потоки {money(moved)} ₽, "
+                             f"{value} → вклад {money(known)} ₽")
+            lines.append(f"Названные бумаги объясняют {money(-explained)} ₽ расхождения; "
+                         f"остаётся {money(mismatch + explained)} ₽")
+        else:
+            lines.append("Прибыль посчитана у всех бумаг разреза")
 
         # Признак готовности, пункт 2: части сверяются с НЕРЕАЛИЗОВАННОЙ
         # прибылью, а не с прибылью за период. Прежняя проверка сравнивала
