@@ -6,9 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.analytics.service import (
-    CASH_CLASS,
     METAL_CURRENCIES,
     asset_class_of,
+    cash_asset_class,
     portfolio_overview,
 )
 from app.analytics.valuation import value_position
@@ -48,9 +48,14 @@ REASON_SERIES_GAPS = "series_gaps"
 REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
 
-# Классы денежных остатков: рубли, валюта и металлы. Какой класс денежный,
-# решает `app/analytics/service.py::cash_asset_class` — здесь только перечень
-# его ответов, второго правила в проекте не заводится.
+# Классы денежных остатков: рубли, валюта и металлы. Имена не перечисляются —
+# их отвечает `app/analytics/service.py::cash_asset_class`, тот же, кто их
+# расставляет живому портфелю. Совпадение по имени доверия не заслуживает:
+# `asset_class_of` возвращает те же `cash` и `gold` инструментам вида «валюта»
+# и «металл», а `portfolio_overview` кладёт бумаги и остатки в один
+# `by_asset_class`. Сегодняшняя стоимость периметра поэтому берётся из
+# `Overview.cash_value` (только остатки), а не суммой по этим ключам; в
+# исторических снимках другого источника нет, и там ограничение остаётся.
 #
 # В разрезе доходности все они — один периметр и одна строка. Отделить
 # перекладывание рублей в золото от покупки валюты нечем: и то и другое лежит в
@@ -58,7 +63,8 @@ REASON_CASH = "cash"
 # среди 498 конверсий валюты, отличает их только название от брокера). Отдельная
 # строка золота показала бы прибылью всю его стоимость — 117 130 ₽ вместо
 # настоящих 33 443 ₽.
-MONEY_CLASSES = frozenset({CASH_CLASS, *METAL_CURRENCIES.values()})
+MONEY_CLASSES = frozenset(
+    cash_asset_class(currency) for currency in (BASE_CURRENCY, *METAL_CURRENCIES))
 
 # Ключ строки «Деньги и металлы» в разрезе по классам. Собственный, а не `cash`:
 # под именем «Деньги» лежало бы ещё и золото — 117 130 ₽ живого портфеля, —
@@ -380,7 +386,8 @@ def _position_value(lots: list[OpenLot], price: LatestPrice | None,
 def returns_report(session: Session, period_key: str, today: date | None = None,
                    value_now: Decimal | None = None,
                    by_account_now: dict[int, Decimal] | None = None,
-                   by_class_now: dict[str, Decimal] | None = None) -> ReturnsReport:
+                   by_class_now: dict[str, Decimal] | None = None,
+                   cash_now: Decimal | None = None) -> ReturnsReport:
     """Отчёт о доходности за период.
 
     Сегодняшние стоимости приходят параметрами, а не считаются здесь: их уже
@@ -389,13 +396,24 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     бы разный капитал в один и тот же момент. Значения по умолчанию берутся из
     него же — параметры существуют ради тестов и ради вызова из обработчика
     одним куском.
+
+    `cash_now` — стоимость денежного периметра по источнику (`Overview.
+    cash_value`: остатки и металлы, без единой бумаги). Сумма по ключам
+    `by_asset_class` для этого не годится: те же имена классов возвращает
+    `asset_class_of` для инструментов вида «валюта» и «металл», и появись такой
+    в журнале — его стоимость посчиталась бы дважды.
     """
     today = today or moscow_today()
-    if value_now is None or by_account_now is None or by_class_now is None:
+    if (value_now is None or by_account_now is None or by_class_now is None
+            or cash_now is None):
+        # Обзор считается один раз, но заполняет только то, чего не передали:
+        # переданное значение не перетирается — тест, назвавший стоимость и
+        # умолчавший об остатке, получал бы пустой портфель молча.
         overview = portfolio_overview(session)
-        value_now = overview.total_value
-        by_account_now = overview.by_account
-        by_class_now = overview.by_asset_class
+        value_now = overview.total_value if value_now is None else value_now
+        by_account_now = overview.by_account if by_account_now is None else by_account_now
+        by_class_now = overview.by_asset_class if by_class_now is None else by_class_now
+        cash_now = overview.cash_value if cash_now is None else cash_now
 
     period = period_bounds(period_key, today, _first_snapshot_day(session))
     book = RateBook.load(session)
@@ -439,7 +457,7 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     instrument_rows, by_class = _instrument_and_class_rows(
         session, book, period, chart, opening,
         [ledger_entries(session, account) for account in accounts], by_class_now,
-        incomplete, cash_movement(session, book, period.since, period.until))
+        incomplete, cash_movement(session, book, period.since, period.until), cash_now)
 
     # Полных дней — столько, сколько снимков периода не попало в неполные.
     # Правило «какой день полный» живёт в `_incomplete_days` и только там: две
@@ -469,7 +487,7 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                                journals: list[list[LedgerEntry]],
                                by_class_now: dict[str, Decimal],
                                incomplete: frozenset[date],
-                               movement: Decimal):
+                               movement: Decimal, cash_now: Decimal):
     """Строки по бумагам и по классам активов за один проход.
 
     Класс бумаги берётся сегодняшний: истории смены класса система не хранит, и
@@ -567,14 +585,14 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                             value_now, _series(chart, pick), period, incomplete)
         by_class.append(AssetClassRow(asset_class=klass, metric=metric))
 
-    money_row = _money_row(by_class_now, opening, movement)
+    money_row = _money_row(cash_now, opening, movement)
     if money_row is not None:
         by_class.append(money_row)
 
     return rows, sorted(by_class, key=lambda row: row.asset_class)
 
 
-def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
+def _money_row(value_now: Decimal, opening: DailySnapshot | None,
                movement: Decimal) -> AssetClassRow | None:
     """Строка «Деньги» — остатки и металлы одним периметром.
 
@@ -592,8 +610,6 @@ def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
     Доходности у денег нет и не будет: решение владельца № 3. Остаток не растёт
     сам, а проценты на него приходят записями без бумаги — они в «Прочем».
     """
-    value_now = sum((by_class_now.get(klass, Decimal("0")) for klass in MONEY_CLASSES),
-                    Decimal("0"))
     value_start = sum(
         (_series_start(opening, lambda row, key=klass: (row.by_asset_class or {}).get(key))
          for klass in MONEY_CLASSES), Decimal("0"))
