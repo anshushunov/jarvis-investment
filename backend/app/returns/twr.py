@@ -16,14 +16,26 @@ ONE_DAY = timedelta(days=1)
 
 @dataclass(frozen=True)
 class Chain:
-    """Результат цепочки. `breaks` — сколько шагов выпало из неё: у них не было
-    базы для сравнения (нулевая или отрицательная стоимость накануне) либо один
-    из концов оценён не полностью. Число важнее самой ставки: цепочка с
-    разрывами отвечает на вопрос лишь частично, и молчать об этом нельзя."""
+    """Результат цепочки.
+
+    `days` — сколько дней цепочка ДЕЙСТВИТЕЛЬНО измерила, а не размах ряда:
+    сумма длин учтённых шагов. Это единственная длительность, по которой можно
+    приводить доходность к году. Замер 14.08.2026: цепочка измерила 444 дня,
+    все до 04.05.2022, а результат растягивался на 2220 дней — владельцу
+    показывалась уверенная годовая ставка, посчитанная по пятой части периода
+    и по худшему его куску.
+
+    `breaks` — сколько шагов выпало из цепочки всего. `gaps` и `unvalued` —
+    из-за чего именно: дыра в ряду (соседние точки не соседние дни) и неполная
+    оценка дня. Причины разные, и владельцу они говорят разное: «ряд с дырами»
+    против «не хватает цен».
+    """
 
     rate: Decimal | None
     days: int
     breaks: int
+    gaps: int = 0
+    unvalued: int = 0
 
 
 def twr(values: list[tuple[date, Decimal]], flows: list[CashFlow],
@@ -57,8 +69,8 @@ def twr(values: list[tuple[date, Decimal]], flows: list[CashFlow],
         by_day[flow.on_date] = by_day.get(flow.on_date, Decimal("0")) + flow.amount
 
     product = Decimal("1")
-    breaks = 0
-    measured = 0
+    breaks = gaps = unvalued = 0
+    measured_days = 0
     for (previous_day, previous), (day, current) in zip(ordered, ordered[1:]):
         if day - previous_day != ONE_DAY:
             # Соседние точки ряда — не соседние дни: между ними дыра, а в ней
@@ -68,6 +80,7 @@ def twr(values: list[tuple[date, Decimal]], flows: list[CashFlow],
             # внутри дыры. Цепочка приняла её за падение в ноль и дала −100 %
             # при стоимости 4,97 млн ₽.
             breaks += 1
+            gaps += 1
             continue
         if previous_day in incomplete or day in incomplete:
             # День с неполной оценкой выпадает и как измеряемая величина, и как
@@ -75,6 +88,7 @@ def twr(values: list[tuple[date, Decimal]], flows: list[CashFlow],
             # провалом, потом мнимым отскоком, — и перемножение этой пары
             # ошибку не гасит, а закрепляет.
             breaks += 1
+            unvalued += 1
             continue
         base = previous - by_day.get(day, Decimal("0"))
         if base <= 0:
@@ -83,25 +97,28 @@ def twr(values: list[tuple[date, Decimal]], flows: list[CashFlow],
             breaks += 1
             continue
         product *= current / base
-        measured += 1
+        measured_days += (day - previous_day).days
 
-    days = (ordered[-1][0] - ordered[0][0]).days
-    if measured == 0:
+    if measured_days == 0:
         # Ни одного измеренного шага: цепочка не «дала ноль», а не построилась
         # вовсе. Ноль здесь утверждал бы, что портфель ничего не заработал, —
         # это ответ, а не его отсутствие, и на живых данных он был бы ложью:
         # с августа 2025 полной оценки нет ни у одного дня.
-        return Chain(rate=None, days=days, breaks=breaks)
-    return Chain(rate=(product - Decimal("1")).quantize(PRECISION), days=days,
-                 breaks=breaks)
+        return Chain(rate=None, days=0, breaks=breaks, gaps=gaps, unvalued=unvalued)
+    return Chain(rate=(product - Decimal("1")).quantize(PRECISION), days=measured_days,
+                 breaks=breaks, gaps=gaps, unvalued=unvalued)
 
 
 def annualize(rate: Decimal, days: int) -> Decimal:
-    """Пересчёт доходности за период в годовую.
+    """Пересчёт доходности за измеренное время в годовую.
 
-    Применяется только к периодам от года: на более коротких результат врёт
-    кратно (два процента за месяц превращаются в двадцать семь годовых), и
-    служба показывает такую доходность как есть, с подписью «за период».
+    `days` — измеренное цепочкой время (`Chain.days`), а не длина периода:
+    доходность, собранная за год из шести, — годовая ставка того года, и
+    растягивать её на шесть лет значит выдать чужую длительность за свою.
+
+    Применяется только от года и больше: на более коротком измеренном времени
+    результат врёт кратно (два процента за месяц превращаются в двадцать семь
+    годовых), и служба показывает величину как есть, с подписью «за период».
     """
     if days <= 0:
         return rate.quantize(PRECISION)

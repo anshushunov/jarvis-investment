@@ -52,7 +52,8 @@ def check_returns(session: Session) -> list[str]:
         lines.append(f"Покрытие: полная оценка у {coverage.days_valued} дат из "
                      f"{coverage.days_total}; позиций оценено "
                      f"{coverage.positions_valued} из {coverage.positions_total}; "
-                     f"разрывов цепочки TWR {coverage.chain_breaks}")
+                     f"цепочка TWR измерила {coverage.chain_days} дней, "
+                     f"разрывов {coverage.chain_breaks}")
         if coverage.currencies_without_rate:
             lines.append("Потоки без курса: " + ", ".join(coverage.currencies_without_rate))
 

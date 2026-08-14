@@ -123,9 +123,32 @@ def test_empty_series_has_no_chain():
     assert twr([], []).rate is None
 
 
-def test_days_counts_calendar_span():
-    values = [(date(2024, 1, 1), Decimal("100")), (date(2024, 12, 31), Decimal("120"))]
-    assert twr(values, []).days == 365
+def test_days_counts_only_measured_steps():
+    """`days` — измеренное время, а не размах ряда. Замер 14.08.2026: цепочка
+    измерила 444 дня, все до 04.05.2022, а ставка растягивалась на 2220 дней —
+    доходность худшего куска истории выдавалась за доходность шести лет."""
+    values = [
+        (date(2024, 1, 1), Decimal("100")),
+        (date(2024, 1, 2), Decimal("110")),
+        (date(2024, 1, 3), Decimal("121")),
+        (date(2024, 12, 31), Decimal("130")),
+    ]
+    chain = twr(values, [])
+    assert chain.days == 2
+    assert chain.breaks == 1
+    assert chain.gaps == 1
+
+
+def test_measured_time_ignores_days_dropped_for_coverage():
+    values = [
+        (date(2024, 1, 1), Decimal("100")),
+        (date(2024, 1, 2), Decimal("110")),
+        (date(2024, 1, 3), Decimal("121")),
+    ]
+    chain = twr(values, [], incomplete={date(2024, 1, 2)})
+    assert chain.days == 0
+    assert chain.unvalued == 2
+    assert chain.gaps == 0
 
 
 def test_annualize_shrinks_a_short_period():

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from app.models import DailySnapshot, FxRate, OperationType, Price
@@ -254,6 +254,29 @@ def test_unknown_coverage_is_not_treated_as_full(session, account):
                             value_now=Decimal("40000"), by_account_now={},
                             by_class_now={})
     assert report.coverage.chain_breaks == 1
+    assert report.portfolio.twr == Decimal("0.1000")
+
+
+def test_twr_is_annualized_by_measured_time_not_by_span(session, account):
+    """Цепочка измерила год из полутора — значит и в годовые её приводит этот
+    год, а не размах ряда. Замер 14.08.2026: измерено 444 дня, все до
+    04.05.2022, а ставка растягивалась на 2220 дней, и доходность худшего куска
+    истории выдавалась за доходность шести лет."""
+    start = date(2025, 1, 1)
+    # Год подряд идущих полных дней: рост ровно на 10 % за 365 дней.
+    for offset in range(366):
+        day = start + timedelta(days=offset)
+        value = Decimal("100000") + Decimal("100000") * Decimal("0.1") * offset / 365
+        add_snapshot(session, day, str(value.quantize(Decimal("0.01"))))
+    # Дальше в ряду дыра до сегодняшнего дня: измерять там нечего.
+    add_snapshot(session, date(2026, 8, 13), "150000")
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("150000"), by_account_now={},
+                            by_class_now={})
+    assert report.coverage.chain_days == 365
+    # По размаху ряда (590 дней) та же цепочка дала бы 6,1 % — чужую
+    # длительность выдали бы за свою.
     assert report.portfolio.twr == Decimal("0.1000")
 
 

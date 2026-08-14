@@ -43,6 +43,7 @@ PERIODS = (PERIOD_ALL, PERIOD_12M, PERIOD_YTD)
 REASON_NO_FLOWS = "no_flows"
 REASON_NO_HISTORY = "no_history"
 REASON_NO_FULL_DAYS = "no_full_days"
+REASON_SERIES_GAPS = "series_gaps"
 REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
 
@@ -123,6 +124,10 @@ class Coverage:
     positions_valued: int | None
     unpriced: list[str]
     chain_breaks: int
+    # Сколько дней цепочка TWR действительно измерила. Без этого числа годовая
+    # ставка не читается: 444 измеренных дня из 2219 и 2219 из 2219 — разные
+    # ответы, а выглядят одинаково.
+    chain_days: int
     currencies_without_rate: list[str]
 
 
@@ -280,7 +285,13 @@ def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
         rate = _over_period(rate, _period_days(period))
 
     twr_rate = chain.rate
-    if twr_rate is not None and period.annualized:
+    if twr_rate is not None and chain.days >= DAYS_IN_YEAR:
+        # В годовых — только если цепочка измерила год и больше, и приводится
+        # она по ИЗМЕРЕННОМУ времени, а не по длине периода. Замер 14.08.2026:
+        # измерено 444 дня, все до 04.05.2022, а ставка растягивалась на 2220
+        # дней — доходность худшего куска истории выдавалась за доходность
+        # шести лет. Длина периода (`period.annualized`) здесь ни при чём: она
+        # решает судьбу XIRR, у которого своё время — всё окно потоков.
         twr_rate = annualize(twr_rate, chain.days)
 
     return Metric(xirr=rate, twr=twr_rate, profit=profit, invested=invested,
@@ -301,15 +312,19 @@ def _reason(rate: Decimal | None, twr_rate: Decimal | None,
     второй случай отвечал «истории нет» — счёт с одними пополнениями и нулевой
     стоимостью обвинял историю, которая на месте.
 
-    Четвёртый случай появился с правкой 14.08.2026: ряд есть, но ни одного
-    шага измерить не удалось — все дни оценены не полностью. Обвинять историю и
-    здесь нельзя: она на месте, не хватает цен. За последние 12 месяцев живой
-    базы полной оценки нет ни у одного дня, и это ровно тот случай.
+    Ещё два случая появились 14.08.2026, и они тоже разные. Ряд есть, но ни
+    одного шага измерить не удалось: либо все дни оценены не полностью — «не
+    хватает цен» (за последние 12 месяцев живой базы полной оценки нет ни у
+    одного дня), либо ряд рваный, и соседние точки не соседние дни — «в ряду
+    дыры» (так у класса, которого нет в части снимков). Ответ владельцу разный:
+    в первом случае лечат котировки, во втором — история снимков.
     """
     if rate is None:
         return REASON_NO_FLOWS if not flows else REASON_NO_SOLUTION
     if twr_rate is None:
-        return REASON_NO_FULL_DAYS if chain.breaks else REASON_NO_HISTORY
+        if chain.unvalued:
+            return REASON_NO_FULL_DAYS
+        return REASON_SERIES_GAPS if chain.gaps else REASON_NO_HISTORY
     return None
 
 
@@ -419,12 +434,10 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
         [ledger_entries(session, account) for account in accounts], by_class_now,
         incomplete, flows, unattributed)
 
-    # Полнота оценки дня — только там, где её вообще считали: у снимков старше
-    # фазы 2c покрытие NULL, и «NULL равен NULL» записало бы день с неизвестным
-    # покрытием в полностью оценённые. Неизвестное — не полное.
-    valued = sum(1 for row in snapshots
-                 if row.positions_total is not None
-                 and row.valued_positions == row.positions_total)
+    # Полных дней — столько, сколько снимков периода не попало в неполные.
+    # Правило «какой день полный» живёт в `_incomplete_days` и только там: две
+    # его записи разъехались бы при первой же правке одной из них.
+    valued = len(snapshots) - len(_incomplete_days(snapshots))
     last = snapshots[-1] if snapshots else None
     coverage = Coverage(
         days_total=len(snapshots),
@@ -433,6 +446,7 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
         positions_valued=last.valued_positions if last else None,
         unpriced=list(last.unpriced or []) if last else [],
         chain_breaks=chain.breaks,
+        chain_days=chain.days,
         currencies_without_rate=unconverted_flows(session, book),
     )
 
