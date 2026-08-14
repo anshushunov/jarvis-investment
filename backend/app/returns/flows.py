@@ -146,6 +146,10 @@ def unconverted_flows(session: Session, book: RateBook) -> list[str]:
     валюте без курса на её день — исчезает из потока бумаги, и сумма по
     бумагам перестаёт сходиться с прибылью портфеля на ту же величину. Ни то,
     ни другое не видно на экране никак, если не назвать валюту явно.
+
+    Конверсии сюда не попадают: они исключены из расчёта решением, а не
+    отсутствием курса, и жаловаться на их валюту значило бы поднимать тревогу
+    там, где ничего не потеряно.
     """
     missing = {
         move.currency.upper()
@@ -155,7 +159,8 @@ def unconverted_flows(session: Session, book: RateBook) -> list[str]:
     missing |= {
         row.currency.upper()
         for row in _result_rows(session)
-        if book.rate(row.currency, moscow_date(row.executed_at)) is None
+        if not _is_conversion(row)
+        and book.rate(row.currency, moscow_date(row.executed_at)) is None
     }
     return sorted(missing)
 
@@ -172,6 +177,24 @@ RESULT_TYPES = {
 
 FEE_TYPES = {OperationType.FEE}
 TAX_TYPES = {OperationType.TAX}
+
+# Покупка и продажа без бумаги: конверсия валюты или металла.
+CONVERSION_TYPES = {OperationType.BUY, OperationType.SELL}
+
+
+def _is_conversion(transaction: Transaction) -> bool:
+    """Покупка или продажа без `instrument_id` — конверсия, а не результат.
+
+    Замер 14.08.2026: таких записей в журнале 563 — юань (200), гонконгский
+    доллар (177), доллар (107), золото (13), фьючерс (11) и 123 покупки
+    иностранных бумаг без сопоставленного инструмента, сальдо −1,52 млн ₽. Это
+    движение внутри портфеля: рубли превратились в юани, капитал не изменился, а
+    переоценка остатка уже видна в стоимости портфеля. Пока правило «запись без
+    бумаги — комиссия или налог» держалось на всём подряд, строка «Прочее»
+    показывала владельцу −1,66 млн ₽ вместо −103 тыс. ₽ комиссий и налогов, то
+    есть полтора миллиона убытка, которого не было (дизайн, раздел 4.2).
+    """
+    return transaction.instrument_id is None and transaction.op_type in CONVERSION_TYPES
 
 
 @dataclass(frozen=True)
@@ -214,7 +237,8 @@ def _trade_flow(transaction: Transaction, book: RateBook) -> CashFlow | None:
 def instrument_flows(session: Session, book: RateBook, since: date | None = None,
                      until: date | None = None) -> dict[int, list[CashFlow]]:
     """Потоки по каждой бумаге. Ключ — instrument_id; записи без него сюда не
-    попадают вовсе и учитываются строкой «Прочее»."""
+    попадают вовсе: комиссии и налоги учитываются строкой «Прочее», а конверсии
+    валюты и металла не учитываются нигде (`_is_conversion`)."""
     result: dict[int, list[CashFlow]] = {}
     for row in _result_rows(session):
         if row.instrument_id is None:
@@ -236,7 +260,7 @@ def unattributed_flows(session: Session, book: RateBook, since: date | None = No
     """Итог по записям без бумаги, разложенный на комиссии, налоги и прочее."""
     fees = taxes = other = Decimal("0")
     for row in _result_rows(session):
-        if row.instrument_id is not None or _is_cash_move(row):
+        if row.instrument_id is not None or _is_cash_move(row) or _is_conversion(row):
             continue
         flow = _trade_flow(row, book)
         if flow is None or not _in_period(flow.on_date, since, until):

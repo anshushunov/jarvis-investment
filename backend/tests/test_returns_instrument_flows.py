@@ -86,6 +86,27 @@ def test_flows_without_instrument_go_to_unattributed(session, account):
     assert result.profit == Decimal("-11650.0000")
 
 
+def test_currency_purchase_is_neither_result_nor_unattributed(session, account):
+    """Покупка валюты — не результат: рубли превратились в юани, капитал не
+    изменился. Замер 14.08.2026: таких записей 563 на −1,52 млн ₽ сальдо, и
+    строка «Прочее» показывала владельцу полтора миллиона убытка, которого не
+    было. Комиссия без бумаги — по-прежнему в «Прочем»: она капитал уменьшает
+    по-настоящему."""
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 5, 6), amount="-120000", quantity="10000", price="12")
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2024, 9, 6), amount="130000", quantity="-10000", price="13")
+    add_tx(session, account_id=account.id, op_type=OperationType.FEE,
+           day=date(2024, 5, 6), amount="-450")
+
+    book = RateBook.load(session)
+    assert instrument_flows(session, book) == {}
+    result = unattributed_flows(session, book)
+    assert result.fees == Decimal("-450.0000")
+    assert result.other == Decimal("0.0000")
+    assert result.profit == Decimal("-450.0000")
+
+
 def test_cash_moves_are_not_unattributed(session, account):
     """Пополнение счёта — не убыток и не прибыль: это капитал владельца. В
     строке «Прочее» ему делать нечего."""
