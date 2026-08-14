@@ -6,6 +6,7 @@ import {
   formatMoney,
   formatPercent,
   formatQuantity,
+  formatRate,
   isPositiveAmount,
 } from "./format";
 
@@ -81,6 +82,22 @@ describe("formatPercent", () => {
 
   it("оставляет минус для падения", () => {
     expect(formatPercent("-3.2500")).toBe("−3,3%");
+  });
+});
+
+describe("formatRate", () => {
+  it("переводит долю в проценты", () => {
+    expect(formatRate("0.1842")).toBe("+18,4%");
+    expect(formatRate("0.1531")).toBe("+15,3%");
+  });
+
+  it("сохраняет знак падения", () => {
+    expect(formatRate("-0.2500")).toBe("−25,0%");
+  });
+
+  it("показывает прочерк вместо отсутствующей ставки", () => {
+    expect(formatRate(null)).toBe("—");
+    expect(formatRate(undefined)).toBe("—");
   });
 });
 

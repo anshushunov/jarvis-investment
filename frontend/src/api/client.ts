@@ -155,6 +155,81 @@ export interface SyncRunResult {
   error: string | null;
 }
 
+// Форма ответа — с backend/app/api/schemas.py (ReturnsOut и составляющие),
+// не с исходного брифа задачи 10: бэкенд поменялся по итогам прогона на
+// живых данных 14.08.2026 (см. app/returns/metrics.py, reason()).
+export interface ReturnMetric {
+  // Доля, а не проценты: "0.1842" — это 18,42 %. null — ставки не существует,
+  // и причина названа в reason.
+  xirr: string | null;
+  twr: string | null;
+  // В отличие от строки по бумаге (InstrumentReturn) у портфеля, счёта и
+  // класса актива прибыль, вложения и стоимость периметра всегда известны —
+  // бэкенд не отдаёт здесь null (MetricOut.profit/invested/value — не
+  // Optional).
+  profit: string;
+  invested: string;
+  value: string;
+  // Сколько дней цепочка TWR действительно измерила для ЭТОГО периметра.
+  // null — TWR для периметра не считается вовсе (так у строки «Деньги»); 0 —
+  // цепочка построена, но не измерила ни одного шага. Разные ответы, и
+  // подменять один другим нельзя.
+  chain_days: number | null;
+  reason: string | null;
+}
+
+export interface InstrumentReturn {
+  ticker: string | null;
+  name: string;
+  xirr: string | null;
+  // null — не ноль: посчитать нечем (нет цены/курса на конец или начало
+  // периода), причина — в reason.
+  profit: string | null;
+  value: string | null;
+  // Позиция продана целиком: стоимость ноль, история доходности — нет.
+  closed: boolean;
+  // Нереализованная прибыль открытых партий — то, что раскладывают price_part
+  // и fx_part. Отдельно от profit: это разные числа (дизайн, раздел 4.4).
+  unrealized: string | null;
+  // Разложение нереализованной прибыли открытой позиции на ценовую и
+  // валютную части. null — посчитать нечем, причина — в reason.
+  price_part: string | null;
+  fx_part: string | null;
+  reason: string | null;
+}
+
+export interface ReturnsCoverage {
+  days_total: number;
+  days_valued: number;
+  // null — покрытие позиций на последний день периода никто не считал
+  // (снимки старше фазы 2c). Ноль означал бы «позиций нет вовсе».
+  positions_total: number | null;
+  positions_valued: number | null;
+  unpriced: string[];
+  // Сколько шагов выпало из цепочки TWR.
+  chain_breaks: number;
+  // Сколько дней цепочка действительно измерила — то же число, что и у
+  // portfolio.chain_days, но всегда присутствует (не Optional): годовая
+  // ставка TWR приведена к году именно по нему, и без него она не читается.
+  chain_days: number;
+  currencies_without_rate: string[];
+}
+
+export interface Returns {
+  // Границы периода явные: «за всё время» начинается датой первой операции.
+  period: { from: string; to: string; annualized: boolean };
+  portfolio: ReturnMetric;
+  coverage: ReturnsCoverage;
+  by_account: (ReturnMetric & { title: string })[];
+  by_asset_class: (ReturnMetric & { asset_class: string })[];
+  by_instrument: InstrumentReturn[];
+  // Комиссии и налоги, не относящиеся ни к одной бумаге: без этой строки сумма
+  // по бумагам не сходится с портфелем.
+  unattributed: { profit: string; fees: string; taxes: string; other: string };
+}
+
+export type ReturnsPeriod = "all" | "12m" | "ytd";
+
 // FastAPI сериализует HTTPException как {"detail": "..."} — настоящая причина
 // сбоя (например, «Не задан TBANK_TOKEN в .env») лежит в теле ответа; без
 // этого пользователь видит только код состояния, который ничего не объясняет.
@@ -206,4 +281,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note }),
     }),
+  returns: (period: ReturnsPeriod) =>
+    request<Returns>(`/analytics/returns?period=${period}`),
 };

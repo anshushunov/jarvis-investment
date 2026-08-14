@@ -105,6 +105,17 @@ export function formatPercent(raw: string | null | undefined): string {
   return `${sign}${Math.abs(value).toFixed(1).replace(".", ",")}%`;
 }
 
+// XIRR и TWR приходят с бэкенда долями ("0.1842" = 18,42 %), а formatPercent
+// ждёт готовые проценты ("18.42"). Домножение на 100 — не то же исключение,
+// что formatPercent делает для чисел через Number: formatPercent уже
+// проходит через Number.parseFloat внутри, formatRate лишь готовит для неё
+// вход и точности не добавляет и не убавляет. formatPercent саму менять
+// нельзя — её зовут таблицы позиций (см. правило фазы 4a).
+export function formatRate(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined) return "—";
+  return formatPercent(String(Number.parseFloat(raw) * 100));
+}
+
 export function formatQuantity(raw: string): string {
   const trimmed = raw.replace(/\.?0+$/, "");
   return trimmed.replace(".", ",");
