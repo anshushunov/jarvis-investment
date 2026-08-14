@@ -86,6 +86,13 @@ class InstrumentRow:
     profit: Decimal | None
     value: Decimal | None
     closed: bool
+    # Нереализованная («бумажная») прибыль открытых партий за всё время
+    # владения — то, что раскладывают price_part и fx_part. С `profit` не
+    # совпадает у бумаги с частичными продажами: та содержит ещё и
+    # реализованный результат периода, которого разложение не видит по
+    # устройству (дизайн, раздел 4.4). Замер 14.08.2026 у Озона: 70 568 ₽
+    # прибыли периода против 53 555 ₽ нереализованной.
+    unrealized: Decimal | None
     price_part: Decimal | None
     fx_part: Decimal | None
     reason: str | None
@@ -492,6 +499,7 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                     if value is not None and value_start is not None else None),
             value=money(value) if value is not None else None,
             closed=not open_lots,
+            unrealized=split.total if split else None,
             price_part=split.price_part if split else None,
             fx_part=split.fx_part if split else None,
             reason=reason,

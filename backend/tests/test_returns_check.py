@@ -5,7 +5,7 @@ from app.models import OperationType
 from app.returns.check import check_returns
 from tests.test_returns_flows import add_tx
 from tests.test_returns_instrument_flows import add_instrument
-from tests.test_returns_service import add_snapshot
+from tests.test_returns_service import add_price, add_snapshot
 
 
 def test_check_prints_reconciliation_of_parts(session, account):
@@ -26,6 +26,26 @@ def test_check_prints_reconciliation_of_parts(session, account):
     assert "Прочее" in text
     # Разбор сходимости разрезов с целым — главное, ради чего прогон существует.
     assert "Расхождение" in text
+
+
+def test_check_compares_parts_with_unrealized_profit(session, account):
+    """Части сверяются с нереализованной прибылью, а не с прибылью за период:
+    у бумаги с частичной продажей это разные величины, и прежняя проверка
+    тревожила там, где всё верно."""
+    instrument = add_instrument(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 8, 14), amount="-100000", quantity="100", price="1000",
+           instrument_id=instrument.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2025, 8, 14), amount="60000", quantity="50", price="1200",
+           instrument_id=instrument.id)
+    add_price(session, instrument.id, date(2026, 8, 13), "1300")
+    add_snapshot(session, date(2024, 8, 13), "100000")
+    add_snapshot(session, date(2026, 8, 13), "65000")
+
+    text = "\n".join(check_returns(session))
+    assert "Нереализованная прибыль открытых позиций: 15000.0000 ₽" in text
+    assert "Части сходятся с нереализованной прибылью" in text
 
 
 def test_check_survives_empty_database(session):

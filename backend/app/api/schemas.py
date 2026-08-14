@@ -261,9 +261,15 @@ class InstrumentReturnOut(BaseModel):
     value: Decimal | None
     # Позиция продана целиком: конечная стоимость ноль, история — нет.
     closed: bool
-    # Разложение прибыли открытой позиции. None у рублёвой бумаги в fx_part
-    # не бывает — там ноль; None означает «посчитать нечем», и почему, говорит
-    # reason.
+    # Нереализованная прибыль открытых партий — величина, которую и раскладывают
+    # price_part с fx_part. Отдельно от profit, потому что это разные числа: у
+    # бумаги с частичными продажами profit содержит ещё и реализованный
+    # результат периода (дизайн, раздел 4.4). Экран подписывает колонку тем,
+    # чем она является, а не «прибылью».
+    unrealized: Decimal | None
+    # Разложение нереализованной прибыли открытой позиции. None у рублёвой
+    # бумаги в fx_part не бывает — там ноль; None означает «посчитать нечем», и
+    # почему, говорит reason.
     price_part: Decimal | None
     fx_part: Decimal | None
     reason: str | None
@@ -272,7 +278,7 @@ class InstrumentReturnOut(BaseModel):
     def serialize_rate(self, value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
 
-    @field_serializer("profit", "value", "price_part", "fx_part")
+    @field_serializer("profit", "value", "unrealized", "price_part", "fx_part")
     def serialize_optional_money(self, value: Decimal | None) -> str | None:
         return None if value is None else f"{value:.4f}"
 

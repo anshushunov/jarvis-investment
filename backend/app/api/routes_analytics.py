@@ -59,8 +59,8 @@ def get_returns(
         by_instrument=[
             InstrumentReturnOut(
                 ticker=row.ticker, name=row.name, xirr=row.xirr, profit=row.profit,
-                value=row.value, closed=row.closed, price_part=row.price_part,
-                fx_part=row.fx_part, reason=row.reason,
+                value=row.value, closed=row.closed, unrealized=row.unrealized,
+                price_part=row.price_part, fx_part=row.fx_part, reason=row.reason,
             )
             for row in report.by_instrument
         ],

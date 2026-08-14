@@ -334,6 +334,33 @@ def test_instrument_bought_before_the_period_shows_only_its_growth(session, acco
     assert row.reason is None
 
 
+def test_unrealized_is_not_the_profit_of_the_period(session, account):
+    """Разложение раскладывает нереализованную прибыль открытых партий, а не
+    прибыль за период: у бумаги с частичной продажей это разные величины по
+    устройству. Замер 14.08.2026 у Озона: 70 568 ₽ прибыли периода против
+    53 555 ₽ суммы частей. Здесь то же самое на маленьких числах: куплено 100
+    по 1000, продано 50 по 1200, сегодня 1300 — прибыль периода 25 000 ₽,
+    нереализованная 15 000 ₽, и части сходятся именно со второй."""
+    instrument = add_instrument(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-100000", quantity="100", price="1000",
+           instrument_id=instrument.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2024, 6, 11), amount="60000", quantity="50", price="1200",
+           instrument_id=instrument.id)
+    add_price(session, instrument.id, date(2026, 8, 13), "1300")
+    add_snapshot(session, date(2024, 1, 11), "100000")
+    add_snapshot(session, date(2026, 8, 13), "65000")
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("65000"), by_account_now={},
+                            by_class_now={"equity": Decimal("65000")})
+    row = next(row for row in report.by_instrument if row.instrument_id == instrument.id)
+    assert row.profit == Decimal("25000.0000")
+    assert row.unrealized == Decimal("15000.0000")
+    assert row.price_part + row.fx_part == row.unrealized
+
+
 def test_position_without_a_rate_is_not_worth_zero(session, account):
     """Гонконгская бумага без курса на дату: стоимость неизвестна, а не равна
     нулю. Ноль вычел бы её из прибыли целиком и молча."""

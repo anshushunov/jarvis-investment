@@ -58,17 +58,24 @@ def check_returns(session: Session) -> list[str]:
         lines.append(f"Сумма по бумагам {money(instruments_profit)} ₽ + Прочее = {parts} ₽")
         lines.append(f"Расхождение с прибылью портфеля: {money(parts - report.portfolio.profit)} ₽")
 
-        # Признак готовности, пункт 2: части прибыли против самой прибыли.
+        # Признак готовности, пункт 2: части сверяются с НЕРЕАЛИЗОВАННОЙ
+        # прибылью, а не с прибылью за период. Прежняя проверка сравнивала
+        # разные величины и потому тревожила почти на каждой открытой позиции:
+        # прибыль периода содержит реализованный результат частичных продаж,
+        # которого разложение не видит по устройству (дизайн, раздел 4.4).
+        unrealized_total = sum((row.unrealized for row in report.by_instrument
+                                if row.unrealized is not None), Decimal("0"))
+        lines.append(f"Нереализованная прибыль открытых позиций: {money(unrealized_total)} ₽")
         mismatched = [
             row.name for row in report.by_instrument
             if row.price_part is not None and row.fx_part is not None
-            and row.profit is not None
-            and money(row.price_part + row.fx_part) != row.profit and not row.closed
+            and row.unrealized is not None
+            and money(row.price_part + row.fx_part) != row.unrealized
         ]
         if mismatched:
-            lines.append("Разложение прибыли разошлось с прибылью у: " + ", ".join(mismatched))
+            lines.append("Части разошлись с нереализованной прибылью у: " + ", ".join(mismatched))
         else:
-            lines.append("Разложение прибыли сходится по всем открытым позициям")
+            lines.append("Части сходятся с нереализованной прибылью по всем открытым позициям")
 
         for row in report.by_account:
             lines.append(f"  счёт {row.account_id}: XIRR {_rate(row.metric.xirr)} · "
