@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASSET_CLASS_TITLES,
   BASE_CURRENCY,
   currencySign,
   formatDate,
@@ -108,6 +109,21 @@ describe("formatQuantity", () => {
 
   it("сохраняет дробные паи", () => {
     expect(formatQuantity("0.50000000")).toBe("0,5");
+  });
+});
+
+describe("ASSET_CLASS_TITLES", () => {
+  it("подписывает известные классы по-русски", () => {
+    expect(ASSET_CLASS_TITLES.equity).toBe("Акции");
+    expect(ASSET_CLASS_TITLES.bonds).toBe("Облигации");
+  });
+
+  it("подписывает деньги и металлы разреза доходности одной строкой", () => {
+    // cash_and_metals — ключ, которого не бывает в Overview.by_asset_class
+    // (там классы денег и металлов раздельные): он приходит только из разреза
+    // доходности, где деньги и металлы посчитаны одним периметром (см.
+    // MONEY_ROW_CLASS в backend/app/returns/breakdown.py).
+    expect(ASSET_CLASS_TITLES.cash_and_metals).toBe("Деньги и металлы");
   });
 });
 

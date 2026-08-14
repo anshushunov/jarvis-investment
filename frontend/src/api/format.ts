@@ -123,6 +123,30 @@ export function formatRate(raw: string | null | undefined): string {
   return formatPercent(fractionToPercent(raw));
 }
 
+// Подписи классов активов — русские слова вместо сырых ключей вроде "equity"
+// или "silver". Единственная копия на проект: раньше жила приватно в
+// `AllocationChart.tsx` (структура портфеля, разбивка `Overview.by_asset_class`
+// — там классы денег и металлов раздельные). Разрез доходности
+// (`Returns.by_asset_class`) устроен иначе: там все денежные классы и металлы
+// слиты в одну строку `cash_and_metals` (см. `MONEY_ROW_CLASS` в
+// `backend/app/returns/breakdown.py`) — отдельного золота или валюты там не
+// бывает, а вот `cash_and_metals` бывает только там. Оба потребителя делят
+// один словарь, а не заводят по копии на экран.
+export const ASSET_CLASS_TITLES: Record<string, string> = {
+  equity: "Акции",
+  bonds: "Облигации",
+  money_market: "Денежный рынок",
+  gold: "Золото",
+  silver: "Серебро",
+  platinum: "Платина",
+  palladium: "Палладий",
+  cash: "Валюта",
+  derivatives: "Срочный рынок",
+  mixed: "Смешанные",
+  other: "Прочее",
+  cash_and_metals: "Деньги и металлы",
+};
+
 export function formatQuantity(raw: string): string {
   const trimmed = raw.replace(/\.?0+$/, "");
   return trimmed.replace(".", ",");
