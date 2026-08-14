@@ -60,6 +60,12 @@ REASON_CASH = "cash"
 # настоящих 33 443 ₽.
 MONEY_CLASSES = frozenset({CASH_CLASS, *METAL_CURRENCIES.values()})
 
+# Ключ строки «Деньги и металлы» в разрезе по классам. Собственный, а не `cash`:
+# под именем «Деньги» лежало бы ещё и золото — 117 130 ₽ живого портфеля, —
+# и экран «Аналитика» противоречил бы экрану «Портфель», где у золота своя доля
+# аллокации. Одна строка на весь денежный периметр: см. комментарий выше.
+MONEY_ROW_CLASS = "cash_and_metals"
+
 
 @dataclass(frozen=True)
 class Period:
@@ -597,7 +603,7 @@ def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
         # Денег в портфеле нет вовсе — строки тоже быть не должно: пустая строка
         # с нулями отвечает на вопрос, которого никто не задавал.
         return None
-    return AssetClassRow(asset_class=CASH_CLASS, metric=Metric(
+    return AssetClassRow(asset_class=MONEY_ROW_CLASS, metric=Metric(
         xirr=None, twr=None, profit=profit, invested=Decimal("0"),
         value=money(value_now), reason=REASON_CASH))
 

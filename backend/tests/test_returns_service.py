@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from app.models import DailySnapshot, FxRate, OperationType, Price
 from app.returns.service import (
-    MONEY_CLASSES,
+    MONEY_ROW_CLASS,
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
@@ -331,7 +331,7 @@ def test_money_row_earns_the_revaluation_of_the_balance(session, account):
     report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
                             value_now=Decimal("120000"), by_account_now={},
                             by_class_now={"cash": Decimal("120000")})
-    row = next(row for row in report.by_asset_class if row.asset_class == "cash")
+    row = next(row for row in report.by_asset_class if row.asset_class == MONEY_ROW_CLASS)
     assert row.metric.profit == Decimal("20000.0000")
     assert row.metric.xirr is None
     assert row.metric.twr is None
@@ -355,7 +355,7 @@ def test_money_row_does_not_swallow_an_unattributed_record(session, account):
     report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
                             value_now=Decimal("93000"), by_account_now={},
                             by_class_now={"cash": Decimal("93000")})
-    row = next(row for row in report.by_asset_class if row.asset_class in MONEY_CLASSES)
+    row = next(row for row in report.by_asset_class if row.asset_class == MONEY_ROW_CLASS)
     # Деньги пришли и ушли по журналу: 100 000 − 7 000 = 93 000, столько и
     # стоит остаток. Заработано ноль. Зеркальная формула показала бы −7 000.
     assert row.metric.profit == Decimal("0.0000")
@@ -377,8 +377,10 @@ def test_metal_balance_is_counted_in_the_money_row(session, account):
                             by_class_now={"cash": Decimal("20000"),
                                           "gold": Decimal("100000")})
     classes = {row.asset_class for row in report.by_asset_class}
-    assert "gold" not in classes
-    row = next(row for row in report.by_asset_class if row.asset_class == "cash")
+    # Ключ у строки собственный: на экране это не «Деньги», внутри которых
+    # молча лежит золото, а «Деньги и металлы».
+    assert classes == {MONEY_ROW_CLASS}
+    row = next(row for row in report.by_asset_class if row.asset_class == MONEY_ROW_CLASS)
     assert row.metric.value == Decimal("120000.0000")
     assert row.metric.profit == Decimal("20000.0000")
 

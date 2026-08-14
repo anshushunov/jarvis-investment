@@ -16,7 +16,7 @@ from app.money import money
 from app.returns.flows import instrument_flows
 from app.returns.rates import RateBook
 from app.returns.service import (
-    MONEY_CLASSES,
+    MONEY_ROW_CLASS,
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
@@ -65,7 +65,7 @@ def check_returns(session: Session) -> list[str]:
         instruments_profit = sum((row.profit for row in report.by_instrument
                                    if row.profit is not None), Decimal("0"))
         money_profit = sum((row.metric.profit for row in report.by_asset_class
-                            if row.asset_class in MONEY_CLASSES), Decimal("0"))
+                            if row.asset_class == MONEY_ROW_CLASS), Decimal("0"))
         parts = money(instruments_profit + money_profit + report.unattributed.profit)
         lines.append(f"Прочее (комиссии {report.unattributed.fees} ₽, налоги "
                      f"{report.unattributed.taxes} ₽, прочее {report.unattributed.other} ₽): "
