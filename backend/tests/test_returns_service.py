@@ -8,6 +8,7 @@ from app.returns.service import (
     PERIOD_ALL,
     PERIOD_YTD,
     REASON_NO_FULL_DAYS,
+    REASON_SERIES_GAPS,
     period_bounds,
     returns_report,
 )
@@ -285,19 +286,28 @@ def test_class_missing_from_snapshots_breaks_its_chain(session, account):
     """Класс, которого нет в снимке, оставляет в ряду дыру. Соседние точки —
     разные концы дыры, и продажа внутри неё выпадает вместе со своим потоком:
     так класс `mixed` живой базы показывал −100 % при стоимости 4,97 млн ₽."""
+    fund = add_instrument(session, isin="RU000A0JQTM3", ticker="EQMX", kind="etf")
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2026, 8, 12), amount="-100000", quantity="100", price="1000",
+           instrument_id=fund.id)
+    add_price(session, fund.id, date(2026, 8, 13), "1000.50")
     add_snapshot(session, date(2026, 8, 11), "100000",
                  by_class={"mixed": "100000"}, valued=2, total_positions=2)
     add_snapshot(session, date(2026, 8, 12), "100000",
                  by_class={"equity": "100000"}, valued=2, total_positions=2)
-    add_snapshot(session, date(2026, 8, 13), "100000",
-                 by_class={"mixed": "1"}, valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 13), "100050",
+                 by_class={"mixed": "100050"}, valued=2, total_positions=2)
 
     report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
-                            value_now=Decimal("100000"), by_account_now={},
-                            by_class_now={"mixed": Decimal("1")})
+                            value_now=Decimal("100050"), by_account_now={},
+                            by_class_now={"mixed": Decimal("100050")},
+                            cash_now=Decimal("0"))
     row = next(row for row in report.by_asset_class if row.asset_class == "mixed")
     # Без правки цепочка перемножила бы 1/100000 и объявила бы −100 %.
     assert row.metric.twr is None
+    # Причина именно про дыры в ряду: истории цен тут хватает, не хватает
+    # снимков с этим классом. «Не хватает цен» было бы другим ответом.
+    assert row.metric.reason == REASON_SERIES_GAPS
 
 
 def test_period_without_a_single_full_day_has_no_twr_and_says_why(session, account):

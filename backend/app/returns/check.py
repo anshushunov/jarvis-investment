@@ -9,11 +9,13 @@
 
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.models import OperationType, Transaction
 from app.money import money
-from app.returns.flows import instrument_flows
+from app.returns.flows import RAW_CASH_MOVE_TYPES, instrument_flows
 from app.returns.rates import RateBook
 from app.returns.service import (
     MONEY_ROW_CLASS,
@@ -22,12 +24,44 @@ from app.returns.service import (
     PERIOD_YTD,
     returns_report,
 )
+from app.timeutils import moscow_date
 
 PERIOD_TITLES = {PERIOD_ALL: "всё время", PERIOD_12M: "12 месяцев", PERIOD_YTD: "с начала года"}
 
 
 def _rate(value: Decimal | None) -> str:
     return "—" if value is None else f"{value * 100:.2f} %"
+
+
+def _unattributed_by_query(session: Session, since, until) -> Decimal:
+    """Комиссии, налоги и возвраты без бумаги — прямым запросом к журналу.
+
+    Второй счёт того же числа, написанный намеренно другим способом: признак
+    готовности (дизайн, раздел 7) требует сверять «Прочее» с журналом, а
+    печатать величину, посчитанную тем же кодом, значит сверять число с самим
+    собой. Правила ровно два и оба видны здесь: запись без `instrument_id`, не
+    движение денег и не конверсия; сумма — `amount − fee` в рублях по курсу дня
+    операции.
+    """
+    book = RateBook.load(session)
+    total = Decimal("0")
+    rows = session.execute(
+        select(Transaction).where(Transaction.instrument_id.is_(None))
+    ).scalars()
+    for row in rows:
+        if row.op_type in (OperationType.DEPOSIT, OperationType.WITHDRAWAL):
+            continue
+        if row.op_type in (OperationType.BUY, OperationType.SELL):
+            continue  # конверсия валюты или металла — не результат
+        if (row.payload or {}).get("operation_type") in RAW_CASH_MOVE_TYPES:
+            continue
+        day = moscow_date(row.executed_at)
+        if since is not None and day < since or day > until:
+            continue
+        in_base = book.to_base(row.amount - abs(row.fee), row.currency, day)
+        if in_base is not None:
+            total += in_base
+    return money(total)
 
 
 def check_returns(session: Session) -> list[str]:
@@ -71,6 +105,14 @@ def check_returns(session: Session) -> list[str]:
                      f"{report.unattributed.taxes} ₽, прочее {report.unattributed.other} ₽): "
                      f"{report.unattributed.profit} ₽")
         lines.append(f"Деньги и металлы: {money(money_profit)} ₽")
+        # Признак готовности требует сверять «Прочее» с прямым запросом к
+        # журналу буквально: печатать то же число из того же кода — не
+        # проверка, а эхо. Запрос ниже намеренно написан заново и не зовёт
+        # unattributed_flows.
+        direct = _unattributed_by_query(session, period.since, period.until)
+        verdict = ("сходится" if direct == report.unattributed.profit
+                   else f"РАСХОДИТСЯ на {money(direct - report.unattributed.profit)} ₽")
+        lines.append(f"Сверка «Прочего» прямым запросом: {direct} ₽ — {verdict}")
         lines.append(f"Сумма по бумагам {money(instruments_profit)} ₽ + Деньги + Прочее = {parts} ₽")
         mismatch = money(parts - report.portfolio.profit)
         lines.append(f"Расхождение с прибылью портфеля: {mismatch} ₽")
