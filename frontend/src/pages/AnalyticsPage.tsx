@@ -79,7 +79,11 @@ export function AnalyticsPage() {
         title="По бумагам"
         rows={[
           ...data.by_instrument.map((row) => ({
-            key: `${row.ticker ?? row.name}`, title: row.name, xirr: row.xirr,
+            // Ключ — instrument_id, а не тикер: тикеры не уникальны
+            // (редомициляция даёт пару с одним тикером), и React получал бы
+            // дубли ключей на живых 252 бумагах. Порядок строк задан бэкендом
+            // (app/returns/breakdown.py, _row_order) — экран его не меняет.
+            key: `instrument-${row.instrument_id}`, title: row.name, xirr: row.xirr,
             profit: row.profit, value: row.value, reason: row.reason,
             closed: row.closed, unrealized: row.unrealized, fx_part: row.fx_part,
           })),

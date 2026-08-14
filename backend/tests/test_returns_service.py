@@ -576,3 +576,49 @@ def test_period_cuts_off_earlier_flows(session, account):
                             by_class_now={})
     assert report.period.since == date(2025, 8, 13)
     assert report.portfolio.invested == Decimal("100000.0000")
+
+
+def test_instrument_rows_are_ordered_by_significance(session, account):
+    """Порядок строк по бумагам задаёт бэкенд, а не случай.
+
+    `select(Instrument)` без `ORDER BY` возвращает строки в порядке
+    произвольном и способном меняться между запросами — на живых 253 строках
+    такой таблицей пользоваться нельзя. Порядок: открытые раньше закрытых,
+    внутри — по стоимости, а у закрытых (стоимость у всех нулевая) — по модулю
+    прибыли, чтобы крупный убыток не оказался в хвосте.
+    """
+    big = add_instrument(session, isin="RU000A0JQ001", ticker="BIG")
+    small = add_instrument(session, isin="RU000A0JQ002", ticker="SMALL")
+    loss = add_instrument(session, isin="RU000A0JQ003", ticker="LOSS")
+    gain = add_instrument(session, isin="RU000A0JQ004", ticker="GAIN")
+
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-100000", quantity="100", price="1000",
+           instrument_id=big.id)
+    add_price(session, big.id, date(2026, 8, 13), "2000")
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-40000", quantity="100", price="400",
+           instrument_id=small.id)
+    add_price(session, small.id, date(2026, 8, 13), "500")
+
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-300000", quantity="100", price="3000",
+           instrument_id=loss.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2025, 6, 11), amount="100000", quantity="100", price="1000",
+           instrument_id=loss.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-20000", quantity="100", price="200",
+           instrument_id=gain.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.SELL,
+           day=date(2025, 6, 11), amount="25000", quantity="100", price="250",
+           instrument_id=gain.id)
+
+    add_snapshot(session, date(2024, 1, 11), "460000")
+    add_snapshot(session, date(2026, 8, 13), "250000")
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("250000"), by_account_now={},
+                            by_class_now={"equity": Decimal("250000")})
+    assert [row.name for row in report.by_instrument] == ["BIG", "SMALL", "LOSS", "GAIN"]
+    assert [row.closed for row in report.by_instrument] == [False, False, True, True]

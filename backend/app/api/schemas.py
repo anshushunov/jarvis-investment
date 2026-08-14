@@ -258,6 +258,12 @@ class AssetClassReturnOut(MetricOut):
 
 
 class InstrumentReturnOut(BaseModel):
+    # Идентификатор строки. Тикер на эту роль не годится: у 252 бумаг живого
+    # портфеля тикеры не уникальны — редомициляция даёт пару «старая бумага,
+    # новая бумага» с одним тикером, — а имя эмитента у такой пары тоже
+    # совпадает. Экрану нужен ключ строки, который не повторится (React,
+    # AnalyticsPage.tsx), и другого источника уникальности в ответе нет.
+    instrument_id: int
     ticker: str | None
     name: str
     xirr: Decimal | None
