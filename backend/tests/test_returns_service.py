@@ -15,12 +15,15 @@ from tests.test_returns_instrument_flows import add_instrument
 
 
 def add_snapshot(session, day: date, total: str, by_account: dict | None = None,
-                 valued: int | None = 1, total_positions: int | None = 1) -> None:
+                 valued: int | None = 1, total_positions: int | None = 1,
+                 by_class: dict | None = None) -> None:
     """Точка истории для теста. `valued`/`total_positions` принимают None —
     так покрытие лежит в снимках, снятых до фазы 2c, и «неизвестно» обязано
-    отличаться от «ноль»."""
+    отличаться от «ноль». `by_class` — разбивка по классам: по умолчанию весь
+    капитал в акциях, но класс может из снимка и исчезнуть."""
     session.add(DailySnapshot(
-        on_date=day, total_value=Decimal(total), by_asset_class={"equity": total},
+        on_date=day, total_value=Decimal(total),
+        by_asset_class={"equity": total} if by_class is None else by_class,
         by_account=by_account or {}, source="backfill",
         positions_total=total_positions, valued_positions=valued, unpriced=[]))
     session.flush()
@@ -214,7 +217,7 @@ def test_coverage_reports_unvalued_days_and_currencies(session, account):
 def test_twr_is_the_growth_when_nothing_was_added(session, account):
     """Без пополнений и изъятий TWR — это в точности рост стоимости: очищать
     цепочку не от чего."""
-    add_snapshot(session, date(2026, 8, 11), "100000")
+    add_snapshot(session, date(2026, 8, 12), "100000")
     add_snapshot(session, date(2026, 8, 13), "110000")
 
     report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
@@ -254,13 +257,32 @@ def test_unknown_coverage_is_not_treated_as_full(session, account):
     assert report.portfolio.twr == Decimal("0.1000")
 
 
+def test_class_missing_from_snapshots_breaks_its_chain(session, account):
+    """Класс, которого нет в снимке, оставляет в ряду дыру. Соседние точки —
+    разные концы дыры, и продажа внутри неё выпадает вместе со своим потоком:
+    так класс `mixed` живой базы показывал −100 % при стоимости 4,97 млн ₽."""
+    add_snapshot(session, date(2026, 8, 11), "100000",
+                 by_class={"mixed": "100000"}, valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 12), "100000",
+                 by_class={"equity": "100000"}, valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 13), "100000",
+                 by_class={"mixed": "1"}, valued=2, total_positions=2)
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("100000"), by_account_now={},
+                            by_class_now={"mixed": Decimal("1")})
+    row = next(row for row in report.by_asset_class if row.asset_class == "mixed")
+    # Без правки цепочка перемножила бы 1/100000 и объявила бы −100 %.
+    assert row.metric.twr is None
+
+
 def test_period_without_a_single_full_day_has_no_twr_and_says_why(session, account):
     """Ни одного полностью оценённого дня — TWR не считается, и причина названа
     словами: история на месте, не хватает цен. Ноль здесь утверждал бы, что
     портфель ничего не заработал."""
     add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
-           day=date(2026, 8, 11), amount="100000")
-    add_snapshot(session, date(2026, 8, 11), "100000", valued=1, total_positions=2)
+           day=date(2026, 8, 12), amount="100000")
+    add_snapshot(session, date(2026, 8, 12), "100000", valued=1, total_positions=2)
     add_snapshot(session, date(2026, 8, 13), "100050", valued=1, total_positions=2)
 
     report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
