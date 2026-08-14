@@ -37,6 +37,7 @@ PERIODS = (PERIOD_ALL, PERIOD_12M, PERIOD_YTD)
 # Причины отсутствия числа. Каждая переводится в слова на экране.
 REASON_NO_FLOWS = "no_flows"
 REASON_NO_HISTORY = "no_history"
+REASON_NO_FULL_DAYS = "no_full_days"
 REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
 
@@ -218,8 +219,24 @@ def _series_start(opening: DailySnapshot | None, pick) -> Decimal:
     return Decimal(str(value)) if value is not None else Decimal("0")
 
 
+def _incomplete_days(snapshots: list[DailySnapshot]) -> frozenset[date]:
+    """Даты, оценка которых неполна: часть позиций осталась без цены.
+
+    Считается здесь, а не в `twr()`: цепочка не знает про `DailySnapshot` и не
+    должна — она работает с рядом «дата, стоимость». Покрытие `NULL` (снимки
+    старше фазы 2c) тоже неполное: неизвестное — не полное, и записать такой
+    день в оценённые значило бы поверить величине, которую никто не проверял.
+    """
+    return frozenset(
+        row.on_date for row in snapshots
+        if row.positions_total is None or row.valued_positions is None
+        or row.valued_positions < row.positions_total
+    )
+
+
 def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
-            series: list[tuple[date, Decimal]], period: Period) -> tuple[Metric, Chain]:
+            series: list[tuple[date, Decimal]], period: Period,
+            incomplete: frozenset[date] = frozenset()) -> tuple[Metric, Chain]:
     """Доходность одного периметра. Начальная стоимость входит вложением, а
     конечная — изъятием: за период владелец «вложил» то, что у него уже было, и
     «получил» то, что стало."""
@@ -233,7 +250,7 @@ def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
         rate_flows.append(Flow(on_date=period.until, amount=value_now))
 
     rate = xirr(rate_flows)
-    chain = twr(series, flows)
+    chain = twr(series, flows, incomplete)
 
     if rate is not None and not period.annualized:
         # За период, а не в годовых: XIRR вернул годовую ставку, и на коротком
@@ -245,11 +262,12 @@ def _metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
         twr_rate = annualize(twr_rate, chain.days)
 
     return Metric(xirr=rate, twr=twr_rate, profit=profit, invested=invested,
-                  value=money(value_now), reason=_reason(rate, twr_rate, flows)), chain
+                  value=money(value_now),
+                  reason=_reason(rate, twr_rate, flows, chain)), chain
 
 
 def _reason(rate: Decimal | None, twr_rate: Decimal | None,
-            flows: list[CashFlow]) -> str | None:
+            flows: list[CashFlow], chain: Chain) -> str | None:
     """Почему числа нет. Молчаливый прочерк запрещён: у каждого пустого места на
     экране есть названная причина.
 
@@ -260,11 +278,16 @@ def _reason(rate: Decimal | None, twr_rate: Decimal | None,
     расчёта»); ряда стоимостей нет, и цепочке TWR не из чего строиться. Раньше
     второй случай отвечал «истории нет» — счёт с одними пополнениями и нулевой
     стоимостью обвинял историю, которая на месте.
+
+    Четвёртый случай появился с правкой 14.08.2026: ряд есть, но ни одного
+    шага измерить не удалось — все дни оценены не полностью. Обвинять историю и
+    здесь нельзя: она на месте, не хватает цен. За последние 12 месяцев живой
+    базы полной оценки нет ни у одного дня, и это ровно тот случай.
     """
     if rate is None:
         return REASON_NO_FLOWS if not flows else REASON_NO_SOLUTION
     if twr_rate is None:
-        return REASON_NO_HISTORY
+        return REASON_NO_FULL_DAYS if chain.breaks else REASON_NO_HISTORY
     return None
 
 
@@ -340,10 +363,15 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     opening = _opening(session, period.since)
     chart = ([opening] if opening is not None else []) + snapshots
 
+    # Неполнота оценки — свойство дня, а не периметра: цена, которой не нашлось,
+    # занижает и общую стоимость, и разбивку по счетам и классам. Множество
+    # считается один раз и достаётся всем цепочкам отчёта.
+    incomplete = _incomplete_days(chart)
+
     total_series = _series(chart, lambda row: row.total_value)
     flows = portfolio_flows(session, book, period.since, period.until)
     portfolio, chain = _metric(flows, _series_start(opening, lambda row: row.total_value),
-                               value_now, total_series, period)
+                               value_now, total_series, period, incomplete)
 
     accounts = list(session.execute(select(Account)).scalars())
     # Какие ключи разбивки считать идентификаторами счетов, знает сторона,
@@ -359,12 +387,14 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
                   if account.id in values]
         metric, _ = _metric(account_flows(session, book, account.id, period.since, period.until),
                             opening_values.get(account.id, Decimal("0")),
-                            by_account_now.get(account.id, Decimal("0")), series, period)
+                            by_account_now.get(account.id, Decimal("0")), series, period,
+                            incomplete)
         by_account.append(AccountRow(account_id=account.id, metric=metric))
 
     instrument_rows, by_class = _instrument_and_class_rows(
         session, book, period, chart, opening,
-        [ledger_entries(session, account) for account in accounts], by_class_now)
+        [ledger_entries(session, account) for account in accounts], by_class_now,
+        incomplete)
 
     # Полнота оценки дня — только там, где её вообще считали: у снимков старше
     # фазы 2c покрытие NULL, и «NULL равен NULL» записало бы день с неизвестным
@@ -393,7 +423,8 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
 def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                                chart: list[DailySnapshot], opening: DailySnapshot | None,
                                journals: list[list[LedgerEntry]],
-                               by_class_now: dict[str, Decimal]):
+                               by_class_now: dict[str, Decimal],
+                               incomplete: frozenset[date] = frozenset()):
     """Строки по бумагам и по классам активов за один проход.
 
     Класс бумаги берётся сегодняшний: истории смены класса система не хранит, и
@@ -490,7 +521,7 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
             return (row.by_asset_class or {}).get(key)
 
         metric, _ = _metric(class_flows.get(klass, []), _series_start(opening, pick),
-                            value_now, _series(chart, pick), period)
+                            value_now, _series(chart, pick), period, incomplete)
         by_class.append(AssetClassRow(asset_class=klass, metric=metric))
 
     return rows, by_class

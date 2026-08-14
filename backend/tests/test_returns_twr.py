@@ -53,6 +53,50 @@ def test_zero_base_breaks_the_chain_and_is_counted():
     assert chain.rate == Decimal("0.1000")
 
 
+def test_day_with_partial_valuation_leaves_the_chain():
+    """Замер 14.08.2026: 11.11.2020 стоимость «падает» с 660 802 ₽ до 282 663 ₽
+    за сутки — не рынок обвалился, а не удалось оценить две позиции из
+    двенадцати. Такой день не входит в цепочку ни измеряемой величиной, ни
+    базой для следующего дня: занижённая стоимость врёт дважды — сначала
+    провалом, потом мнимым отскоком."""
+    values = [
+        (date(2024, 1, 1), Decimal("100")),
+        (date(2024, 1, 2), Decimal("43")),
+        (date(2024, 1, 3), Decimal("105")),
+        (date(2024, 1, 4), Decimal("110")),
+    ]
+    chain = twr(values, [], incomplete={date(2024, 1, 2)})
+    assert chain.rate == Decimal("0.0476")
+    assert chain.breaks == 2
+
+
+def test_chain_without_a_single_measured_step_has_no_rate():
+    """Все дни неполны — цепочка не «дала ноль», а не построилась. Ноль был бы
+    утверждением «портфель ничего не заработал», и на живой базе оно ложно: с
+    августа 2025 полной оценки нет ни у одного дня."""
+    values = [
+        (date(2024, 1, 1), Decimal("100")),
+        (date(2024, 1, 2), Decimal("43")),
+        (date(2024, 1, 3), Decimal("105")),
+    ]
+    chain = twr(values, [], incomplete={date(2024, 1, 1), date(2024, 1, 2),
+                                        date(2024, 1, 3)})
+    assert chain.rate is None
+    assert chain.breaks == 2
+
+
+def test_chain_of_full_days_is_counted_as_before():
+    """Пометка неполных дней не меняет ничего там, где оценка полна."""
+    values = [
+        (date(2024, 1, 1), Decimal("100")),
+        (date(2024, 1, 2), Decimal("110")),
+        (date(2024, 1, 3), Decimal("121")),
+    ]
+    chain = twr(values, [], incomplete={date(2024, 5, 5)})
+    assert chain.rate == Decimal("0.2100")
+    assert chain.breaks == 0
+
+
 def test_single_point_has_no_chain():
     chain = twr([(date(2024, 1, 1), Decimal("100"))], [])
     assert chain.rate is None

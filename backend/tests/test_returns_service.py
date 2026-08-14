@@ -2,7 +2,14 @@ from datetime import date
 from decimal import Decimal
 
 from app.models import DailySnapshot, FxRate, OperationType, Price
-from app.returns.service import PERIOD_12M, PERIOD_ALL, PERIOD_YTD, period_bounds, returns_report
+from app.returns.service import (
+    PERIOD_12M,
+    PERIOD_ALL,
+    PERIOD_YTD,
+    REASON_NO_FULL_DAYS,
+    period_bounds,
+    returns_report,
+)
 from tests.test_returns_flows import add_tx, second_account
 from tests.test_returns_instrument_flows import add_instrument
 
@@ -215,6 +222,54 @@ def test_twr_is_the_growth_when_nothing_was_added(session, account):
                             by_class_now={})
     assert report.portfolio.twr == Decimal("0.1000")
     assert report.coverage.chain_breaks == 0
+
+
+def test_day_with_partial_coverage_breaks_the_chain(session, account):
+    """Снимок с неполной оценкой занижает стоимость не рынком, а отсутствием
+    цены: 11.11.2020 портфель «подешевел» вдвое, оценив 10 позиций из 12. Такой
+    день из цепочки выпадает, и разрыв виден числом, а не догадкой."""
+    add_snapshot(session, date(2026, 8, 11), "100000", valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 12), "110000", valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 13), "40000", valued=1, total_positions=2)
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("40000"), by_account_now={},
+                            by_class_now={})
+    assert report.coverage.chain_breaks == 1
+    # Без правки цепочка перемножила бы мнимое падение и дала −60 %.
+    assert report.portfolio.twr == Decimal("0.1000")
+
+
+def test_unknown_coverage_is_not_treated_as_full(session, account):
+    """Снимки старше фазы 2c покрытия не знают вовсе. «Неизвестно» — не
+    «полностью»: такой день в цепочку тоже не входит."""
+    add_snapshot(session, date(2026, 8, 11), "100000", valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 12), "110000", valued=2, total_positions=2)
+    add_snapshot(session, date(2026, 8, 13), "40000", valued=None, total_positions=None)
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("40000"), by_account_now={},
+                            by_class_now={})
+    assert report.coverage.chain_breaks == 1
+    assert report.portfolio.twr == Decimal("0.1000")
+
+
+def test_period_without_a_single_full_day_has_no_twr_and_says_why(session, account):
+    """Ни одного полностью оценённого дня — TWR не считается, и причина названа
+    словами: история на месте, не хватает цен. Ноль здесь утверждал бы, что
+    портфель ничего не заработал."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 11), amount="100000")
+    add_snapshot(session, date(2026, 8, 11), "100000", valued=1, total_positions=2)
+    add_snapshot(session, date(2026, 8, 13), "100050", valued=1, total_positions=2)
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("100050"), by_account_now={},
+                            by_class_now={})
+    assert report.portfolio.xirr is not None
+    assert report.portfolio.twr is None
+    assert report.portfolio.reason == REASON_NO_FULL_DAYS
+    assert report.coverage.chain_breaks == 1
 
 
 def test_accounts_are_split_by_identifier(session, account):
