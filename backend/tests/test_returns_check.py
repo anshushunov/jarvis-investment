@@ -35,6 +35,26 @@ def test_check_prints_reconciliation_of_parts(session, account):
     assert "Расхождение" in text
 
 
+def test_check_discounts_flows_by_the_found_rate(session, account):
+    """Признак готовности, пункт 1: ставка проверяется подстановкой в
+    определение, а не доверием к решателю. Прогон обязан напечатать невязку
+    приведённой стоимости и вердикт по ней — README обещает именно это."""
+    # Два потока разного знака в разные дни — минимум, при котором уравнение
+    # вообще имеет корень: занёс 100 000, забрал 130 000 через два года.
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 8, 13), amount="100000")
+    add_tx(session, account_id=account.id, op_type=OperationType.WITHDRAWAL,
+           day=date(2026, 6, 13), amount="-130000")
+    add_snapshot(session, date(2024, 8, 13), "100000")
+    add_snapshot(session, date(2026, 8, 13), "130000")
+
+    text = "\n".join(check_returns(session))
+    assert "Сходимость XIRR" in text
+    assert "приведённую стоимость" in text
+    # Невязка укладывается в копейку — иначе ставка не решение уравнения.
+    assert "РАСХОДИТСЯ" not in text
+
+
 def test_check_names_instruments_without_profit(session, account):
     """Расхождение обязано объясняться поимённо. Бумага без цены выпадает из
     суммы по бумагам целиком, и прогон называет её вместе с причиной — иначе

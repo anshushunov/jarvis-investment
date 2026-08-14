@@ -27,6 +27,9 @@ REASON_NO_FULL_DAYS = "no_full_days"
 REASON_SERIES_GAPS = "series_gaps"
 REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
+# Период нулевой длины — «с начала года» первого января: доходности за него не
+# существует, потому что не прошло ни дня, а не потому, что данных не хватает.
+REASON_EMPTY_PERIOD = "empty_period"
 
 @dataclass(frozen=True)
 class Period:
@@ -144,28 +147,64 @@ def incomplete_days(snapshots: list[DailySnapshot]) -> frozenset[date]:
     )
 
 
+def rate_flows(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
+                period: Period) -> list[Flow]:
+    """Потоки в том виде, в каком их видит XIRR: денежные движения периметра
+    плюс два края.
+
+    Начальная стоимость входит вложением, конечная — изъятием: за период
+    владелец «вложил» то, что у него уже было, и «получил» то, что стало.
+
+    Собирается одной функцией на весь пакет: по этому же списку прогон
+    (`app/returns/check.py`) проверяет сходимость XIRR по определению —
+    дисконтирует его по найденной ставке. Собери прогон свой список рядом — он
+    проверял бы не ту ставку, которую показывает экран.
+    """
+    result = [Flow(on_date=flow.on_date, amount=flow.amount) for flow in flows]
+    if value_start != 0 and period.since is not None:
+        result.append(Flow(on_date=period.since, amount=-value_start))
+    if value_now != 0:
+        result.append(Flow(on_date=period.until, amount=value_now))
+    return result
+
+
+def flow_span_days(flows: list[Flow]) -> int:
+    """Сколько дней прожили потоки, по которым посчитана ставка.
+
+    Именно это время XIRR и аннуализировал: год он отсчитывает от первого
+    потока, а не от границы периода. Разаннуализировать по длине периода
+    значило бы делить и умножать на разные числа — замер на тесте: 44 дня
+    периода против 40 дней потоков давали 2,20 % вместо настоящих 2,00 %.
+    """
+    if not flows:
+        return 0
+    return (max(flow.on_date for flow in flows) - min(flow.on_date for flow in flows)).days
+
+
 def metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
-            series: list[tuple[date, Decimal]], period: Period,
+            values: list[tuple[date, Decimal]], period: Period,
             incomplete: frozenset[date] = frozenset()) -> tuple[Metric, Chain]:
     """Доходность одного периметра. Начальная стоимость входит вложением, а
     конечная — изъятием: за период владелец «вложил» то, что у него уже было, и
-    «получил» то, что стало."""
+    «получил» то, что стало.
+
+    `values` — ряд «дата, стоимость» для цепочки TWR. Параметр назван не
+    `series`, хотя приходит он ровно из одноимённой функции этого модуля:
+    имя параметра перекрывало бы её внутри тела, и вызвать её здесь стало бы
+    нельзя, не заметив почему.
+    """
     profit = money(value_now - value_start + sum((flow.amount for flow in flows), Decimal("0")))
     invested = money(-sum((flow.amount for flow in flows if flow.amount < 0), Decimal("0")))
 
-    rate_flows = [Flow(on_date=flow.on_date, amount=flow.amount) for flow in flows]
-    if value_start != 0 and period.since is not None:
-        rate_flows.append(Flow(on_date=period.since, amount=-value_start))
-    if value_now != 0:
-        rate_flows.append(Flow(on_date=period.until, amount=value_now))
-
-    rate = xirr(rate_flows)
-    chain = twr(series, flows, incomplete)
+    discounted = rate_flows(flows, value_start, value_now, period)
+    rate = xirr(discounted)
+    chain = twr(values, flows, incomplete)
 
     if rate is not None and not period.annualized:
         # За период, а не в годовых: XIRR вернул годовую ставку, и на коротком
-        # периоде она врёт кратно — пересчитываем обратно.
-        rate = over_period(rate, period_days(period))
+        # периоде она врёт кратно — пересчитываем обратно по ТОМУ ЖЕ времени, по
+        # которому она аннуализирована (окно потоков), а не по длине периода.
+        rate = over_period(rate, flow_span_days(discounted))
 
     twr_rate = chain.rate
     if twr_rate is not None and chain.days >= DAYS_IN_YEAR:
@@ -179,11 +218,24 @@ def metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
 
     return Metric(xirr=rate, twr=twr_rate, profit=profit, invested=invested,
                   value=money(value_now), chain_days=chain.days,
-                  reason=reason(rate, twr_rate, flows, chain)), chain
+                  reason=reason(rate, twr_rate, flows, chain,
+                                empty_period=_is_empty_period(period))), chain
+
+
+def _is_empty_period(period: Period) -> bool:
+    """Период нулевой длины: начало и конец — один и тот же день.
+
+    Так выглядит «с начала года» первого января: измерять нечего не потому, что
+    данных не хватает, а потому, что времени ещё не прошло. Случай, когда
+    границы периода нет вовсе (`since is None`, снимков в базе нет), — не этот:
+    там нет истории, и об этом говорит своя причина.
+    """
+    return period.since is not None and period.since == period.until
 
 
 def reason(rate: Decimal | None, twr_rate: Decimal | None,
-            flows: list[CashFlow], chain: Chain) -> str | None:
+            flows: list[CashFlow], chain: Chain,
+            empty_period: bool = False) -> str | None:
     """Почему числа нет. Молчаливый прочерк запрещён: у каждого пустого места на
     экране есть названная причина.
 
@@ -201,8 +253,15 @@ def reason(rate: Decimal | None, twr_rate: Decimal | None,
     одного дня), либо ряд рваный, и соседние точки не соседние дни — «в ряду
     дыры» (так у класса, которого нет в части снимков). Ответ владельцу разный:
     в первом случае лечат котировки, во втором — история снимков.
+
+    Шестой случай — период нулевой длины (первое января для «с начала года»):
+    ставки нет, потому что не прошло ни дня. Прежний ответ «потоков
+    недостаточно» обвинял данные там, где не хватает времени: пополнения этого
+    дня могут быть на месте все до единого, а доходности всё равно ещё нет.
     """
     if rate is None:
+        if empty_period:
+            return REASON_EMPTY_PERIOD
         return REASON_NO_FLOWS if not flows else REASON_NO_SOLUTION
     if twr_rate is None:
         if chain.unvalued:

@@ -7,6 +7,7 @@ from app.returns.service import (
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
+    REASON_EMPTY_PERIOD,
     REASON_NO_FULL_DAYS,
     REASON_SERIES_GAPS,
     period_bounds,
@@ -128,7 +129,12 @@ def test_short_period_shows_return_over_the_period(session, account):
     """XIRR по устройству годовой, и на сорока днях он врёт кратно: два процента
     показались бы двадцатью. На коротком периоде показывается доходность за
     период (дизайн, раздел 4.3), а не прочерк: число известно, врёт лишь
-    годовая подпись под ним."""
+    годовая подпись под ним.
+
+    Разаннуализация идёт по времени самих потоков (40 дней: 05.01 — 14.02), а
+    не по длине периода (44 дня с 1 января): аннуализировал XIRR по своему
+    окну, и вторая длительность давала 2,20 % вместо внесённых 2,00 %.
+    """
     add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
            day=date(2026, 1, 5), amount="100000")
     add_snapshot(session, date(2026, 1, 5), "100000")
@@ -138,9 +144,24 @@ def test_short_period_shows_return_over_the_period(session, account):
                             value_now=Decimal("102000"), by_account_now={},
                             by_class_now={})
     assert report.period.annualized is False
-    assert report.portfolio.xirr is not None
-    assert report.portfolio.xirr > Decimal("0.01")
-    assert report.portfolio.xirr < Decimal("0.05")
+    assert report.portfolio.xirr == Decimal("0.0200")
+
+
+def test_zero_length_period_blames_time_not_data(session, account):
+    """«С начала года» первого января: период нулевой длины. Ставки нет потому,
+    что не прошло ни дня, — а прежний ответ «потоков недостаточно» обвинял
+    данные, которые на месте все до единого."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 1, 1), amount="100000")
+    add_snapshot(session, date(2025, 12, 31), "900000")
+    add_snapshot(session, date(2026, 1, 1), "1000000")
+
+    report = returns_report(session, PERIOD_YTD, today=date(2026, 1, 1),
+                            value_now=Decimal("1000000"), by_account_now={},
+                            by_class_now={})
+    assert report.period.since == report.period.until
+    assert report.portfolio.xirr is None
+    assert report.portfolio.reason == REASON_EMPTY_PERIOD
 
 
 def test_closed_instrument_is_listed_with_a_mark(session, account):
@@ -576,6 +597,56 @@ def test_period_cuts_off_earlier_flows(session, account):
                             by_class_now={})
     assert report.period.since == date(2025, 8, 13)
     assert report.portfolio.invested == Decimal("100000.0000")
+
+
+def test_parts_add_up_to_the_profit_of_the_portfolio(session, account):
+    """Признак готовности, пункт 3, числом: бумаги + деньги + «Прочее» равны
+    прибыли портфеля до копейки, и все три слагаемых ненулевые.
+
+    Раньше это тождество утверждал только прогон на живых данных — тест
+    проверял лишь наличие слов в его выводе. Одно неверное слагаемое из трёх
+    так не ловится: сумма двух других сходится с портфелем ровно настолько,
+    насколько ошибочно третье.
+
+    Сценарий: занесено 100 000 ₽; на 60 000 ₽ куплена бумага, подорожавшая до
+    70 000 ₽ (+10 000 ₽); 500 ₽ ушло комиссией без бумаги (−500 ₽); остаток
+    39 500 ₽ переложен в валюту, и сегодня он стоит 43 900 ₽ — 4 400 ₽ дал
+    курс. Конверсия из потоков исключена (`_is_conversion`), поэтому рублёвая
+    переоценка остатка видна только строкой «Деньги», и без неё сумма разрезов
+    разошлась бы с портфелем ровно на неё.
+    """
+    instrument = add_instrument(session)
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 1, 10), amount="100000")
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 1, 11), amount="-60000", quantity="100", price="600",
+           instrument_id=instrument.id)
+    add_tx(session, account_id=account.id, op_type=OperationType.FEE,
+           day=date(2024, 6, 10), amount="-500")
+    # Покупка валюты: BUY без instrument_id. Записан только рублёвый бок —
+    # именно так конверсия и приходит от брокера.
+    add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+           day=date(2024, 6, 11), amount="-39500", quantity="439", price="90")
+    add_price(session, instrument.id, date(2026, 8, 13), "700")
+    add_snapshot(session, date(2024, 1, 10), "0")
+    add_snapshot(session, date(2026, 8, 13), "113900",
+                 by_class={"equity": "70000", "cash": "43900"})
+
+    report = returns_report(
+        session, PERIOD_ALL, today=date(2026, 8, 13), value_now=Decimal("113900"),
+        by_account_now={}, by_class_now={"equity": Decimal("70000"),
+                                         "cash": Decimal("43900")},
+        cash_now=Decimal("43900"))
+
+    instruments = sum((row.profit for row in report.by_instrument
+                       if row.profit is not None), Decimal("0"))
+    cash = next(row.metric.profit for row in report.by_asset_class
+                if row.asset_class == MONEY_ROW_CLASS)
+    assert instruments == Decimal("10000.0000")
+    assert cash == Decimal("4400.0000")
+    assert report.unattributed.profit == Decimal("-500.0000")
+    assert instruments + cash + report.unattributed.profit == report.portfolio.profit
+    assert report.portfolio.profit == Decimal("13900.0000")
 
 
 def test_instrument_rows_are_ordered_by_significance(session, account):

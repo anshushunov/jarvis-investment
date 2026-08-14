@@ -31,14 +31,15 @@ from app.returns.metrics import (
     REASON_NO_HISTORY,
     Metric,
     Period,
+    flow_span_days,
     metric,
     over_period,
-    period_days,
+    rate_flows,
     series,
     series_start,
 )
 from app.returns.rates import RateBook
-from app.returns.xirr import Flow, xirr
+from app.returns.xirr import xirr
 
 # Классы денежных остатков: рубли, валюта и металлы. Имена не перечисляются —
 # их отвечает `app/analytics/service.py::cash_asset_class`, тот же, кто их
@@ -332,13 +333,11 @@ def _instrument_rate(flows: list[CashFlow], value_start: Decimal | None,
     if value_start is None or value_end is None:
         return None
 
-    rate_flows = [Flow(on_date=flow.on_date, amount=flow.amount) for flow in flows]
-    if value_start != 0 and period.since is not None:
-        rate_flows.append(Flow(on_date=period.since, amount=-value_start))
-    if value_end != 0:
-        rate_flows.append(Flow(on_date=period.until, amount=value_end))
-
-    rate = xirr(rate_flows)
+    discounted = rate_flows(flows, value_start, value_end, period)
+    rate = xirr(discounted)
     if rate is not None and not period.annualized:
-        rate = over_period(rate, period_days(period))
+        # По времени самих потоков, а не по длине периода: XIRR аннуализировал
+        # по своему окну, и разаннуализировать по чужому значило бы делить и
+        # умножать на разные числа (см. metrics.flow_span_days).
+        rate = over_period(rate, flow_span_days(discounted))
     return rate

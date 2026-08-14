@@ -15,15 +15,19 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models import OperationType, Transaction
 from app.money import money
-from app.returns.flows import RAW_CASH_MOVE_TYPES, instrument_flows
+from app.returns.flows import RAW_CASH_MOVE_TYPES, instrument_flows, portfolio_flows
+from app.returns.metrics import rate_flows, series_start
 from app.returns.rates import RateBook
 from app.returns.service import (
     MONEY_ROW_CLASS,
     PERIOD_12M,
     PERIOD_ALL,
     PERIOD_YTD,
+    ReturnsReport,
+    opening_snapshot,
     returns_report,
 )
+from app.returns.xirr import NPV_TOLERANCE, npv, xirr
 from app.timeutils import moscow_date
 
 PERIOD_TITLES = {PERIOD_ALL: "всё время", PERIOD_12M: "12 месяцев", PERIOD_YTD: "с начала года"}
@@ -64,6 +68,42 @@ def _unattributed_by_query(session: Session, since, until) -> Decimal:
     return money(total)
 
 
+def _xirr_convergence(session: Session, report: ReturnsReport) -> str:
+    """Признак готовности, пункт 1: XIRR проверяет сам себя.
+
+    Ставка — это корень уравнения «приведённая стоимость потоков равна нулю»,
+    и проверяется она подстановкой, а не доверием к решателю: те же потоки
+    дисконтируются по найденной ставке, и печатается невязка. Порог — копейка
+    (`NPV_TOLERANCE`), та же, которой меряет сходимость сам решатель.
+
+    Потоки собираются той же функцией, что кормит расчёт на экране
+    (`metrics.rate_flows`), и от той же точки отсчёта (`opening_snapshot`):
+    собери прогон свой список рядом — он проверял бы другую ставку.
+
+    Ставка берётся не из отчёта, а считается по этим потокам заново: в отчёте
+    у короткого периода лежит доходность ЗА ПЕРИОД (годовая пересчитана
+    обратно, дизайн раздел 4.3), и дисконтировать по ней — значит проверять
+    величину, которой уравнение не решали.
+    """
+    period = report.period
+    book = RateBook.load(session)
+    flows = rate_flows(
+        portfolio_flows(session, book, period.since, period.until),
+        series_start(opening_snapshot(session, period.since), lambda row: row.total_value),
+        report.portfolio.value, period)
+
+    rate = xirr(flows)
+    if rate is None:
+        return ("Сходимость XIRR: ставки нет (потоков недостаточно) — "
+                "дисконтировать нечего")
+
+    residual = npv(flows, rate)
+    verdict = ("сходится" if abs(residual) < NPV_TOLERANCE
+               else f"РАСХОДИТСЯ (порог {NPV_TOLERANCE} ₽)")
+    return (f"Сходимость XIRR: {len(flows)} потоков по ставке {rate * 100:.2f} % годовых "
+            f"дают приведённую стоимость {residual:.4f} ₽ — {verdict}")
+
+
 def check_returns(session: Session) -> list[str]:
     lines: list[str] = []
 
@@ -81,6 +121,7 @@ def check_returns(session: Session) -> list[str]:
         lines.append(f"Прибыль портфеля {report.portfolio.profit} ₽, "
                      f"вложено {report.portfolio.invested} ₽, "
                      f"стоимость {report.portfolio.value} ₽")
+        lines.append(_xirr_convergence(session, report))
 
         coverage = report.coverage
         lines.append(f"Покрытие: полная оценка у {coverage.days_valued} дат из "

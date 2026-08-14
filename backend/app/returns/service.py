@@ -43,6 +43,7 @@ from app.returns.metrics import (  # noqa: F401 — часть публично�
     PERIOD_YTD,
     PERIODS,
     REASON_CASH,
+    REASON_EMPTY_PERIOD,
     REASON_NO_FLOWS,
     REASON_NO_FULL_DAYS,
     REASON_NO_HISTORY,
@@ -106,8 +107,13 @@ def _snapshots(session: Session, since: date | None, until: date) -> list[DailyS
     return list(session.execute(query.order_by(DailySnapshot.on_date)).scalars().all())
 
 
-def _opening(session: Session, since: date | None) -> DailySnapshot | None:
+def opening_snapshot(session: Session, since: date | None) -> DailySnapshot | None:
     """Последний снимок ДО периода — точка отсчёта.
+
+    Публичная: этой же точкой отсчёта пользуется прогон (`check.py`), когда
+    восстанавливает потоки портфеля, чтобы дисконтировать их по найденной
+    ставке. Своя копия правила «что считать началом» разошлась бы с этой при
+    первой же правке — а тогда прогон проверял бы не ту ставку, что на экране.
 
     Снимок первого дня периода на эту роль не годится: он снят на конец дня и
     уже содержит пополнение этого дня, а пополнение этого дня входит и в потоки
@@ -174,7 +180,7 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     # прибыль. Две разные «начальные стоимости» в одном отчёте разошлись бы
     # молча. Ряд по бумаге не строится вовсе: дневного ряда по бумаге в снимке
     # нет (дизайн, раздел 4.3).
-    opening = _opening(session, period.since)
+    opening = opening_snapshot(session, period.since)
     chart = ([opening] if opening is not None else []) + snapshots
 
     # Неполнота оценки — свойство дня, а не периметра: цена, которой не нашлось,
