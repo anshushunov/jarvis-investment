@@ -20,6 +20,8 @@ def test_returns_endpoint_answers(client, session, account):
     # Деньги — строки, как везде: точность Decimal через float не проходит.
     assert isinstance(body["portfolio"]["profit"], str)
     assert body["unattributed"]["profit"] == "0.0000"
+    # Число дней измеренной цепочки — целое, не денежная строка.
+    assert isinstance(body["portfolio"]["chain_days"], int)
 
 
 def test_unknown_period_is_rejected(client):

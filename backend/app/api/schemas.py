@@ -230,6 +230,13 @@ class MetricOut(BaseModel):
     profit: Decimal
     invested: Decimal
     value: Decimal
+    # Сколько дней цепочка TWR действительно измерила для ЭТОГО периметра (не
+    # общее число дней периода — оно одно на весь отчёт и уже есть в
+    # `period.from`/`period.to`). Число, а не деньги: сериализуется как есть.
+    # None — у периметра TWR не считается вовсе (строка «Деньги», см. Metric в
+    # app/returns/metrics.py); 0 — цепочка построена, но не измерила ни
+    # одного шага. Это разные ответы, и подменять один другим нельзя.
+    chain_days: int | None
     reason: str | None
 
     @field_serializer("xirr", "twr")

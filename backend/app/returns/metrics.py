@@ -43,6 +43,24 @@ class Metric:
     profit: Decimal
     invested: Decimal
     value: Decimal
+    # Сколько дней цепочка TWR ДЕЙСТВИТЕЛЬНО измерила для ЭТОГО периметра —
+    # `Chain.days`, донесённый до строки. Не размах ряда и не длина периода:
+    # строка счёта, строка класса и строка портфеля стоят в одной колонке
+    # таблицы, но измерены на разных отрезках истории (счёт 7 — на своём,
+    # класс `equity` — на своём), и без этого числа они выглядят сравнимыми,
+    # хотя не сравнимы. Общее число дней периода здесь нарочно не хранится:
+    # оно одно на весь отчёт, не зависит от периметра строки и уже едет в
+    # `ReturnsOut.period` (`from`/`to`) — повторять его в каждой строке
+    # значило бы писать одно и то же число сотни раз.
+    #
+    # None и 0 — разные утверждения, и подменять одно другим нельзя: 0 значит
+    # «цепочка построена, но не измерила ни одного шага» (истории не хватает
+    # или в ней сплошные дыры — см. REASON_NO_FULL_DAYS, REASON_SERIES_GAPS,
+    # REASON_NO_HISTORY в `reason()`), а None значит «для этого периметра TWR
+    # не считается вовсе» — так у строки «Деньги» (`money_row`): решение
+    # владельца № 3, цепочки для неё не строят, и 0 соврал бы, что попытка
+    # была и не удалась.
+    chain_days: int | None = None
     reason: str | None = None
 
 
@@ -160,7 +178,7 @@ def metric(flows: list[CashFlow], value_start: Decimal, value_now: Decimal,
         twr_rate = annualize(twr_rate, chain.days)
 
     return Metric(xirr=rate, twr=twr_rate, profit=profit, invested=invested,
-                  value=money(value_now),
+                  value=money(value_now), chain_days=chain.days,
                   reason=reason(rate, twr_rate, flows, chain)), chain
 
 

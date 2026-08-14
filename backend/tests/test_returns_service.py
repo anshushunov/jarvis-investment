@@ -282,6 +282,57 @@ def test_twr_is_annualized_by_measured_time_not_by_span(session, account):
     assert report.portfolio.twr == Decimal("0.1000")
 
 
+def test_account_and_class_rows_carry_their_own_measured_days(session, account):
+    """Счёт и класс — разные периметры со своим измеренным временем: у счёта
+    ряд непрерывный, у класса в середине дыра (класс на день выпал из
+    снимка), и цепочка измеряет их порознь. Одна колонка таблицы не делает их
+    сравнимыми: 444 дня из 2219 живого портфеля и 2219 из 2219 — разные
+    ответы, а без этого числа выглядели бы одинаково."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 10), amount="100000")
+    add_snapshot(session, date(2026, 8, 10), "100000",
+                 by_account={str(account.id): "100000"}, by_class={"equity": "100000"})
+    add_snapshot(session, date(2026, 8, 11), "110000",
+                 by_account={str(account.id): "110000"}, by_class={"equity": "110000"})
+    # Класс временно выпал из снимка — дыра в его ряду, счёт в разбивке есть.
+    add_snapshot(session, date(2026, 8, 12), "115000",
+                 by_account={str(account.id): "115000"}, by_class={})
+    add_snapshot(session, date(2026, 8, 13), "120000",
+                 by_account={str(account.id): "120000"}, by_class={"equity": "120000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("120000"),
+                            by_account_now={account.id: Decimal("120000")},
+                            by_class_now={"equity": Decimal("120000")},
+                            cash_now=Decimal("0"))
+    account_row = next(row for row in report.by_account if row.account_id == account.id)
+    class_row = next(row for row in report.by_asset_class if row.asset_class == "equity")
+
+    # Счёт — непрерывный ряд четырёх дней: измерены все три шага подряд.
+    assert account_row.metric.chain_days == 3
+    # Класс потерял середину ряда: измерен только первый шаг, дыра забрала
+    # остальное — периметр с дырой измерен меньше периметра без дыр.
+    assert class_row.metric.chain_days == 1
+    assert class_row.metric.chain_days < account_row.metric.chain_days
+
+
+def test_money_row_has_no_measured_days_not_zero(session, account):
+    """У денег TWR не считается вовсе (решение владельца № 3) — цепочки для
+    строки «Деньги» не строят, и 0 тут соврал бы, что попытка была и не
+    удалась. Название пусто, не ноль."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 12), amount="100000")
+    add_snapshot(session, date(2026, 8, 12), "100000", by_class={"cash": "100000"})
+    add_snapshot(session, date(2026, 8, 13), "120000", by_class={"cash": "120000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("120000"), by_account_now={},
+                            by_class_now={"cash": Decimal("120000")},
+                            cash_now=Decimal("120000"))
+    row = next(row for row in report.by_asset_class if row.asset_class == MONEY_ROW_CLASS)
+    assert row.metric.chain_days is None
+
+
 def test_class_missing_from_snapshots_breaks_its_chain(session, account):
     """Класс, которого нет в снимке, оставляет в ряду дыру. Соседние точки —
     разные концы дыры, и продажа внутри неё выпадает вместе со своим потоком:

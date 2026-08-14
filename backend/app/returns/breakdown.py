@@ -276,7 +276,7 @@ def money_row(value_now: Decimal, opening: DailySnapshot | None,
         return None
     return AssetClassRow(asset_class=MONEY_ROW_CLASS, metric=Metric(
         xirr=None, twr=None, profit=profit, invested=Decimal("0"),
-        value=money(value_now), reason=REASON_CASH))
+        value=money(value_now), chain_days=None, reason=REASON_CASH))
 
 
 def _instrument_rate(flows: list[CashFlow], value_start: Decimal | None,
