@@ -294,6 +294,50 @@ def test_period_without_a_single_full_day_has_no_twr_and_says_why(session, accou
     assert report.coverage.chain_breaks == 1
 
 
+def test_money_row_earns_the_revaluation_of_the_balance(session, account):
+    """Валютный остаток вырос в рублях — это настоящий результат, и он обязан
+    быть виден. Доходности у денег по-прежнему нет (решение владельца № 3), но
+    прибыль есть: занесено 100 000 ₽, остаток стоит 120 000 ₽ — заработано
+    20 000 ₽, и на них сходится прибыль портфеля."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 12), amount="100000")
+    add_snapshot(session, date(2026, 8, 12), "100000", by_class={"cash": "100000"})
+    add_snapshot(session, date(2026, 8, 13), "120000", by_class={"cash": "120000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("120000"), by_account_now={},
+                            by_class_now={"cash": Decimal("120000")})
+    row = next(row for row in report.by_asset_class if row.asset_class == "cash")
+    assert row.metric.profit == Decimal("20000.0000")
+    assert row.metric.xirr is None
+    assert row.metric.twr is None
+    assert row.metric.reason == "cash"
+    # Разрезы сходятся с целым: бумаг нет, «Прочего» нет, всё в деньгах.
+    assert row.metric.profit + report.unattributed.profit == report.portfolio.profit
+
+
+def test_metal_balance_is_counted_in_the_money_row(session, account):
+    """Металл — не деньги в аллокации, но в разрезе доходности он живёт в той же
+    строке: перекладывание между остатком и золотом журнал записывает конверсией
+    без бумаги, и отделить его от покупки валюты нечем. Отдельная строка золота
+    показала бы всю его стоимость прибылью."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2026, 8, 12), amount="100000")
+    add_snapshot(session, date(2026, 8, 12), "100000", by_class={"cash": "100000"})
+    add_snapshot(session, date(2026, 8, 13), "120000",
+                 by_class={"cash": "20000", "gold": "100000"})
+
+    report = returns_report(session, PERIOD_ALL, today=date(2026, 8, 13),
+                            value_now=Decimal("120000"), by_account_now={},
+                            by_class_now={"cash": Decimal("20000"),
+                                          "gold": Decimal("100000")})
+    classes = {row.asset_class for row in report.by_asset_class}
+    assert "gold" not in classes
+    row = next(row for row in report.by_asset_class if row.asset_class == "cash")
+    assert row.metric.value == Decimal("120000.0000")
+    assert row.metric.profit == Decimal("20000.0000")
+
+
 def test_accounts_are_split_by_identifier(session, account):
     """Два счёта с разными потоками дают разные строки, и строка ищется по
     идентификатору счёта — тому же, каким разбивка лежит в снимке."""

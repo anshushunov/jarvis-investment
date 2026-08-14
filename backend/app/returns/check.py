@@ -15,7 +15,13 @@ from app.db import SessionLocal
 from app.money import money
 from app.returns.flows import instrument_flows
 from app.returns.rates import RateBook
-from app.returns.service import PERIOD_12M, PERIOD_ALL, PERIOD_YTD, returns_report
+from app.returns.service import (
+    MONEY_CLASSES,
+    PERIOD_12M,
+    PERIOD_ALL,
+    PERIOD_YTD,
+    returns_report,
+)
 
 PERIOD_TITLES = {PERIOD_ALL: "всё время", PERIOD_12M: "12 месяцев", PERIOD_YTD: "с начала года"}
 
@@ -50,14 +56,21 @@ def check_returns(session: Session) -> list[str]:
         if coverage.currencies_without_rate:
             lines.append("Потоки без курса: " + ", ".join(coverage.currencies_without_rate))
 
-        # Признак готовности, пункт 3: сумма частей против целого.
+        # Признак готовности, пункт 3: сумма по бумагам, деньгам и строке
+        # «Прочее» против прибыли портфеля — ровно то тождество, которое
+        # обещает дизайн (раздел 7). Без слагаемого «деньги» рублёвая
+        # переоценка валютного остатка не входила никуда, и на неё расходились
+        # разрезы.
         instruments_profit = sum((row.profit for row in report.by_instrument
                                    if row.profit is not None), Decimal("0"))
-        parts = money(instruments_profit + report.unattributed.profit)
+        money_profit = sum((row.metric.profit for row in report.by_asset_class
+                            if row.asset_class in MONEY_CLASSES), Decimal("0"))
+        parts = money(instruments_profit + money_profit + report.unattributed.profit)
         lines.append(f"Прочее (комиссии {report.unattributed.fees} ₽, налоги "
                      f"{report.unattributed.taxes} ₽, прочее {report.unattributed.other} ₽): "
                      f"{report.unattributed.profit} ₽")
-        lines.append(f"Сумма по бумагам {money(instruments_profit)} ₽ + Прочее = {parts} ₽")
+        lines.append(f"Деньги и металлы: {money(money_profit)} ₽")
+        lines.append(f"Сумма по бумагам {money(instruments_profit)} ₽ + Деньги + Прочее = {parts} ₽")
         mismatch = money(parts - report.portfolio.profit)
         lines.append(f"Расхождение с прибылью портфеля: {mismatch} ₽")
 
@@ -114,7 +127,8 @@ def check_returns(session: Session) -> list[str]:
                          f"TWR {_rate(row.metric.twr)} · прибыль {row.metric.profit} ₽")
         for row in report.by_asset_class:
             lines.append(f"  {row.asset_class}: XIRR {_rate(row.metric.xirr)} · "
-                         f"TWR {_rate(row.metric.twr)} · стоимость {row.metric.value} ₽")
+                         f"TWR {_rate(row.metric.twr)} · прибыль {row.metric.profit} ₽ · "
+                         f"стоимость {row.metric.value} ₽")
 
     if not lines:
         lines.append("Данных нет: журнал пуст")

@@ -5,7 +5,12 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.analytics.service import asset_class_of, portfolio_overview
+from app.analytics.service import (
+    CASH_CLASS,
+    METAL_CURRENCIES,
+    asset_class_of,
+    portfolio_overview,
+)
 from app.analytics.valuation import value_position
 from app.marketdata.service import LatestPrice, prices_as_of
 from app.models import Account, DailySnapshot, Instrument
@@ -41,7 +46,17 @@ REASON_NO_FULL_DAYS = "no_full_days"
 REASON_NO_SOLUTION = "no_solution"
 REASON_CASH = "cash"
 
-CASH_CLASS = "cash"
+# Классы денежных остатков: рубли, валюта и металлы. Какой класс денежный,
+# решает `app/analytics/service.py::cash_asset_class` — здесь только перечень
+# его ответов, второго правила в проекте не заводится.
+#
+# В разрезе доходности все они — один периметр и одна строка. Отделить
+# перекладывание рублей в золото от покупки валюты нечем: и то и другое лежит в
+# журнале записью без бумаги (замер 14.08.2026: 13 покупок золота на 83 686,80 ₽
+# среди 498 конверсий валюты, отличает их только название от брокера). Отдельная
+# строка золота показала бы прибылью всю его стоимость — 117 130 ₽ вместо
+# настоящих 33 443 ₽.
+MONEY_CLASSES = frozenset({CASH_CLASS, *METAL_CURRENCIES.values()})
 
 
 @dataclass(frozen=True)
@@ -398,10 +413,11 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
                             incomplete)
         by_account.append(AccountRow(account_id=account.id, metric=metric))
 
+    unattributed = unattributed_flows(session, book, period.since, period.until)
     instrument_rows, by_class = _instrument_and_class_rows(
         session, book, period, chart, opening,
         [ledger_entries(session, account) for account in accounts], by_class_now,
-        incomplete)
+        incomplete, flows, unattributed)
 
     # Полнота оценки дня — только там, где её вообще считали: у снимков старше
     # фазы 2c покрытие NULL, и «NULL равен NULL» записало бы день с неизвестным
@@ -423,7 +439,7 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     return ReturnsReport(
         period=period, portfolio=portfolio, coverage=coverage,
         by_account=by_account, by_asset_class=by_class, by_instrument=instrument_rows,
-        unattributed=unattributed_flows(session, book, period.since, period.until),
+        unattributed=unattributed,
     )
 
 
@@ -431,11 +447,16 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                                chart: list[DailySnapshot], opening: DailySnapshot | None,
                                journals: list[list[LedgerEntry]],
                                by_class_now: dict[str, Decimal],
-                               incomplete: frozenset[date] = frozenset()):
+                               incomplete: frozenset[date] = frozenset(),
+                               outer_flows: list[CashFlow] | None = None,
+                               unattributed: Unattributed | None = None):
     """Строки по бумагам и по классам активов за один проход.
 
     Класс бумаги берётся сегодняшний: истории смены класса система не хранит, и
     выдумывать её здесь нельзя. Упрощение названо на экране.
+
+    `outer_flows` и `unattributed` нужны строке «Деньги»: её потоки — зеркало
+    всего остального (см. `_money_row`).
     """
     flows_by_instrument = instrument_flows(session, book, period.since, period.until)
 
@@ -514,16 +535,10 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
     # прибыль за период принёс, и без его строки сумма по классам не сойдётся с
     # портфелем ровно на неё (то же решение, что и по проданным бумагам).
     for klass in sorted(set(by_class_now) | set(class_flows)):
-        value_now = by_class_now.get(klass, Decimal("0"))
-        if klass == CASH_CLASS:
-            # Доходности у денежного остатка нет: он не растёт сам, а проценты
-            # на него приходят записями без бумаги и уже посчитаны строкой
-            # «Прочее». Показать тут ноль значило бы утверждать, что деньги
-            # ничего не принесли, — а они не могли.
-            by_class.append(AssetClassRow(asset_class=klass, metric=Metric(
-                xirr=None, twr=None, profit=Decimal("0"), invested=Decimal("0"),
-                value=money(value_now), reason=REASON_CASH)))
+        if klass in MONEY_CLASSES:
+            # Деньги и металлы считаются одной строкой ниже: их периметр общий.
             continue
+        value_now = by_class_now.get(klass, Decimal("0"))
 
         def pick(row, key=klass):
             return (row.by_asset_class or {}).get(key)
@@ -532,7 +547,49 @@ def _instrument_and_class_rows(session: Session, book: RateBook, period: Period,
                             value_now, _series(chart, pick), period, incomplete)
         by_class.append(AssetClassRow(asset_class=klass, metric=metric))
 
-    return rows, by_class
+    money_row = _money_row(
+        by_class_now, opening, period,
+        outer_flows or [], unattributed or Unattributed(*(Decimal("0"),) * 4),
+        [flow for flows in flows_by_instrument.values() for flow in flows])
+    if money_row is not None:
+        by_class.append(money_row)
+
+    return rows, sorted(by_class, key=lambda row: row.asset_class)
+
+
+def _money_row(by_class_now: dict[str, Decimal], opening: DailySnapshot | None,
+               period: Period, outer_flows: list[CashFlow], unattributed: Unattributed,
+               trade_flows: list[CashFlow]) -> AssetClassRow | None:
+    """Строка «Деньги» — остатки и металлы одним периметром.
+
+    Прибыль считается так же, как у любого класса: стоимость на конец минус
+    стоимость на начало плюс потоки. Потоки денег — зеркало всего остального
+    (дизайн, раздел 4.2): пополнение владельца входит в периметр вложением,
+    покупка бумаги уходит из него изъятием, комиссия — тоже (её результат уже
+    посчитан строкой «Прочее», и второй раз его вычитать нельзя). Иначе
+    рублёвая переоценка валютного остатка не видна нигде: замер 14.08.2026 —
+    16 044,58 ₽ необъяснённого остатка при сходимости разрезов.
+
+    Доходности у денег нет и не будет: решение владельца № 3. Остаток не растёт
+    сам, а проценты на него приходят записями без бумаги — они в «Прочем».
+    """
+    value_now = sum((by_class_now.get(klass, Decimal("0")) for klass in MONEY_CLASSES),
+                    Decimal("0"))
+    value_start = sum(
+        (_series_start(opening, lambda row, key=klass: (row.by_asset_class or {}).get(key))
+         for klass in MONEY_CLASSES), Decimal("0"))
+    mirrored = (sum((flow.amount for flow in outer_flows), Decimal("0"))
+                - sum((flow.amount for flow in trade_flows), Decimal("0"))
+                - unattributed.profit)
+    profit = money(value_now - value_start + mirrored)
+
+    if not value_now and not value_start and not profit:
+        # Денег в портфеле нет вовсе — строки тоже быть не должно: пустая строка
+        # с нулями отвечает на вопрос, которого никто не задавал.
+        return None
+    return AssetClassRow(asset_class=CASH_CLASS, metric=Metric(
+        xirr=None, twr=None, profit=profit, invested=Decimal("0"),
+        value=money(value_now), reason=REASON_CASH))
 
 
 def _instrument_rate(flows: list[CashFlow], value_start: Decimal | None,
