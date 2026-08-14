@@ -1,5 +1,6 @@
-import { formatDate, formatRate } from "../api/format";
+import { formatDate, fractionToPercent } from "../api/format";
 import { Card, CardTitle } from "../ui/Card";
+import { ChangeValue } from "./MoneyValue";
 import type { Returns } from "../api/client";
 
 // Причина отсутствия ставки — словами владельца, а не кодом (см.
@@ -27,10 +28,19 @@ function Rate({ title, term, question, value, footnote }: {
   // всей — живой замер 14.08.2026 дал 444 из 2219 дней.
   footnote?: string;
 }) {
+  // Знак — стрелкой и цветом одновременно, тем же компонентом, что уже несёт
+  // это правило в таблице позиций (MoneyValue.tsx:ChangeValue): цвет в
+  // одиночку ничего не сообщает тому, кто его не различает. Доходность —
+  // такая же знаковая процентная величина, как profit_percent, второго
+  // компонента под неё заводить не нужно. ChangeValue сам форматирует и сам
+  // показывает прочерк на null — конверсия доли в проценты (fractionToPercent)
+  // здесь единственный шаг, который ему не принадлежит.
   return (
     <div>
       <div className="text-xs text-muted">{title} · {term}</div>
-      <div className="text-2xl font-[650] tabular-nums">{formatRate(value)}</div>
+      <div className="text-2xl font-[650] tabular-nums">
+        <ChangeValue percent={value === null ? null : fractionToPercent(value)} />
+      </div>
       <div className="mt-1 text-xs text-muted">{question}</div>
       {footnote !== undefined && <div className="mt-0.5 text-2xs text-muted">{footnote}</div>}
     </div>

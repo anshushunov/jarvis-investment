@@ -25,8 +25,48 @@ const base: Returns = {
 describe("ReturnsSummary", () => {
   it("показывает обе доходности процентами", () => {
     render(<ReturnsSummary returns={base} />);
-    expect(screen.getByText("+18,4%")).toBeInTheDocument();
-    expect(screen.getByText("+15,3%")).toBeInTheDocument();
+    // Текст доходности теперь несёт ещё и стрелку (ChangeValue), поэтому
+    // ищем число как часть содержимого, а не всё содержимое целиком.
+    expect(screen.getByText(/\+18,4%/)).toBeInTheDocument();
+    expect(screen.getByText(/\+15,3%/)).toBeInTheDocument();
+  });
+
+  it("передаёт знак ростом — стрелкой вверх и цветом одновременно, а не только цветом", () => {
+    // Обязательное правило дизайн-системы (спека, раздел про табличные
+    // цифры): цвет в одиночку ничего не говорит тому, кто его не различает.
+    // Тот же компонент, что уже несёт это правило для profit_percent в
+    // PositionsTable — ChangeValue из MoneyValue.tsx.
+    render(<ReturnsSummary returns={base} />);
+    const xirr = screen.getByText(/▲ \+18,4%/);
+    const twr = screen.getByText(/▲ \+15,3%/);
+    expect(xirr).toHaveClass("text-green");
+    expect(twr).toHaveClass("text-green");
+  });
+
+  it("передаёт знак падением — стрелкой вниз и цветом одновременно", () => {
+    const negative: Returns = {
+      ...base,
+      portfolio: { ...base.portfolio, xirr: "-0.0521", twr: "-0.0318" },
+    };
+    render(<ReturnsSummary returns={negative} />);
+    const xirr = screen.getByText(/▼ −5,2%/);
+    const twr = screen.getByText(/▼ −3,2%/);
+    expect(xirr).toHaveClass("text-red");
+    expect(twr).toHaveClass("text-red");
+  });
+
+  it("не красит нулевую доходность ни зелёным, ни красным: ноль — не рост и не падение", () => {
+    const zero: Returns = {
+      ...base,
+      portfolio: { ...base.portfolio, xirr: "0", twr: "0" },
+    };
+    render(<ReturnsSummary returns={zero} />);
+    const marks = screen.getAllByText(/• 0,0%/);
+    expect(marks).toHaveLength(2);
+    for (const mark of marks) {
+      expect(mark).not.toHaveClass("text-green");
+      expect(mark).not.toHaveClass("text-red");
+    }
   });
 
   it("объясняет каждую доходность вопросом, а не термином", () => {
@@ -66,12 +106,19 @@ describe("ReturnsSummary", () => {
     expect(screen.getByText(/измерено 444 дней из 2219/i)).toBeInTheDocument();
   });
 
-  it("не показывает измеренное время, когда TWR для периметра не считается вовсе", () => {
-    const noChain: Returns = {
+  it("прячет измеренное время при chain_days = null — граница типа, а не реальный портфель", () => {
+    // В реальных данных xirr/twr/chain_days = null и reason = "cash"
+    // встречаются вместе только у строки «Деньги» разреза по классам
+    // (backend/app/returns/breakdown.py: money_row) — у самого портфеля
+    // chain_days null не бывает никогда (chain строится всегда, см.
+    // app/returns/metrics.py: metric()). Тип ReturnMetric разрешает такое
+    // состояние и для portfolio, и тест проверяет именно это: компонент не
+    // соврёт «измерено 0 дней», если типовая граница всё же нарушится.
+    const cashLikeState: Returns = {
       ...base,
-      portfolio: { ...base.portfolio, twr: null, chain_days: null, reason: "cash" },
+      portfolio: { ...base.portfolio, xirr: null, twr: null, chain_days: null, reason: "cash" },
     };
-    render(<ReturnsSummary returns={noChain} />);
+    render(<ReturnsSummary returns={cashLikeState} />);
     expect(screen.queryByText(/измерено/i)).not.toBeInTheDocument();
   });
 

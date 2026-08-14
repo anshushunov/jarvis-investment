@@ -106,14 +106,21 @@ export function formatPercent(raw: string | null | undefined): string {
 }
 
 // XIRR и TWR приходят с бэкенда долями ("0.1842" = 18,42 %), а formatPercent
-// ждёт готовые проценты ("18.42"). Домножение на 100 — не то же исключение,
-// что formatPercent делает для чисел через Number: formatPercent уже
-// проходит через Number.parseFloat внутри, formatRate лишь готовит для неё
-// вход и точности не добавляет и не убавляет. formatPercent саму менять
-// нельзя — её зовут таблицы позиций (см. правило фазы 4a).
+// (и всё, что её вызывает изнутри, например ChangeValue) ждёт готовые
+// проценты ("18.42"). Шаг конверсии один и тот же везде, и вынесен сюда,
+// чтобы «умножить на сто» не разъехалось по нескольким местам.
+export function fractionToPercent(raw: string): string {
+  return String(Number.parseFloat(raw) * 100);
+}
+
+// Домножение на 100 — не то же исключение, что formatPercent делает для
+// чисел через Number: formatPercent уже проходит через Number.parseFloat
+// внутри, formatRate лишь готовит для неё вход и точности не добавляет и не
+// убавляет. formatPercent саму менять нельзя — её зовут таблицы позиций (см.
+// правило фазы 4a).
 export function formatRate(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "—";
-  return formatPercent(String(Number.parseFloat(raw) * 100));
+  return formatPercent(fractionToPercent(raw));
 }
 
 export function formatQuantity(raw: string): string {
