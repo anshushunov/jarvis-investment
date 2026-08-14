@@ -100,8 +100,12 @@ def _xirr_convergence(session: Session, report: ReturnsReport) -> str:
     residual = npv(flows, rate)
     verdict = ("сходится" if abs(residual) < NPV_TOLERANCE
                else f"РАСХОДИТСЯ (порог {NPV_TOLERANCE} ₽)")
-    return (f"Сходимость XIRR: {len(flows)} потоков по ставке {rate * 100:.2f} % годовых "
-            f"дают приведённую стоимость {residual:.4f} ₽ — {verdict}")
+    # У короткого периода годовая ставка и та, что показана выше, — разные
+    # числа по построению. Сказать об этом здесь дешевле, чем оставить читателя
+    # сверять 6,43 % с 3,92 % и гадать, какое из них сломано.
+    shown = "" if period.annualized else " (выше она же пересчитана за период)"
+    return (f"Сходимость XIRR: {len(flows)} потоков по ставке {rate * 100:.2f} % годовых"
+            f"{shown} дают приведённую стоимость {residual:.4f} ₽ — {verdict}")
 
 
 def check_returns(session: Session) -> list[str]:
