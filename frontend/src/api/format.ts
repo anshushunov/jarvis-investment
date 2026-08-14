@@ -98,6 +98,48 @@ export function isPositiveAmount(raw: string): boolean {
   return !raw.startsWith("-") && /[1-9]/.test(raw);
 }
 
+// Сложение денег без Number — правило модуля действует и здесь: 253 суммы,
+// сложенные через float, разъезжаются с бэкендом в копейках, а итог под
+// таблицей существует ровно затем, чтобы сверяться с прибылью портфеля.
+// Бэкенд отдаёт деньги строкой с четырьмя знаками после точки (см.
+// serialize_money в backend/app/api/schemas.py), поэтому складываем целыми
+// десятитысячными долями рубля в BigInt и возвращаем строку того же вида.
+const MONEY_SCALE = 4;
+
+function toScaled(raw: string): bigint {
+  const negative = raw.startsWith("-");
+  const [whole, fraction = ""] = (negative ? raw.slice(1) : raw).split(".");
+  const scaled = BigInt(whole + fraction.slice(0, MONEY_SCALE).padEnd(MONEY_SCALE, "0"));
+  return negative ? -scaled : scaled;
+}
+
+function fromScaled(value: bigint): string {
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(MONEY_SCALE + 1, "0");
+  return `${negative ? "-" : ""}${digits.slice(0, -MONEY_SCALE)}.${digits.slice(-MONEY_SCALE)}`;
+}
+
+// null и undefined пропускаются, а не считаются нулём: у бумаги без цены
+// прибыль неизвестна, и подставить ей ноль значило бы утверждать, что она не
+// принесла ничего. Сколько таких строк выпало из суммы, экран говорит рядом.
+export function sumMoney(values: (string | null | undefined)[]): string {
+  let total = 0n;
+  for (const value of values) {
+    if (value !== null && value !== undefined) total += toScaled(value);
+  }
+  return fromScaled(total);
+}
+
+export function subtractMoney(left: string, right: string): string {
+  return fromScaled(toScaled(left) - toScaled(right));
+}
+
+// Ноль — отсутствие любой значащей цифры, той же строковой проверкой, что и
+// isPositiveAmount: «0.0000», «-0.0000» и «0» — один и тот же ноль.
+export function isZeroAmount(raw: string): boolean {
+  return !/[1-9]/.test(raw);
+}
+
 export function formatPercent(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "—";
   const value = Number.parseFloat(raw);
@@ -111,16 +153,6 @@ export function formatPercent(raw: string | null | undefined): string {
 // чтобы «умножить на сто» не разъехалось по нескольким местам.
 export function fractionToPercent(raw: string): string {
   return String(Number.parseFloat(raw) * 100);
-}
-
-// Домножение на 100 — не то же исключение, что formatPercent делает для
-// чисел через Number: formatPercent уже проходит через Number.parseFloat
-// внутри, formatRate лишь готовит для неё вход и точности не добавляет и не
-// убавляет. formatPercent саму менять нельзя — её зовут таблицы позиций (см.
-// правило фазы 4a).
-export function formatRate(raw: string | null | undefined): string {
-  if (raw === null || raw === undefined) return "—";
-  return formatPercent(fractionToPercent(raw));
 }
 
 // Подписи классов активов — русские слова вместо сырых ключей вроде "equity"

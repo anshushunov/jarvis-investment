@@ -7,8 +7,10 @@ import {
   formatMoney,
   formatPercent,
   formatQuantity,
-  formatRate,
   isPositiveAmount,
+  isZeroAmount,
+  subtractMoney,
+  sumMoney,
 } from "./format";
 
 describe("isPositiveAmount", () => {
@@ -86,19 +88,37 @@ describe("formatPercent", () => {
   });
 });
 
-describe("formatRate", () => {
-  it("переводит долю в проценты", () => {
-    expect(formatRate("0.1842")).toBe("+18,4%");
-    expect(formatRate("0.1531")).toBe("+15,3%");
+describe("sumMoney", () => {
+  it("складывает деньги без Number: копейки не теряются", () => {
+    // Через float 0.1 + 0.2 даёт 0.30000000000000004, и итог под таблицей из
+    // 253 строк разъезжается с бэкендом. Здесь складываются целые доли.
+    expect(sumMoney(["0.1000", "0.2000"])).toBe("0.3000");
+    expect(sumMoney(["3120455.1000", "-103015.5000"])).toBe("3017439.6000");
   });
 
-  it("сохраняет знак падения", () => {
-    expect(formatRate("-0.2500")).toBe("−25,0%");
+  it("пропускает неизвестные значения, а не считает их нулём", () => {
+    // У бумаги без цены прибыль неизвестна: ноль утверждал бы, что она не
+    // принесла ничего.
+    expect(sumMoney(["1000.0000", null, undefined])).toBe("1000.0000");
   });
 
-  it("показывает прочерк вместо отсутствующей ставки", () => {
-    expect(formatRate(null)).toBe("—");
-    expect(formatRate(undefined)).toBe("—");
+  it("складывает пустой список в ноль", () => {
+    expect(sumMoney([])).toBe("0.0000");
+  });
+});
+
+describe("subtractMoney", () => {
+  it("вычитает и сохраняет знак", () => {
+    expect(subtractMoney("100.0000", "130.5000")).toBe("-30.5000");
+    expect(subtractMoney("-0.0100", "-0.0200")).toBe("0.0100");
+  });
+});
+
+describe("isZeroAmount", () => {
+  it("считает нулём и «0.0000», и «-0.0000»", () => {
+    expect(isZeroAmount("0.0000")).toBe(true);
+    expect(isZeroAmount("-0.0000")).toBe(true);
+    expect(isZeroAmount("-0.0100")).toBe(false);
   });
 });
 

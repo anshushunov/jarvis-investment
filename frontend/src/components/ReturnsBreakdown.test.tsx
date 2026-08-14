@@ -44,6 +44,26 @@ describe("ReturnsBreakdown", () => {
     expect(screen.getByText(/бумага пришла переводом/i)).toBeInTheDocument();
   });
 
+  it("показывает итог и объяснение под таблицей, а не только строки", () => {
+    // Сходимость разрезов с целым до сих пор видел только тот, кто запускал
+    // прогон в терминале (дизайн, раздел 7: расхождение объясняется, а не
+    // остаётся невязкой).
+    render(<ReturnsBreakdown title="По бумагам" footer="Итог по таблице 9 500 ₽" rows={[
+      { key: "1", title: "Сбербанк", xirr: "0.1", profit: "9500.00",
+        value: "70000.00", reason: null },
+    ]} />);
+    expect(screen.getByText(/Итог по таблице 9 500 ₽/)).toBeInTheDocument();
+  });
+
+  it("показывает бумажную прибыль рядом с её валютной частью: доля без своего целого не читается", () => {
+    render(<ReturnsBreakdown title="По бумагам" rows={[
+      { key: "1", title: "Apple", xirr: "0.21", profit: "26000.00",
+        value: "150000.00", reason: null, unrealized: "53555.00", fx_part: "12000.00" },
+    ]} />);
+    expect(screen.getByText(/бумажная прибыль/i)).toBeInTheDocument();
+    expect(screen.getByText("53 555 ₽")).toBeInTheDocument();
+  });
+
   it("показывает валютную часть нереализованной прибыли отдельной колонкой и подписывает, к чему она относится", () => {
     // unrealized/price_part/fx_part раскладывают НЕреализованную прибыль
     // открытых партий, а не profit за период (дизайн, раздел 4.4) — эти числа
@@ -53,7 +73,9 @@ describe("ReturnsBreakdown", () => {
         value: "150000.00", reason: null, unrealized: "53555.00", fx_part: "12000.00" },
     ]} />);
     expect(screen.getByText(/12 000 ₽/)).toBeInTheDocument();
-    expect(screen.getByText(/нереализованн/i)).toBeInTheDocument();
+    // Подпись именно у валютной колонки: рядом стоит вторая, про бумажную
+    // прибыль целиком, и «нереализованн» теперь есть у обеих.
+    expect(screen.getByText(/нереализованной, не прибыли периода/i)).toBeInTheDocument();
   });
 
   it("не рисует колонку валютной части там, где её ни у кого нет", () => {

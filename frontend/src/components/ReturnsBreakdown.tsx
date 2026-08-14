@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { BASE_CURRENCY, formatMoney, fractionToPercent } from "../api/format";
 import { Badge } from "../ui/Badge";
 import { Card, CardTitle } from "../ui/Card";
@@ -66,16 +68,21 @@ export interface BreakdownRow {
   fx_part?: string | null;
 }
 
-export function ReturnsBreakdown({ title, rows, daysTotal }: {
+export function ReturnsBreakdown({ title, rows, daysTotal, footer }: {
   title: string;
   rows: BreakdownRow[];
   // Общая длина периода отчёта — знаменатель для chain_days каждой строки
   // (Returns.coverage.days_total, одна цифра на весь отчёт). Нужен только
   // когда в таблице есть колонка TWR.
   daysTotal?: number;
+  // Что сказать про таблицу целиком: итог по её строкам и объяснение, почему
+  // он не равен прибыли портфеля. Место под таблицей, а не в строке итогов:
+  // это не ещё одна строка разреза, а фраза о том, чего в разрезе нет.
+  footer?: ReactNode;
 }) {
   const showTwr = rows.some((row) => row.twr !== undefined);
   const showFx = rows.some((row) => row.fx_part !== undefined);
+  const showUnrealized = rows.some((row) => row.unrealized !== undefined);
 
   return (
     <Card>
@@ -90,6 +97,12 @@ export function ReturnsBreakdown({ title, rows, daysTotal }: {
               <Th numeric>{showTwr ? "XIRR" : "Доходность"}</Th>
               {showTwr && <Th numeric>TWR</Th>}
               <Th numeric>Прибыль</Th>
+              {showUnrealized && (
+                <Th numeric>
+                  <span>бумажная прибыль</span>
+                  <div className="text-2xs text-muted">нереализованная, открытых партий</div>
+                </Th>
+              )}
               {showFx && (
                 <Th numeric>
                   <span>из них валютная</span>
@@ -125,6 +138,9 @@ export function ReturnsBreakdown({ title, rows, daysTotal }: {
                   </Td>
                 )}
                 <Td numeric>{formatMoney(row.profit, BASE_CURRENCY)}</Td>
+                {showUnrealized && (
+                  <Td numeric>{formatMoney(row.unrealized ?? null, BASE_CURRENCY)}</Td>
+                )}
                 {showFx && <Td numeric>{formatMoney(row.fx_part ?? null, BASE_CURRENCY)}</Td>}
                 <Td numeric>{formatMoney(row.value, BASE_CURRENCY)}</Td>
               </tr>
@@ -132,6 +148,7 @@ export function ReturnsBreakdown({ title, rows, daysTotal }: {
           </tbody>
         </Table>
       )}
+      {footer !== undefined && <div className="mt-2.5 text-xs text-muted">{footer}</div>}
     </Card>
   );
 }

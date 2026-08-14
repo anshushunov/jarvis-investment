@@ -75,6 +75,17 @@ describe("ReturnsSummary", () => {
     expect(screen.getByText(/насколько удачно выбраны бумаги/i)).toBeInTheDocument();
   });
 
+  it("показывает прибыль в рублях, а не только проценты", () => {
+    // Дизайн, раздел 6, пункт 3: процент не отвечает на вопрос «сколько я
+    // заработал». Прибыль, вложения и стоимость приходили с бэкенда и не
+    // показывались нигде.
+    render(<ReturnsSummary returns={base} />);
+    expect(screen.getByText(/заработано за период/i)).toBeInTheDocument();
+    expect(screen.getByText("3 120 455 ₽")).toBeInTheDocument();
+    expect(screen.getByText("7 830 000 ₽")).toBeInTheDocument();
+    expect(screen.getByText("10 950 455 ₽")).toBeInTheDocument();
+  });
+
   it("называет причину вместо прочерка", () => {
     const withoutRate: Returns = {
       ...base,

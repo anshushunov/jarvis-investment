@@ -1,6 +1,6 @@
-import { formatDate, fractionToPercent } from "../api/format";
+import { BASE_CURRENCY, formatDate, fractionToPercent } from "../api/format";
 import { Card, CardTitle } from "../ui/Card";
-import { ChangeValue } from "./MoneyValue";
+import { ChangeValue, MoneyValue } from "./MoneyValue";
 import type { Returns } from "../api/client";
 
 // Причина отсутствия ставки — словами владельца, а не кодом (см.
@@ -48,6 +48,35 @@ function Rate({ title, term, question, value, footnote }: {
   );
 }
 
+// Прибыль за период в рублях — то, чего две ставки не говорят: процент не
+// отвечает на вопрос «сколько я заработал». Три числа рядом, потому что
+// заработанное читается только вместе с тем, из чего оно выросло: вложено —
+// внешние деньги владельца за период, стоимость — чем портфель кончил.
+//
+// Разложения на ценовую и валютную части здесь нет намеренно, и это не
+// сокращение: агрегата бэкенд не считает вовсе, а сложить price_part и fx_part
+// по позициям на экране было бы враньём дважды. Во-первых, они раскладывают
+// НЕреализованную прибыль открытых партий, а не прибыль за период (дизайн,
+// раздел 4.4) — сумма частей стояла бы под подписью другой величины. Во-вторых,
+// у позиции без цены или курса частей нет вовсе, и итог молча не досчитывал бы
+// их все. Разложение живёт там, где оно осмысленно, — построчно, колонкой «из
+// них валютная» в таблице по бумагам.
+function Profit({ portfolio }: { portfolio: Returns["portfolio"] }) {
+  return (
+    <div className="mt-3.5">
+      <div className="text-xs text-muted">Заработано за период</div>
+      <div className="text-2xl font-[650] tabular-nums">
+        <MoneyValue amount={portfolio.profit} currency={BASE_CURRENCY} />
+      </div>
+      <div className="mt-1 text-xs text-muted">
+        Вложено <MoneyValue amount={portfolio.invested} currency={BASE_CURRENCY} />
+        {" · стоимость на конец "}
+        <MoneyValue amount={portfolio.value} currency={BASE_CURRENCY} />
+      </div>
+    </div>
+  );
+}
+
 export function ReturnsSummary({ returns }: { returns: Returns }) {
   const { period, portfolio, coverage } = returns;
 
@@ -71,6 +100,8 @@ export function ReturnsSummary({ returns }: { returns: Returns }) {
         <Rate title="Выбор бумаг" term="TWR" value={portfolio.twr}
               question="насколько удачно выбраны бумаги" footnote={chainFootnote} />
       </div>
+
+      <Profit portfolio={portfolio} />
 
       {portfolio.reason !== null && (
         <div className="mt-2.5 text-sm text-muted">
