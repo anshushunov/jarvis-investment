@@ -24,6 +24,16 @@ def moscow_today() -> date:
     return moscow_now().date()
 
 
+def moscow_date(moment: datetime) -> date:
+    """Календарная дата момента по Москве.
+
+    Журнал хранит время в UTC, а календарная дата операции обязана совпадать с
+    той, в которой живут снимки и график: операция 21:30 UTC — это уже
+    следующий московский день.
+    """
+    return moment.astimezone(MOSCOW_TZ).date()
+
+
 def moscow_day_end(on_date: date) -> datetime:
     """Момент, до которого операция считается совершённой в этот день.
 

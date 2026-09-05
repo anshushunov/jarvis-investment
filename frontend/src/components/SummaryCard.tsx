@@ -1,9 +1,9 @@
-import { BASE_CURRENCY, formatMoney, isPositiveAmount } from "../api/format";
+import { BASE_CURRENCY, formatMoney, fractionToPercent, isPositiveAmount } from "../api/format";
 import { useAnimatedNumber } from "../design/animation";
 import { Card, CardTitle } from "../ui/Card";
 import { CoverageNotice } from "./CoverageNotice";
-import { MoneyValue } from "./MoneyValue";
-import type { Overview } from "../api/client";
+import { ChangeValue, MoneyValue } from "./MoneyValue";
+import type { Overview, ReturnMetric } from "../api/client";
 
 // Из чего складывается капитал. Одна общая цифра не отвечает на вопрос,
 // изменился портфель или просто пришли деньги на счёт.
@@ -46,10 +46,29 @@ function AnimatedTotal({ amount }: { amount: string }) {
   return <MoneyValue amount={value.toFixed(4)} currency={BASE_CURRENCY} />;
 }
 
+// Доходность на «Портфеле» — две цифры, не больше: разбор (TWR, разрезы,
+// покрытие) живёт на «Аналитике». XIRR, не TWR — тот же выбор, что в разделе
+// 6 дизайна фазы: «сколько принесли мои вложения» ближе к смыслу совокупного
+// капитала, чем «насколько удачно выбраны бумаги». null означает «ещё
+// грузится или не посчиталась» (см. reason на «Аналитике») — карточка при
+// этом обязана выглядеть ровно как прежде, а не мигать пустым местом.
+function ReturnsLine({ returns }: { returns: ReturnMetric | null }) {
+  if (returns === null) return null;
+
+  return (
+    <div className="mt-1.5 text-xs text-muted">
+      Доходность{" "}
+      <ChangeValue percent={returns.xirr === null ? null : fractionToPercent(returns.xirr)} />
+      {" · заработано "}
+      <span className="text-tx">{formatMoney(returns.profit, BASE_CURRENCY)}</span>
+    </div>
+  );
+}
+
 // Синхронизация ушла отсюда на экран «Сделки и расхождения»: она про движение
 // данных, а не про их итог, и её место рядом с расхождениями, которые она
 // порождает. Сводка отвечает на один вопрос — сколько у меня.
-export function SummaryCard({ overview }: { overview: Overview }) {
+export function SummaryCard({ overview, returns }: { overview: Overview; returns: ReturnMetric | null }) {
   return (
     <Card>
       <CardTitle>Совокупный капитал</CardTitle>
@@ -60,6 +79,7 @@ export function SummaryCard({ overview }: { overview: Overview }) {
         <AnimatedTotal amount={overview.total_value} />
       </div>
       <CapitalParts overview={overview} />
+      <ReturnsLine returns={returns} />
       <RestrictedNotice overview={overview} />
       <CoverageNotice overview={overview} />
     </Card>

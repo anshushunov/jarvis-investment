@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class OverviewOut(BaseModel):
@@ -212,3 +212,132 @@ class SyncRunOut(BaseModel):
     # Операции, которые брокер переписал задним числом (см. sync_run.corrected).
     corrected: int
     error: str | None
+
+
+class PeriodOut(BaseModel):
+    # Границы периода явные: «за всё время» у портфеля владельца начинается
+    # 16.07.2020, и владелец вправе видеть, с какой даты посчитана цифра.
+    from_date: date = Field(serialization_alias="from")
+    to_date: date = Field(serialization_alias="to")
+    # Ложь — доходность показана за период, а не в годовых (период короче года).
+    annualized: bool
+
+
+class MetricOut(BaseModel):
+    # None у ставок — законное значение: причина названа в reason.
+    xirr: Decimal | None
+    twr: Decimal | None
+    profit: Decimal
+    invested: Decimal
+    value: Decimal
+    # Сколько дней цепочка TWR действительно измерила для ЭТОГО периметра (не
+    # общее число дней периода — оно одно на весь отчёт и уже есть в
+    # `period.from`/`period.to`). Число, а не деньги: сериализуется как есть.
+    # None — у периметра TWR не считается вовсе (строка «Деньги», см. Metric в
+    # app/returns/metrics.py); 0 — цепочка построена, но не измерила ни
+    # одного шага. Это разные ответы, и подменять один другим нельзя.
+    chain_days: int | None
+    reason: str | None
+
+    @field_serializer("xirr", "twr")
+    def serialize_rate(self, value: Decimal | None) -> str | None:
+        # Доля, а не проценты: перевод и округление — дело интерфейса.
+        return None if value is None else f"{value:.4f}"
+
+    @field_serializer("profit", "invested", "value")
+    def serialize_money(self, value: Decimal) -> str:
+        return f"{value:.4f}"
+
+
+class AccountReturnOut(MetricOut):
+    title: str
+
+
+class AssetClassReturnOut(MetricOut):
+    asset_class: str
+
+
+class InstrumentReturnOut(BaseModel):
+    # Идентификатор строки. Тикер на эту роль не годится: у 252 бумаг живого
+    # портфеля тикеры не уникальны — редомициляция даёт пару «старая бумага,
+    # новая бумага» с одним тикером, — а имя эмитента у такой пары тоже
+    # совпадает. Экрану нужен ключ строки, который не повторится (React,
+    # AnalyticsPage.tsx), и другого источника уникальности в ответе нет.
+    instrument_id: int
+    ticker: str | None
+    name: str
+    xirr: Decimal | None
+    # None — не ноль: посчитать нечем (нет цены/курса на конец или начало
+    # периода), причина — в reason (см. InstrumentRow в app/returns/service.py,
+    # уточнено по коду в задаче 8: бриф объявлял их обязательным Decimal).
+    profit: Decimal | None
+    value: Decimal | None
+    # Позиция продана целиком: конечная стоимость ноль, история — нет.
+    closed: bool
+    # Нереализованная прибыль открытых партий — величина, которую и раскладывают
+    # price_part с fx_part. Отдельно от profit, потому что это разные числа: у
+    # бумаги с частичными продажами profit содержит ещё и реализованный
+    # результат периода (дизайн, раздел 4.4). Экран подписывает колонку тем,
+    # чем она является, а не «прибылью».
+    unrealized: Decimal | None
+    # Разложение нереализованной прибыли открытой позиции. None у рублёвой
+    # бумаги в fx_part не бывает — там ноль; None означает «посчитать нечем», и
+    # почему, говорит reason.
+    price_part: Decimal | None
+    fx_part: Decimal | None
+    reason: str | None
+
+    @field_serializer("xirr")
+    def serialize_rate(self, value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.4f}"
+
+    @field_serializer("profit", "value", "unrealized", "price_part", "fx_part")
+    def serialize_optional_money(self, value: Decimal | None) -> str | None:
+        return None if value is None else f"{value:.4f}"
+
+
+class CoverageOut(BaseModel):
+    days_total: int
+    days_valued: int
+    # None — покрытие позиций на последний день периода никто не считал
+    # (снимки старше фазы 2c). Ноль означал бы «позиций нет вовсе», а это
+    # другое (см. Coverage в app/returns/service.py).
+    positions_total: int | None
+    positions_valued: int | None
+    unpriced: list[str]
+    # Сколько шагов выпало из цепочки TWR: у них не было базы для сравнения,
+    # день был оценён не полностью или в ряду была дыра.
+    chain_breaks: int
+    # Сколько дней цепочка действительно измерила. Годовая ставка TWR приведена
+    # к году по этому времени, и без него она не читается: 444 дня из 2219 и
+    # 2219 из 2219 — разные ответы (см. Chain в app/returns/twr.py).
+    chain_days: int
+    # Валюты потоков, которым не нашлось курса: эти потоки в расчёт не вошли.
+    currencies_without_rate: list[str]
+
+
+class UnattributedOut(BaseModel):
+    """Комиссии, налоги и возвраты, не относящиеся ни к одной бумаге.
+
+    Живой замер: 770 записей на −103 тыс. ₽. Без этой строки сумма разреза по
+    бумагам не сходится с прибылью портфеля ровно на неё.
+    """
+
+    profit: Decimal
+    fees: Decimal
+    taxes: Decimal
+    other: Decimal
+
+    @field_serializer("profit", "fees", "taxes", "other")
+    def serialize_money(self, value: Decimal) -> str:
+        return f"{value:.4f}"
+
+
+class ReturnsOut(BaseModel):
+    period: PeriodOut
+    portfolio: MetricOut
+    coverage: CoverageOut
+    by_account: list[AccountReturnOut]
+    by_asset_class: list[AssetClassReturnOut]
+    by_instrument: list[InstrumentReturnOut]
+    unattributed: UnattributedOut

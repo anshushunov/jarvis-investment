@@ -19,7 +19,7 @@ from app.accounts.cash import cash_by_account
 from app.models import Transaction
 from app.money import money
 from app.positions.engine import signed_quantity
-from app.timeutils import MOSCOW_TZ
+from app.timeutils import moscow_date
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,9 @@ def cash_history(
     for executed_at, account_id, currency, amount in cash_flows(session):
         # Московская календарная дата операции: снимок живёт в ней же, и
         # операция 21:30 UTC обязана попасть в следующий день, а не в текущий.
-        moscow_day = executed_at.astimezone(MOSCOW_TZ).date()
+        # Правило одно на проект и живёт в `moscow_date` — ради этого она и
+        # заведена; вторая запись того же перевода разъехалась бы с первой.
+        moscow_day = moscow_date(executed_at)
         by_day[moscow_day].append((account_id, currency, amount))
 
     history: dict[date, dict[int, dict[str, Decimal]]] = {}

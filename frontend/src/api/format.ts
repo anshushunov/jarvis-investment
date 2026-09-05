@@ -98,12 +98,86 @@ export function isPositiveAmount(raw: string): boolean {
   return !raw.startsWith("-") && /[1-9]/.test(raw);
 }
 
+// Сложение денег без Number — правило модуля действует и здесь: 253 суммы,
+// сложенные через float, разъезжаются с бэкендом в копейках, а итог под
+// таблицей существует ровно затем, чтобы сверяться с прибылью портфеля.
+// Бэкенд отдаёт деньги строкой с четырьмя знаками после точки (см.
+// serialize_money в backend/app/api/schemas.py), поэтому складываем целыми
+// десятитысячными долями рубля в BigInt и возвращаем строку того же вида.
+const MONEY_SCALE = 4;
+
+function toScaled(raw: string): bigint {
+  const negative = raw.startsWith("-");
+  const [whole, fraction = ""] = (negative ? raw.slice(1) : raw).split(".");
+  const scaled = BigInt(whole + fraction.slice(0, MONEY_SCALE).padEnd(MONEY_SCALE, "0"));
+  return negative ? -scaled : scaled;
+}
+
+function fromScaled(value: bigint): string {
+  const negative = value < 0n;
+  const digits = (negative ? -value : value).toString().padStart(MONEY_SCALE + 1, "0");
+  return `${negative ? "-" : ""}${digits.slice(0, -MONEY_SCALE)}.${digits.slice(-MONEY_SCALE)}`;
+}
+
+// null и undefined пропускаются, а не считаются нулём: у бумаги без цены
+// прибыль неизвестна, и подставить ей ноль значило бы утверждать, что она не
+// принесла ничего. Сколько таких строк выпало из суммы, экран говорит рядом.
+export function sumMoney(values: (string | null | undefined)[]): string {
+  let total = 0n;
+  for (const value of values) {
+    if (value !== null && value !== undefined) total += toScaled(value);
+  }
+  return fromScaled(total);
+}
+
+export function subtractMoney(left: string, right: string): string {
+  return fromScaled(toScaled(left) - toScaled(right));
+}
+
+// Ноль — отсутствие любой значащей цифры, той же строковой проверкой, что и
+// isPositiveAmount: «0.0000», «-0.0000» и «0» — один и тот же ноль.
+export function isZeroAmount(raw: string): boolean {
+  return !/[1-9]/.test(raw);
+}
+
 export function formatPercent(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "—";
   const value = Number.parseFloat(raw);
   const sign = value > 0 ? "+" : value < 0 ? "−" : "";
   return `${sign}${Math.abs(value).toFixed(1).replace(".", ",")}%`;
 }
+
+// XIRR и TWR приходят с бэкенда долями ("0.1842" = 18,42 %), а formatPercent
+// (и всё, что её вызывает изнутри, например ChangeValue) ждёт готовые
+// проценты ("18.42"). Шаг конверсии один и тот же везде, и вынесен сюда,
+// чтобы «умножить на сто» не разъехалось по нескольким местам.
+export function fractionToPercent(raw: string): string {
+  return String(Number.parseFloat(raw) * 100);
+}
+
+// Подписи классов активов — русские слова вместо сырых ключей вроде "equity"
+// или "silver". Единственная копия на проект: раньше жила приватно в
+// `AllocationChart.tsx` (структура портфеля, разбивка `Overview.by_asset_class`
+// — там классы денег и металлов раздельные). Разрез доходности
+// (`Returns.by_asset_class`) устроен иначе: там все денежные классы и металлы
+// слиты в одну строку `cash_and_metals` (см. `MONEY_ROW_CLASS` в
+// `backend/app/returns/breakdown.py`) — отдельного золота или валюты там не
+// бывает, а вот `cash_and_metals` бывает только там. Оба потребителя делят
+// один словарь, а не заводят по копии на экран.
+export const ASSET_CLASS_TITLES: Record<string, string> = {
+  equity: "Акции",
+  bonds: "Облигации",
+  money_market: "Денежный рынок",
+  gold: "Золото",
+  silver: "Серебро",
+  platinum: "Платина",
+  palladium: "Палладий",
+  cash: "Валюта",
+  derivatives: "Срочный рынок",
+  mixed: "Смешанные",
+  other: "Прочее",
+  cash_and_metals: "Деньги и металлы",
+};
 
 export function formatQuantity(raw: string): string {
   const trimmed = raw.replace(/\.?0+$/, "");

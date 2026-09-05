@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router";
 
 import { AppShell } from "./app/AppShell";
 import { AnimationProvider } from "./design/animation";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { AssetsPage } from "./pages/AssetsPage";
 import { PortfolioPage } from "./pages/PortfolioPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -20,6 +21,7 @@ export default function App() {
               <Route path="/" element={<PortfolioPage />} />
               <Route path="/assets" element={<AssetsPage />} />
               <Route path="/trades" element={<TradesPage />} />
+              <Route path="/analytics" element={<AnalyticsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </AppShell>

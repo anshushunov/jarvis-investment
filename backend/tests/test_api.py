@@ -25,13 +25,6 @@ from app.sync.service import DEFAULT_HISTORY_DAYS, SYNC_OVERLAP_DAYS
 from app.timeutils import moscow_today
 
 
-@pytest.fixture
-def client(session):
-    app.dependency_overrides[get_session] = lambda: session
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
 def price_day(days_ago: int = 3) -> date:
     """Дата котировки в тестах — от сегодняшней московской, а не зафиксированная
     в прошлом: оценка не берёт цену старше `PRICE_MAX_AGE`

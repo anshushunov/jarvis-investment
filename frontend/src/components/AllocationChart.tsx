@@ -1,32 +1,19 @@
 import ReactECharts from "echarts-for-react";
-import { BASE_CURRENCY, formatMoney } from "../api/format";
+import { ASSET_CLASS_TITLES, BASE_CURRENCY, formatMoney } from "../api/format";
 import { tokens } from "../design/tokens";
 import { Card, CardTitle } from "../ui/Card";
 import { CardState } from "../ui/CardState";
-
-// Металлы перечислены все четыре, а не одно золото: METAL_CURRENCIES в
-// аналитике бэкенда знает XAU, XAG, XPT и XPD, и остаток в любом из них
-// заводит собственный класс актива. Без подписи сектор рисуется сырым ключом
-// («silver» латиницей посреди русского графика).
-const LABELS: Record<string, string> = {
-  equity: "Акции",
-  bonds: "Облигации",
-  money_market: "Денежный рынок",
-  gold: "Золото",
-  silver: "Серебро",
-  platinum: "Платина",
-  palladium: "Палладий",
-  cash: "Валюта",
-  derivatives: "Срочный рынок",
-  mixed: "Смешанные",
-  other: "Прочее",
-};
 
 export function AllocationChart({ data }: {
   data: Record<string, string>;
 }) {
   const entries = Object.entries(data).map(([key, value]) => ({
-    name: LABELS[key] ?? key,
+    // Металлы перечислены все четыре в ASSET_CLASS_TITLES (api/format.ts), а
+    // не одно золото: METAL_CURRENCIES в аналитике бэкенда знает XAU, XAG, XPT
+    // и XPD, и остаток в любом из них заводит собственный класс актива. Без
+    // подписи сектор рисуется сырым ключом («silver» латиницей посреди
+    // русского графика).
+    name: ASSET_CLASS_TITLES[key] ?? key,
     // value — только геометрия сектора, число здесь разрешено (écharts не
     // умеет строки). raw — исходная строка от бэкенда, идёт в подсказку через
     // ту же formatMoney, что и весь остальной интерфейс, а не через число.

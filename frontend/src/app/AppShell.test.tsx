@@ -46,7 +46,7 @@ describe("AppShell", () => {
     renderShell();
 
     expect(NAV_ITEMS.map((item) => item.title)).toEqual([
-      "Портфель", "Активы", "Сделки и расхождения", "Настройки",
+      "Портфель", "Активы", "Сделки и расхождения", "Аналитика", "Настройки",
     ]);
     expect(screen.queryByRole("link", { name: "Налоги" })).not.toBeInTheDocument();
   });

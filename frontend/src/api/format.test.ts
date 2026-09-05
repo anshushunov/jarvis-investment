@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASSET_CLASS_TITLES,
   BASE_CURRENCY,
   currencySign,
   formatDate,
@@ -7,6 +8,9 @@ import {
   formatPercent,
   formatQuantity,
   isPositiveAmount,
+  isZeroAmount,
+  subtractMoney,
+  sumMoney,
 } from "./format";
 
 describe("isPositiveAmount", () => {
@@ -84,6 +88,40 @@ describe("formatPercent", () => {
   });
 });
 
+describe("sumMoney", () => {
+  it("складывает деньги без Number: копейки не теряются", () => {
+    // Через float 0.1 + 0.2 даёт 0.30000000000000004, и итог под таблицей из
+    // 253 строк разъезжается с бэкендом. Здесь складываются целые доли.
+    expect(sumMoney(["0.1000", "0.2000"])).toBe("0.3000");
+    expect(sumMoney(["3120455.1000", "-103015.5000"])).toBe("3017439.6000");
+  });
+
+  it("пропускает неизвестные значения, а не считает их нулём", () => {
+    // У бумаги без цены прибыль неизвестна: ноль утверждал бы, что она не
+    // принесла ничего.
+    expect(sumMoney(["1000.0000", null, undefined])).toBe("1000.0000");
+  });
+
+  it("складывает пустой список в ноль", () => {
+    expect(sumMoney([])).toBe("0.0000");
+  });
+});
+
+describe("subtractMoney", () => {
+  it("вычитает и сохраняет знак", () => {
+    expect(subtractMoney("100.0000", "130.5000")).toBe("-30.5000");
+    expect(subtractMoney("-0.0100", "-0.0200")).toBe("0.0100");
+  });
+});
+
+describe("isZeroAmount", () => {
+  it("считает нулём и «0.0000», и «-0.0000»", () => {
+    expect(isZeroAmount("0.0000")).toBe(true);
+    expect(isZeroAmount("-0.0000")).toBe(true);
+    expect(isZeroAmount("-0.0100")).toBe(false);
+  });
+});
+
 describe("formatQuantity", () => {
   it("убирает незначащие нули", () => {
     expect(formatQuantity("35.00000000")).toBe("35");
@@ -91,6 +129,21 @@ describe("formatQuantity", () => {
 
   it("сохраняет дробные паи", () => {
     expect(formatQuantity("0.50000000")).toBe("0,5");
+  });
+});
+
+describe("ASSET_CLASS_TITLES", () => {
+  it("подписывает известные классы по-русски", () => {
+    expect(ASSET_CLASS_TITLES.equity).toBe("Акции");
+    expect(ASSET_CLASS_TITLES.bonds).toBe("Облигации");
+  });
+
+  it("подписывает деньги и металлы разреза доходности одной строкой", () => {
+    // cash_and_metals — ключ, которого не бывает в Overview.by_asset_class
+    // (там классы денег и металлов раздельные): он приходит только из разреза
+    // доходности, где деньги и металлы посчитаны одним периметром (см.
+    // MONEY_ROW_CLASS в backend/app/returns/breakdown.py).
+    expect(ASSET_CLASS_TITLES.cash_and_metals).toBe("Деньги и металлы");
   });
 });
 
