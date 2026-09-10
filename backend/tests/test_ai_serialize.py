@@ -17,6 +17,11 @@ def test_quantity_drops_trailing_zeros_without_exponent():
 
 def test_rate_is_a_fraction_with_four_digits():
     assert s.rate(Decimal("0.03311")) == "0.0331"
+    assert s.rate(Decimal("0.03125")) == "0.0313"
+
+
+def test_percent_rounds_half_up():
+    assert s.percent(Decimal("0.125")) == "0.13"
 
 
 def test_auto_granularity_by_window_length():

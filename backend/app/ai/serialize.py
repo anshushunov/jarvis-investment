@@ -24,28 +24,37 @@ DAY_LIMIT = 120
 WEEK_LIMIT = 730
 
 
+def _fixed(value: Decimal, exponent: Decimal) -> str:
+    """Форматирует число с заданной точностью, округляя half-up.
+
+    Проект округляет деньги half-up (app.money.money), и дроби, выстроенные
+    рядом с деньгами, не должны округляться по другому правилу.
+    """
+    rounded = value.quantize(exponent, rounding=ROUND_HALF_UP)
+    return format(rounded, "f")
+
+
 def amount(value: Decimal | None) -> str | None:
     """Сумма денег строкой с копейками: "846124.16". None остаётся None —
     величина, которой нет, нулём не заполняется."""
     if value is None:
         return None
-    rounded = money(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return f"{rounded:.2f}"
+    return _fixed(money(value), Decimal("0.01"))
 
 
 def rate(value: Decimal | None) -> str | None:
     """Доля строкой: "0.0331" — это 3,31 %."""
-    return None if value is None else f"{value:.4f}"
+    return None if value is None else _fixed(value, Decimal("0.0001"))
 
 
 def percent(value: Decimal | None) -> str | None:
     """Проценты строкой с двумя знаками: "50.00"."""
-    return None if value is None else f"{value:.2f}"
+    return None if value is None else _fixed(value, Decimal("0.01"))
 
 
 def price(value: Decimal | None) -> str | None:
     """Цена — с четырьмя знаками: у облигаций и гонконгских бумаг копеек мало."""
-    return None if value is None else f"{value:.4f}"
+    return None if value is None else _fixed(value, Decimal("0.0001"))
 
 
 def qty(value: Decimal | None) -> str | None:

@@ -72,7 +72,11 @@ def run_tool(session: Session, name: str, arguments: dict[str, Any]) -> dict[str
     журнал (stderr) и честное «не смог ответить» без единой цифры: в
     stdio-транспорте это единственный способ не уронить сессию и не соврать.
     """
-    spec = tool_by_name(name)
+    try:
+        spec = tool_by_name(name)
+    except KeyError:
+        known_names = ", ".join(spec.name for spec in TOOLS)
+        return {"error": f"Инструмента «{name}» нет. Известные: {known_names}"}
     try:
         return spec.handler(session, **arguments)
     except ToolRefusal as refusal:
