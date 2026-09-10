@@ -42,6 +42,17 @@ export function sumPercent(rows: TargetRow[]): number {
     (total, row) => total + (Number.parseFloat(row.percent.replace(",", ".")) || 0), 0);
 }
 
+// Пустая, нечисловая или неположительная доля — не цель, а недоразумение:
+// ноль и меньше неотличимы от отсутствия цели, а пустая строка на save()
+// превратилась бы в NaN.toFixed(4) и ушла бы на бэкенд буквальной строкой
+// "NaN". Сохранять нельзя, пока такая строка есть хоть одна.
+export function invalidRows(rows: TargetRow[]): TargetRow[] {
+  return rows.filter((row) => {
+    const value = Number.parseFloat(row.percent.replace(",", "."));
+    return row.percent.trim() === "" || Number.isNaN(value) || value <= 0;
+  });
+}
+
 export function rowsFromTargets(targets: AllocationTarget[]): TargetRow[] {
   return targets.map((target, index) =>
     target.asset_class !== null
@@ -79,6 +90,8 @@ export function TargetAllocationForm({ targets, positions, onSave, saving, error
 
   const total = sumPercent(rows);
   const overLimit = total > 100;
+  const hasInvalidPercent = invalidRows(rows).length > 0;
+  const blocked = overLimit || hasInvalidPercent;
 
   function addRow() {
     if (key === "") return;
@@ -136,9 +149,10 @@ export function TargetAllocationForm({ targets, positions, onSave, saving, error
         </Table>
       )}
 
-      <div className={`mt-2 text-sm tabular-nums ${overLimit ? "text-red" : "text-muted"}`}>
+      <div className={`mt-2 text-sm tabular-nums ${blocked ? "text-red" : "text-muted"}`}>
         Итого {plainPercent(total)} · не задано {plainPercent(Math.max(0, 100 - total))}
         {overLimit && " — сумма целей больше 100 %, сохранить нельзя"}
+        {hasInvalidPercent && " — у каждой цели нужна доля больше нуля"}
       </div>
 
       <div className="mt-3 flex flex-wrap items-end gap-2">
@@ -165,7 +179,7 @@ export function TargetAllocationForm({ targets, positions, onSave, saving, error
           </select>
         </div>
         <Button variant="ghost" onClick={addRow} disabled={key === ""}>Добавить</Button>
-        <Button onClick={save} disabled={overLimit || saving}>
+        <Button onClick={save} disabled={blocked || saving}>
           {saving ? "Сохраняю…" : "Сохранить"}
         </Button>
       </div>

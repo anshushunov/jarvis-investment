@@ -84,4 +84,26 @@ describe("TargetAllocationForm", () => {
     renderForm({ error: "У класса «equity» уже задана цель" });
     expect(screen.getByRole("alert")).toHaveTextContent("уже задана цель");
   });
+
+  it("не даёт сохранить цель без доли, пока её не заполнят", async () => {
+    const user = userEvent.setup();
+    renderForm();
+    await user.selectOptions(screen.getByLabelText("Класс"), "bonds");
+    await user.click(screen.getByRole("button", { name: "Добавить" }));
+    expect(screen.getByText(/у каждой цели нужна доля больше нуля/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Доля Облигации"), "20");
+    expect(screen.queryByText(/у каждой цели нужна доля больше нуля/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
+  });
+
+  it("не даёт сохранить отрицательную долю", async () => {
+    const user = userEvent.setup();
+    renderForm();
+    await user.clear(screen.getByLabelText("Доля Акции"));
+    await user.type(screen.getByLabelText("Доля Акции"), "-5");
+    expect(screen.getByText(/у каждой цели нужна доля больше нуля/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Сохранить" })).toBeDisabled();
+  });
 });
