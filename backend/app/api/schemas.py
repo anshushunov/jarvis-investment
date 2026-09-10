@@ -345,3 +345,25 @@ class ReturnsOut(BaseModel):
     by_asset_class: list[AssetClassReturnOut]
     by_instrument: list[InstrumentReturnOut]
     unattributed: UnattributedOut
+
+
+class TargetIn(BaseModel):
+    # Ровно один из двух ключей: класс активов или ISIN бумаги. Что именно не
+    # так с набором, объясняет бэкенд (AllocationError → 400).
+    asset_class: str | None = None
+    isin: str | None = None
+    # Доля от 0 до 1 строкой, как все дроби проекта: "0.6" — это 60 %.
+    share: Decimal
+
+
+class TargetOut(BaseModel):
+    asset_class: str | None
+    isin: str | None
+    ticker: str | None
+    name: str | None
+    share: Decimal
+    updated_at: datetime
+
+    @field_serializer("share")
+    def serialize_share(self, value: Decimal) -> str:
+        return f"{value:.4f}"
