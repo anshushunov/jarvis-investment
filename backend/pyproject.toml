@@ -15,6 +15,7 @@ dependencies = [
     # Заменён собственным REST-клиентом поверх httpx (app/connectors/tbank).
     "certifi>=2026.7.22",
     "apscheduler>=3.11",
+    "mcp>=2.2,<3",
 ]
 
 [dependency-groups]
