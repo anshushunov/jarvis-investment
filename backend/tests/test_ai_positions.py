@@ -66,3 +66,43 @@ def test_find_instrument_with_nothing_found_says_so(session):
     result = run_tool(session, "find_instrument", {"query": "несуществующее"})
     assert result["candidates"] == []
     assert "Ничего не найдено" in result["note"]
+
+
+def test_profit_without_value_reason_when_profit_exists(session):
+    """Позиция в иностранной валюте с ценой и себестоимостью, но без курса:
+    profit рассчитан в валюте бумаги, profit_reason остаётся None, а value_reason
+    указывает на отсутствие курса."""
+    account = add_account(session)
+    add_priced_position(session, account, "US0378331005", Decimal("2"), Decimal("150"),
+                       currency="USD", average_price=Decimal("100"))
+    result = run_tool(session, "positions", {})
+    assert len(result["rows"]) == 1
+    row = result["rows"][0]
+    assert row["currency"] == "USD"
+    assert row["profit"] == "100.00"
+    assert row["profit_reason"] is None
+    assert row["value_rub"] is None
+    assert "курса" in row["value_reason"]
+
+
+def test_find_instrument_exact_ticker_not_lost_among_many_partial_matches(session):
+    """Поиск по одной букве когда есть 60 инструментов с ней в названии,
+    но только один точный тикер — точное совпадение должно вернуться первым."""
+    # Создаём 60 инструментов с "Тест" в названии, с уникальными ISIN
+    for i in range(60):
+        isin = f"RU0000{i:06d}"
+        session.add(Instrument(
+            isin=isin, ticker=f"TST{i}", secid=f"tstsec{i}",
+            kind="share", currency="RUB", issuer=f"Тест-{i}"
+        ))
+    # Добавляем инструмент с точным тикером TEST
+    session.add(Instrument(
+        isin="US1234567890", ticker="TEST", secid="TEST",
+        kind="share", currency="RUB", issuer="Настоящий"
+    ))
+    session.flush()
+
+    result = run_tool(session, "find_instrument", {"query": "TEST"})
+    # Первый результат должен быть точный тикер
+    assert result["candidates"][0]["ticker"] == "TEST"
+    assert result["candidates"][0]["exact_match"] is True

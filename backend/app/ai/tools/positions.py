@@ -21,14 +21,31 @@ REASON_CURRENCY_MISMATCH = ("средняя цена и котировка в р
 
 
 def _profit_reason(row: PositionRow) -> str | None:
+    """Причина отсутствия нереализованной прибыли в валюте бумаги.
+
+    Проверяется в порядке: если прибыль есть, причины нет. Иначе:
+    - отсутствие себестоимости (бумаги пришли переводом)
+    - отсутствие котировки (нет цены и, следовательно, прибыли)
+    - несовпадение валют (цена и котировка в разных валютах)
+
+    Отсутствие курса валюты (value_base is None при наличии market_value) не причина
+    отсутствия прибыли — это причина отсутствия value_base (см. value_reason).
+    """
+    if row.profit is not None:
+        return None
     if not row.cost_basis_known:
         return REASON_NO_COST_BASIS
     if row.market_value is None:
         return REASON_NO_PRICE
+    return REASON_CURRENCY_MISMATCH
+
+
+def _value_reason(row: PositionRow) -> str | None:
+    """Причина отсутствия стоимости позиции в рублях (value_base)."""
+    if row.market_value is None:
+        return REASON_NO_PRICE
     if row.value_base is None:
         return REASON_NO_RATE
-    if row.profit is None:
-        return REASON_CURRENCY_MISMATCH
     return None
 
 
@@ -74,6 +91,7 @@ def positions(
             "last_price": s.price(row.last_price), "price_source": row.price_source,
             "market_value": s.amount(row.market_value),
             "value_rub": s.amount(row.value_base),
+            "value_reason": _value_reason(row),
             "share": (s.rate(row.value_base / total)
                       if row.value_base is not None and total else None),
             "profit": s.amount(row.profit), "profit_percent": s.percent(row.profit_percent),
@@ -93,7 +111,8 @@ def positions(
             "currencies_without_rate": overview.currencies_without_rate,
         },
         "rows": rows,
-        "note": ("share — доля от всего портфеля (total_value_rub), включая деньги. profit — "
+        "note": ("share — доля от всего портфеля (total_value_rub), включая деньги. value_reason — "
+                 "причина отсутствия value_rub (нет цены или курса). profit — "
                  "нереализованная прибыль к средней цене, в валюте бумаги; null с причиной в "
                  "profit_reason. Цена с price_source=tbank — оценка брокера, не биржи."),
     }

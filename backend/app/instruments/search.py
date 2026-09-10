@@ -7,13 +7,15 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Instrument, Position
 
-# Кандидатов читается больше, чем отдаётся: ранжирование — в Python, и точное
-# совпадение тикера обязано попасть в ответ даже при сотне частичных.
+# Точные совпадения тикера, ISIN или биржевого кода берутся отдельным запросом
+# (без LIMIT), чтобы не потеряться среди сотен частичных совпадений.
+# Затем читаются частичные совпадения с FETCH_LIMIT, и результаты мержатся
+# по instrument_id с приоритетом точных совпадений.
 FETCH_LIMIT = 50
 
 
@@ -30,25 +32,43 @@ def search_instruments(session: Session, query: str, limit: int = 10) -> list[Ca
     text = query.strip()
     if not text:
         return []
+
+    upper = text.upper()
+    held = set(session.execute(
+        select(Position.instrument_id).where(Position.quantity != 0)
+    ).scalars())
+
+    # Точные совпадения тикера, ISIN или биржевого кода (без LIMIT).
+    exact_rows = session.execute(
+        select(Instrument).where(or_(
+            func.upper(Instrument.ticker) == upper,
+            func.upper(Instrument.isin) == upper,
+            func.upper(Instrument.secid) == upper,
+        ))
+    ).scalars().all()
+
+    # Частичные совпадения (ILIKE во всех полях, с LIMIT).
     pattern = f"%{text}%"
-    rows = session.execute(
+    partial_rows = session.execute(
         select(Instrument).where(or_(
             Instrument.ticker.ilike(pattern), Instrument.secid.ilike(pattern),
             Instrument.isin.ilike(pattern), Instrument.issuer.ilike(pattern),
         )).limit(FETCH_LIMIT)
     ).scalars().all()
-    held = set(session.execute(
-        select(Position.instrument_id).where(Position.quantity != 0)
-    ).scalars())
 
-    upper = text.upper()
+    # Мерж: exact_rows + partial_rows, по instrument_id, с приоритетом exact.
+    by_id = {}
+    for row in partial_rows:
+        by_id[row.id] = (row, False)  # False = not exact
+    for row in exact_rows:
+        by_id[row.id] = (row, True)  # True = exact
+
     candidates = [
         Candidate(
             instrument=row, held=row.id in held,
-            exact=upper in {(row.ticker or "").upper(), (row.isin or "").upper(),
-                            (row.secid or "").upper()},
+            exact=is_exact,
         )
-        for row in rows
+        for row, is_exact in by_id.values()
     ]
     # Точные раньше частичных, открытые раньше проданных, дальше по имени.
     # Порядок задан здесь, а не у читателя: у выдачи несколько потребителей.
