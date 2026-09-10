@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.models import OperationType
 from app.returns.check import check_returns
+from tests.test_analytics import price_day
 from tests.test_returns_flows import add_tx
 from tests.test_returns_instrument_flows import add_instrument
 from tests.test_returns_service import add_price, add_snapshot
@@ -88,7 +89,8 @@ def test_check_compares_parts_with_unrealized_profit(session, account):
     add_tx(session, account_id=account.id, op_type=OperationType.SELL,
            day=date(2025, 8, 14), amount="60000", quantity="50", price="1200",
            instrument_id=instrument.id)
-    add_price(session, instrument.id, date(2026, 8, 13), "1300")
+    add_price(session, instrument.id, price_day(), "1300")
+    # Дата относительно сегодня: цена старше PRICE_MAX_AGE в оценку не идёт
     add_snapshot(session, date(2024, 8, 13), "100000")
     add_snapshot(session, date(2026, 8, 13), "65000")
 
