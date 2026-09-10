@@ -97,31 +97,6 @@ def thin(points: list[T], pick_date: Callable[[T], date], granularity: str) -> l
     kept: list[T] = []
     for index, current in enumerate(points):
         following = points[index + 1] if index + 1 < len(points) else None
-        curr_bucket = bucket(pick_date(current))
-
-        # Keep if last in bucket (transition to next bucket or end of series)
-        is_last_in_bucket = following is None or curr_bucket != bucket(pick_date(following))
-
-        # Keep if first point after a gap (skipped buckets)
-        is_first_after_gap = False
-        if index > 0:
-            prev_bucket = bucket(pick_date(points[index - 1]))
-            if granularity == "week":
-                prev_year, prev_week = prev_bucket
-                curr_year, curr_week = curr_bucket
-                # Gap if year changed but not to week 1 (week 53→1 is natural), or weeks skipped within year
-                if prev_year < curr_year and curr_week > 1:
-                    is_first_after_gap = True
-                elif prev_year == curr_year and curr_week > prev_week + 1:
-                    is_first_after_gap = True
-            else:  # month
-                prev_year, prev_month = prev_bucket
-                curr_year, curr_month = curr_bucket
-                if prev_year < curr_year and curr_month > 1:
-                    is_first_after_gap = True
-                elif prev_year == curr_year and curr_month > prev_month + 1:
-                    is_first_after_gap = True
-
-        if is_last_in_bucket or is_first_after_gap:
+        if following is None or bucket(pick_date(current)) != bucket(pick_date(following)):
             kept.append(current)
     return kept
