@@ -1,15 +1,19 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.models import DailySnapshot, FxRate, OperationType, Price
 from app.returns.service import (
     MONEY_ROW_CLASS,
     PERIOD_12M,
     PERIOD_ALL,
+    PERIOD_CUSTOM,
     PERIOD_YTD,
     REASON_EMPTY_PERIOD,
     REASON_NO_FULL_DAYS,
     REASON_SERIES_GAPS,
+    PeriodError,
     period_bounds,
     returns_report,
 )
@@ -693,3 +697,42 @@ def test_instrument_rows_are_ordered_by_significance(session, account):
                             by_class_now={"equity": Decimal("250000")})
     assert [row.name for row in report.by_instrument] == ["BIG", "SMALL", "LOSS", "GAIN"]
     assert [row.closed for row in report.by_instrument] == [False, False, True, True]
+
+
+def test_custom_period_in_the_past_ends_at_its_closing_snapshot(session, account):
+    """«Сколько я заработал в 2024 году»: конец периода — снимок на 31.12.2024,
+    а не сегодняшняя оценка. Позиций в базе нет нарочно: сегодняшний обзор дал
+    бы ноль, и прибыль вышла бы −100 000 вместо +20 000."""
+    add_tx(session, account_id=account.id, op_type=OperationType.DEPOSIT,
+           day=date(2024, 1, 10), amount="100000")
+    add_snapshot(session, date(2024, 1, 10), "100000", by_account={str(account.id): "100000"})
+    add_snapshot(session, date(2024, 12, 31), "120000", by_account={str(account.id): "120000"})
+    add_snapshot(session, date(2026, 8, 13), "130000", by_account={str(account.id): "130000"})
+
+    report = returns_report(session, PERIOD_CUSTOM, today=date(2026, 8, 13),
+                            since=date(2024, 1, 1), until=date(2024, 12, 31))
+    assert report.period.since == date(2024, 1, 1)
+    assert report.period.until == date(2024, 12, 31)
+    assert report.portfolio.profit == Decimal("20000.0000")
+    assert report.portfolio.value == Decimal("120000.0000")
+    assert report.by_account[0].metric.value == Decimal("120000.0000")
+
+
+def test_custom_period_without_a_closing_snapshot_is_refused(session, account):
+    add_snapshot(session, date(2026, 8, 13), "130000")
+    with pytest.raises(PeriodError, match="нет ни одного снимка"):
+        returns_report(session, PERIOD_CUSTOM, today=date(2026, 8, 13),
+                       since=date(2020, 1, 1), until=date(2020, 12, 31))
+
+
+def test_custom_period_bounds_are_checked():
+    today = date(2026, 8, 13)
+    with pytest.raises(PeriodError, match="позже конца"):
+        period_bounds(PERIOD_CUSTOM, today, None, since=date(2025, 1, 1), until=date(2024, 1, 1))
+    with pytest.raises(PeriodError, match="хотя бы началом"):
+        period_bounds(PERIOD_CUSTOM, today, None)
+    with pytest.raises(PeriodError, match="в будущем"):
+        period_bounds(PERIOD_CUSTOM, today, None, since=date(2026, 1, 1), until=date(2027, 1, 1))
+    short = period_bounds(PERIOD_CUSTOM, today, None, since=date(2026, 5, 1))
+    assert short.until == today
+    assert short.annualized is False
