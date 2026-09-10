@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai.errors import ToolRefusal
-from app.ai.tools import history, instruments, ledger, overview, positions, returns
+from app.ai.tools import allocation, history, instruments, ledger, overview, positions, quality, returns
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,21 @@ TOOLS: list[ToolSpec] = [
         description=("Как двигалась цена одной бумаги: ряд котировок с источником и валютой и "
                      "перечень дыр в ряду. Нужен instrument_id из find_instrument."),
         handler=history.instrument_prices,
+    ),
+    ToolSpec(
+        name="allocation",
+        description=("Факт против целевых долей: доля и отклонение каждой группы, «не задано», "
+                     "минимальное пополнение, выравнивающее доли, раскладка по группам и группы, "
+                     "которые пополнением не выправить. Своя сумма — contribution_rub."),
+        handler=allocation.allocation,
+    ),
+    ToolSpec(
+        name="data_quality",
+        description=("Границы честности: неразобранные расхождения с брокером, доля дат с полной "
+                     "оценкой, бумаги без котировок с числом дней, блокировки, последняя "
+                     "синхронизация и последний снимок. Вызывать, когда спрашивают, можно ли "
+                     "доверять цифрам."),
+        handler=quality.data_quality,
     ),
     ToolSpec(
         name="find_instrument",
