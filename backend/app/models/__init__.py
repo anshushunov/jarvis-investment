@@ -16,6 +16,7 @@ from app.models.price import Price
 from app.models.reconciliation import Reconciliation
 from app.models.snapshot import SNAPSHOT_BACKFILL, SNAPSHOT_LIVE, DailySnapshot
 from app.models.sync_run import SyncRun
+from app.models.target_allocation import TargetAllocation
 from app.models.transaction import CORRECTS_TRANSACTION_ID_PAYLOAD_KEY, OperationType, Transaction
 
 __all__ = [
@@ -39,5 +40,6 @@ __all__ = [
     "SNAPSHOT_BACKFILL",
     "SNAPSHOT_LIVE",
     "SyncRun",
+    "TargetAllocation",
     "Transaction",
 ]
