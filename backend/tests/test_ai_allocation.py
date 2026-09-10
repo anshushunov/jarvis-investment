@@ -55,4 +55,26 @@ def test_zero_target_group_buy_total_explains_surplus_over_contribution(session)
     result = run_tool(session, "allocation", {})
     assert result["rebalance"]["buy_total_rub"] == "40000.00"
     assert result["rebalance"]["contribution_rub"] == "0.00"
-    assert any("продажей" in note for note in result["notes"])
+    assert any("продажа" in note for note in result["notes"])
+
+
+def test_note_names_both_unfixable_sale_and_over_target_surplus(session):
+    """Пополнение ниже минимальной суммы, да ещё и с невыправляемой группой:
+    equity(0.5) и other(0.5) — цели на 50/50, но other пуст, а equity уже
+    выше цели. Разница между покупками и пополнением объясняется двумя
+    слагаемыми: продажей unfixable и перекосом not_closed, а не одним из них."""
+    two_class_portfolio(session)
+    replace_targets(session, [TargetInput(share=Decimal("0.5"), asset_class="equity"),
+                              TargetInput(share=Decimal("0.5"), asset_class="other")])
+    result = run_tool(session, "allocation", {"contribution_rub": "1000"})
+    assert result["rebalance"]["over_target_rub"] == {"equity": "9500.00"}
+    assert result["rebalance"]["unfixable_without_selling"] == {"unassigned": "40000.00"}
+    note = next(n for n in result["notes"] if "Покупки на" in n)
+    assert "продажа" in note
+    assert "перекос" in note
+    assert note == (
+        "Покупки на 50500.00 ₽ больше пополнения на 49500.00 ₽: "
+        "из них 40000.00 ₽ — продажа групп из unfixable_without_selling "
+        "(пополнением их не выправить), а 9500.00 ₽ — перекос групп из "
+        "not_closed_by_contribution, который этим пополнением не закрывается"
+    )

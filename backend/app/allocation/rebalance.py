@@ -37,11 +37,16 @@ class Rebalance:
     contribution: Decimal
     # Раскладка пополнения по группам: дефицит каждой при V + X.
     deficits: dict[str, Decimal]
-    # Сумма всех покупок: Σdeficits. Совпадает с contribution, только пока
-    # unfixable пуст — если группа с нулевой целью держит остаток, деньги на
-    # её долю в deficits всё равно есть (см. unfixable), и buy_total =
-    # contribution + Σ unfixable: покупки больше пополнения на сумму, которую
-    # пришлось бы выручить продажей.
+    # Сумма всех покупок: Σdeficits. Полное тождество:
+    # buy_total = contribution + Σ unfixable + Σ over_target.
+    # Группа с целью «ноль», в которой что-то лежит (unfixable), пополнением
+    # не выправляется никогда — её факт всё равно посчитан в чьём-то дефиците
+    # (deficits_at добирает V до цели остальных так, будто эти деньги уже
+    # потрачены на покупку). А при сумме меньше минимальной дефициты групп
+    # выше цели обрезаны нулём (max(0, ...) в deficits_at) — их перекос
+    # никуда не делся, но и не куплен: он назван отдельно в over_target.
+    # Оба слагаемых пусты, когда unfixable и over_target пусты — тогда
+    # buy_total == contribution.
     buy_total: Decimal
     # Группы с целью «ноль», в которых что-то лежит: пополнением не
     # выправляются никогда и названы вместе с суммой, которую пришлось бы
@@ -50,6 +55,9 @@ class Rebalance:
     # Группы, чей перекос переданной суммой не закрывается (она меньше
     # минимальной). Пусто, когда суммы достаточно.
     not_closed: list[str]
+    # Перекос каждой группы из not_closed сверх цели при применённой сумме:
+    # v_i − t_i·(V + contribution). Пусто, когда not_closed пуст.
+    over_target: dict[str, Decimal]
     # На сколько переданная сумма меньше минимальной. Ноль — достаточна.
     short_by: Decimal
 
@@ -90,12 +98,16 @@ def rebalance(groups: list[Group], contribution: Decimal | None = None) -> Rebal
     unfixable = {group.key: money(group.value) for group in groups
                  if group.target == 0 and group.value > 0}
     short = applied < minimal
-    not_closed = [group.key for group in groups
-                  if short and group.target > 0 and group.target * (total + applied) < group.value]
+    over_target = {
+        group.key: money(group.value - group.target * (total + applied))
+        for group in groups
+        if short and group.target > 0 and group.target * (total + applied) < group.value
+    }
+    not_closed = list(over_target.keys())
 
     return Rebalance(
         total_value=total, minimal_contribution=minimal, contribution=applied,
         deficits=deficits, buy_total=money(sum(deficits.values(), Decimal("0"))),
-        unfixable=unfixable, not_closed=not_closed,
+        unfixable=unfixable, not_closed=not_closed, over_target=over_target,
         short_by=money(minimal - applied) if short else Decimal("0"),
     )

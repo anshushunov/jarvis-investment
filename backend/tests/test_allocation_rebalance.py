@@ -41,6 +41,7 @@ def test_zero_target_group_is_unfixable_and_named_with_its_value():
     # Дефициты закрывают и то, что лежит в невыправляемой группе: 30 = 20 + 10.
     assert sum(result.deficits.values()) == Decimal("30.0000")
     assert result.buy_total == result.contribution + sum(result.unfixable.values())
+    assert result.over_target == {}
 
 
 def test_contribution_below_minimal_names_groups_left_above_target():
@@ -67,6 +68,25 @@ def test_empty_portfolio_needs_nothing_but_spreads_a_given_sum_by_targets():
     assert rebalance(empty, Decimal("100")).deficits == {
         "equity": Decimal("70.0000"), "bonds": Decimal("30.0000"),
     }
+
+
+def test_buy_total_identity_holds_below_minimal_contribution():
+    """При сумме меньше минимальной дефицит группы выше цели обрезан нулём
+    (deficits_at: max(0, ...)), и её перекос уже не куплен и не продан — он
+    остаётся в over_target. Полное тождество:
+    buy_total == contribution + Σ unfixable + Σ over_target.
+
+    equity(0.6, 50) уже выше цели при V=80: 0.6·80=48 < 50. bonds(0.4, 20)
+    ниже цели. cash(0, 10) — unfixable. Пополнение 1 — далеко не минимальное
+    (минимальная — 3.3333)."""
+    items = groups(("equity", "0.6", "50"), ("bonds", "0.4", "20"), ("cash", "0", "10"))
+    result = rebalance(items, Decimal("1"))
+    assert result.not_closed == ["equity"]
+    assert result.unfixable == {"cash": Decimal("10.0000")}
+    assert result.buy_total == Decimal("12.4000")
+    assert result.over_target == {"equity": Decimal("1.4000")}
+    assert result.buy_total == result.contribution + sum(result.unfixable.values()) + sum(
+        result.over_target.values())
 
 
 def test_negative_contribution_is_refused():

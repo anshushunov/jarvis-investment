@@ -32,12 +32,26 @@ def allocation(
     report = allocation_report(session, contribution)
     plan = report.rebalance
     notes = list(report.notes)
-    if plan.unfixable:
-        surplus = s.amount(plan.buy_total - plan.contribution)
+    if plan.unfixable or plan.over_target:
+        # Тождество: buy_total = contribution + Σ unfixable + Σ over_target.
+        # Оба слагаемых текстом, нулевое — опущено, а не напечатано как «0.00 ₽».
+        gap = s.amount(plan.buy_total - plan.contribution)
+        pieces = []
+        if plan.unfixable:
+            unfixable_sum = s.amount(sum(plan.unfixable.values(), Decimal("0")))
+            pieces.append(
+                f"из них {unfixable_sum} ₽ — продажа групп из unfixable_without_selling "
+                "(пополнением их не выправить)"
+            )
+        if plan.over_target:
+            over_target_sum = s.amount(sum(plan.over_target.values(), Decimal("0")))
+            pieces.append(
+                f"{over_target_sum} ₽ — перекос групп из not_closed_by_contribution, "
+                "который этим пополнением не закрывается"
+            )
         notes.append(
-            f"Покупки на {s.amount(plan.buy_total)} ₽ больше пополнения на {surplus} ₽: "
-            "разница финансируется продажей групп из unfixable_without_selling — "
-            "пополнением их не выправить"
+            f"Покупки на {s.amount(plan.buy_total)} ₽ больше пополнения на {gap} ₽: "
+            + ", а ".join(pieces)
         )
     return {
         "as_of": s.day(report.as_of),
@@ -59,6 +73,7 @@ def allocation(
             "buy_by_group": {key: s.amount(value) for key, value in plan.deficits.items()},
             "not_closed_by_contribution": plan.not_closed,
             "unfixable_without_selling": {key: s.amount(value) for key, value in plan.unfixable.items()},
+            "over_target_rub": {key: s.amount(value) for key, value in plan.over_target.items()},
         },
         "coverage": {"positions_total": report.positions_total,
                      "valued_positions": report.valued_positions, "unpriced": report.unpriced},
