@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai.errors import ToolRefusal
-from app.ai.tools import instruments, overview, positions
+from app.ai.tools import history, instruments, overview, positions, returns
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,25 @@ TOOLS: list[ToolSpec] = [
                      "текущей, стоимость в рублях, доля портфеля, прибыль либо причина её "
                      "отсутствия. Фильтры по счёту, классу и «только неоценённые»."),
         handler=positions.positions,
+    ),
+    ToolSpec(
+        name="returns",
+        description=("Доходность за период: XIRR, TWR с числом измеренных дней и разрывов, "
+                     "прибыль, вложено, стоимость, разрезы по счетам, классам и бумагам, строка "
+                     "«Прочее». Периоды all, 12m, ytd или custom с since/until."),
+        handler=returns.returns,
+    ),
+    ToolSpec(
+        name="value_history",
+        description=("Как двигалась стоимость портфеля по дням: ряд снимков в окне дат с "
+                     "пометкой дней неполной оценки и бумаг без цены в каждый из них."),
+        handler=history.value_history,
+    ),
+    ToolSpec(
+        name="instrument_prices",
+        description=("Как двигалась цена одной бумаги: ряд котировок с источником и валютой и "
+                     "перечень дыр в ряду. Нужен instrument_id из find_instrument."),
+        handler=history.instrument_prices,
     ),
     ToolSpec(
         name="find_instrument",
