@@ -7,13 +7,17 @@ app.returns.check, а запись прогона кладётся в репоз
     cd backend && uv run python -m app.ai.live_run
 """
 
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from app.ai import registry
 from app.timeutils import moscow_today
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -23,17 +27,25 @@ HANDOFF_DIR = REPO_ROOT / "docs" / "handoff"
 # некого), а по умолчанию Codex требует подтверждения на любой новый MCP-
 # инструмент. Без этой пометки каждый вызов падает с "MCP tool call requires
 # approval, but approval policy is never" ещё до того, как инструмент
-# прочитает хоть что-то. Все девять инструментов сервера — только читающие
-# (см. instructions в app/ai/mcp.py), доверить им авто-подтверждение безопасно.
-_TOOL_NAMES = (
-    "portfolio_overview", "positions", "returns", "value_history", "ledger",
-    "instrument_prices", "allocation", "data_quality", "find_instrument",
-)
+# прочитает хоть что-то. Все инструменты сервера — только читающие (см.
+# instructions в app/ai/mcp.py), доверить им авто-подтверждение безопасно.
+# Список берётся из реестра, а не дублируется руками: девятый инструмент
+# добавят в registry.TOOLS — он должен появиться и здесь без отдельной правки.
 _APPROVE_TOOLS = [
     arg
-    for name in _TOOL_NAMES
-    for arg in ("-c", f'mcp_servers.jarvis.tools.{name}.approval_mode="approve"')
+    for spec in registry.TOOLS
+    for arg in ("-c", f'mcp_servers.jarvis.tools.{spec.name}.approval_mode="approve"')
 ]
+
+# Признак готовности фазы (раздел 7, п. 5) требует, чтобы цифры приходили из
+# инструментов сервера, а не из памяти модели или файлов репозитория. Рабочая
+# директория сессии — поэтому именно пустая временная папка, а не корень
+# репозитория: с REPO_ROOT в первом прогоне модель прочитала
+# docs/handoff/2026-08-14-phase-4a-handoff.md вместо вызова data_quality и
+# отдала устаревший XIRR — обходной путь мимо инструментов, который и должен
+# был проверить этот признак. REPO_ROOT остаётся только для HANDOFF_DIR: сам
+# хендофф прогона кладётся в репозиторий, сессия Codex его не видит.
+_TOOL_CALL_RE = re.compile(r"jarvis/(\w+) \((?:completed|failed)\)")
 
 # Порядок и формулировки — раздел 7 дизайна. Пятый вопрос нарочно без
 # подсказки про дни и бумаги: границы честности модель обязана назвать сама.
@@ -49,23 +61,51 @@ QUESTIONS = [
 ]
 
 
-def ask(question: str) -> str:
+@dataclass(frozen=True)
+class Answer:
+    text: str
+    transcript: str
+
+
+def ask(question: str) -> Answer:
     """Один вопрос — одна свежая сессия Codex: без памяти о предыдущих ответах,
-    только чтение в песочнице, ответ — в файл, а не в перемешанный stdout."""
+    только чтение в песочнице, ответ — в файл, а не в перемешанный stdout.
+
+    Рабочая директория сессии — та же пустая временная папка, где лежит файл
+    ответа: у модели там нет ничего, кроме инструментов сервера."""
     codex = shutil.which("codex")
     if codex is None:
         raise SystemExit("codex не найден в PATH — установить Codex CLI или добавить его в PATH")
     with tempfile.TemporaryDirectory() as folder:
-        answer = Path(folder) / "answer.md"
-        subprocess.run(
-            [codex, "exec", "-s", "read-only", "--ephemeral", "--skip-git-repo-check",
-             "-C", str(REPO_ROOT), *_APPROVE_TOOLS, "-o", str(answer), question],
-            check=True, capture_output=True, text=True, encoding="utf-8",
+        answer_file = Path(folder) / "answer.md"
+        try:
+            result = subprocess.run(
+                [codex, "exec", "-s", "read-only", "--ephemeral", "--skip-git-repo-check",
+                 "-C", str(folder), *_APPROVE_TOOLS, "-o", str(answer_file), question],
+                check=True, capture_output=True, text=True, encoding="utf-8",
+            )
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(f"codex exec упал (код {exc.returncode}): {exc.stderr}") from exc
+        return Answer(
+            text=answer_file.read_text(encoding="utf-8"),
+            transcript=result.stdout + result.stderr,
         )
-        return answer.read_text(encoding="utf-8")
 
 
-def render(pairs: list[tuple[str, str]], today: date) -> str:
+def _tool_calls_line(transcript: str) -> str:
+    """Кто из инструментов jarvis реально позвал модель и сколько раз — по
+    строкам трассы вида "mcp: jarvis/<имя> (completed)"/"(failed)". Не то же
+    самое, что текст ответа: ответ мог сослаться на файл вместо инструмента —
+    эта строка ловит именно такой случай."""
+    calls = _TOOL_CALL_RE.findall(transcript)
+    if not calls:
+        return "_инструменты не вызывались_"
+    counts = Counter(calls)
+    parts = ", ".join(f"{name} ×{count}" for name, count in counts.items())
+    return f"_Вызовы инструментов: {parts}_"
+
+
+def render(pairs: list[tuple[str, Answer]], today: date) -> str:
     lines = [
         f"# Фаза 5a: живые вопросы через Codex, {today.isoformat()}", "",
         "Ответы модели записаны как есть, без правок. Сверка с прогонами",
@@ -73,7 +113,8 @@ def render(pairs: list[tuple[str, str]], today: date) -> str:
         "он заполняется руками после прогона.", "",
     ]
     for number, (question, answer) in enumerate(pairs, start=1):
-        lines += [f"## {number}. {question}", "", answer.strip(), ""]
+        lines += [f"## {number}. {question}", "", answer.text.strip(), "",
+                  _tool_calls_line(answer.transcript), ""]
     lines += ["## Сверка", "", "_заполнить после прогона_", ""]
     return "\n".join(lines)
 

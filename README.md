@@ -367,8 +367,34 @@ cd backend && uv run python -m app.snapshots.backfill
 
 Регистрация в Codex — один раз:
 
-    codex mcp add jarvis -- C:/Users/User/.local/bin/uv run --directory C:/jarvis-investment/backend python -m app.ai.mcp
+    codex mcp add jarvis -- C:/Users/User/.local/bin/uv.exe run --directory C:/jarvis-investment/backend python -m app.ai.mcp
     codex mcp list
+
+`uv.exe` — с расширением: Windows `CreateProcess` не резолвит абсолютный путь
+без расширения (это делает `cmd.exe`/шелл через `PATHEXT`, а не сам API), и
+без `.exe` `codex doctor` покажет сервер `jarvis` как `not resolvable`.
+
+Headless `codex exec` всегда работает с `approval_policy=never` (спросить
+некого) и без явной пометки автоматически отклоняет любой вызов нового
+MCP-инструмента — сессия получит «MCP tool call requires approval, but
+approval policy is never» ещё до того, как инструмент прочитает данные.
+Интерактивный `codex`, наоборот, в этой ситуации спросит подтверждение сам.
+Скрипт `app.ai.live_run` передаёт разрешение при каждом вызове (`-c
+mcp_servers.jarvis.tools.<имя>.approval_mode="approve"` на каждый из девяти
+инструментов); чтобы то же самое работало и для интерактивной сессии без этих
+флагов, разрешение можно сделать постоянным — добавить в
+`~/.codex/config.toml` по блоку на инструмент:
+
+    [mcp_servers.jarvis.tools.portfolio_overview]
+    approval_mode = "approve"
+
+и так на каждый из девяти (`positions`, `returns`, `value_history`, `ledger`,
+`instrument_prices`, `allocation`, `data_quality`, `find_instrument`) —
+безопасно: все девять только читают, транзакция в базе открыта `READ ONLY`.
+
+Нужен Codex CLI версии не ниже 0.154 — версия 0.147 отказывалась запускать
+модель по умолчанию аккаунта («requires a newer version of Codex»); `npm
+install -g @openai/codex` обновляет.
 
 Дальше `codex` (интерактивно) или `codex exec "…вопрос…"` из любого каталога:
 сервер поднимается на время сессии и гаснет вместе с ней. Инструменты:
