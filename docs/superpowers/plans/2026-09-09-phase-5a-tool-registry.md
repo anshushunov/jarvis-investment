@@ -1781,9 +1781,10 @@ def test_auto_granularity_by_window_length():
 def test_thin_keeps_last_point_of_each_bucket_and_the_last_point():
     days = [date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 5), date(2026, 2, 3), date(2026, 2, 4)]
     assert s.thin(days, lambda d: d, "month") == [date(2026, 1, 5), date(2026, 2, 4)]
-    # ISO-неделя: 1–4 января 2026 — одна неделя, 5 января — следующая.
+    # ISO-неделя: 1–4 января 2026 — одна неделя, 5 января — следующая; 3 и 4
+    # февраля — одна неделя, из неё остаётся последняя точка.
     assert s.thin(days, lambda d: d, "week") == [
-        date(2026, 1, 2), date(2026, 1, 5), date(2026, 2, 3), date(2026, 2, 4),
+        date(2026, 1, 2), date(2026, 1, 5), date(2026, 2, 4),
     ]
     assert s.thin(days, lambda d: d, "day") == days
 ```
