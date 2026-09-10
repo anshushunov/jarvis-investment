@@ -40,6 +40,7 @@ def test_zero_target_group_is_unfixable_and_named_with_its_value():
     assert result.unfixable == {"derivatives": Decimal("10.0000")}
     # Дефициты закрывают и то, что лежит в невыправляемой группе: 30 = 20 + 10.
     assert sum(result.deficits.values()) == Decimal("30.0000")
+    assert result.buy_total == result.contribution + sum(result.unfixable.values())
 
 
 def test_contribution_below_minimal_names_groups_left_above_target():

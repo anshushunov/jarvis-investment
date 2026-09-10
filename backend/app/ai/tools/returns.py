@@ -83,6 +83,7 @@ def returns(
 
     coverage = report.coverage
     result: dict = {
+        "as_of": s.day(bounds.until),
         "period": {
             "key": bounds.key, "from": s.day(bounds.since), "to": s.day(bounds.until),
             "annualized": bounds.annualized,

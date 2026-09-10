@@ -30,7 +30,8 @@ def portfolio_overview(session: Session) -> dict:
     accounts = {account.id: account for account in session.execute(select(Account)).scalars()}
     cash_rows = all_balances(session)
 
-    # Collect all account ids from both overview and cash rows (union)
+    # Счета — объединение разбивки обзора и денежных строк: счёт, у чьих
+    # денег нет курса, в обзор не попал, но исчезать не должен.
     account_ids_in_overview = set(overview.by_account.keys())
     account_ids_in_cash = {row.account_id for row in cash_rows}
     all_account_ids = sorted(account_ids_in_overview | account_ids_in_cash)

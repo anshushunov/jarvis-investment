@@ -42,3 +42,17 @@ def test_allocation_without_targets_points_to_settings(session):
 def test_allocation_refuses_unreadable_or_negative_sum(session):
     assert "не читается" in run_tool(session, "allocation", {"contribution_rub": "много"})["error"]
     assert "отрицательной" in run_tool(session, "allocation", {"contribution_rub": "-1"})["error"]
+    assert "не читается" in run_tool(session, "allocation", {"contribution_rub": "nan"})["error"]
+    assert "не читается" in run_tool(session, "allocation", {"contribution_rub": "Infinity"})["error"]
+
+
+def test_zero_target_group_buy_total_explains_surplus_over_contribution(session):
+    """Цель 100 % на equity: неразмеченные облигации не выправляются
+    пополнением — их пришлось бы продать. buy_total больше пополнения на их
+    стоимость, и notes называет источник разницы словами."""
+    two_class_portfolio(session)
+    replace_targets(session, [TargetInput(share=Decimal("1"), asset_class="equity")])
+    result = run_tool(session, "allocation", {})
+    assert result["rebalance"]["buy_total_rub"] == "40000.00"
+    assert result["rebalance"]["contribution_rub"] == "0.00"
+    assert any("продажей" in note for note in result["notes"])

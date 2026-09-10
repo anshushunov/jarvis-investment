@@ -37,6 +37,12 @@ class Rebalance:
     contribution: Decimal
     # Раскладка пополнения по группам: дефицит каждой при V + X.
     deficits: dict[str, Decimal]
+    # Сумма всех покупок: Σdeficits. Совпадает с contribution, только пока
+    # unfixable пуст — если группа с нулевой целью держит остаток, деньги на
+    # её долю в deficits всё равно есть (см. unfixable), и buy_total =
+    # contribution + Σ unfixable: покупки больше пополнения на сумму, которую
+    # пришлось бы выручить продажей.
+    buy_total: Decimal
     # Группы с целью «ноль», в которых что-то лежит: пополнением не
     # выправляются никогда и названы вместе с суммой, которую пришлось бы
     # продать.
@@ -89,6 +95,7 @@ def rebalance(groups: list[Group], contribution: Decimal | None = None) -> Rebal
 
     return Rebalance(
         total_value=total, minimal_contribution=minimal, contribution=applied,
-        deficits=deficits, unfixable=unfixable, not_closed=not_closed,
+        deficits=deficits, buy_total=money(sum(deficits.values(), Decimal("0"))),
+        unfixable=unfixable, not_closed=not_closed,
         short_by=money(minimal - applied) if short else Decimal("0"),
     )

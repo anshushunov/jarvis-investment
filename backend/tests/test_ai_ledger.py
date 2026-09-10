@@ -30,6 +30,24 @@ def test_ledger_aggregates_whole_selection_but_pages_rows(session, account):
     assert result["date_range"] == {"from": "2024-03-01", "to": "2024-04-01"}
 
 
+def test_ledger_offset_beyond_end_is_not_truncated(session, account):
+    """Страница за пределами выборки — не то же самое, что усечённая: строк
+    больше нет вообще, а не «есть, но не показаны»."""
+    instrument = add_instrument(session)
+    for day_no in (1, 2, 3):
+        add_tx(session, account_id=account.id, op_type=OperationType.BUY,
+               day=date(2024, 3, day_no), amount="-1000", quantity="1", price="1000",
+               instrument_id=instrument.id, fee="-5")
+    add_tx(session, account_id=account.id, op_type=OperationType.DIVIDEND,
+           day=date(2024, 4, 1), amount="300", instrument_id=instrument.id)
+
+    result = run_tool(session, "ledger", {"instrument_id": instrument.id, "offset": 10})
+    assert result["total"] == 4
+    assert result["returned"] == 0
+    assert result["beyond_end"] is True
+    assert result["truncated"] is False
+
+
 def test_ledger_day_bounds_are_moscow_days(session, account):
     """21:00 UTC 1 марта — это уже полночь 2 марта по Москве: календарная дата
     операции обязана совпадать с той, в которой живут снимки."""

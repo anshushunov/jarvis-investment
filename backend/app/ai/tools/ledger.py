@@ -87,6 +87,10 @@ def ledger(
                    "since": s.day(since), "until": s.day(until)},
         "total": total, "offset": offset, "limit": limit, "returned": len(rows),
         "truncated": offset + len(rows) < total,
+        # offset за пределами total: страница пуста не потому, что выборка
+        # кончилась на текущей странице (truncated=False), а потому, что
+        # запрошенная страница вообще не существует.
+        "beyond_end": offset >= total and total > 0,
         "date_range": {"from": s.day(moscow_date(first)) if first else None,
                        "to": s.day(moscow_date(last)) if last else None},
         "sums": [

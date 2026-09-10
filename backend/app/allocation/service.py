@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -83,7 +83,9 @@ def replace_targets(session: Session, targets: list[TargetInput]) -> list[Target
     total = Decimal("0")
 
     for target in targets:
-        share = target.share.quantize(SHARE_EXP)
+        # Единое правило округления проекта (app.money.money) — ROUND_HALF_UP,
+        # а не банковское округление decimal по умолчанию.
+        share = target.share.quantize(SHARE_EXP, rounding=ROUND_HALF_UP)
         if share <= 0 or share > ONE:
             raise AllocationError(
                 f"Доля должна быть больше нуля и не больше 100 %, получено {target.share}")
@@ -130,10 +132,11 @@ def replace_targets(session: Session, targets: list[TargetInput]) -> list[Target
 
 def _row(kind: str, key: str, title: str, target: Decimal, value: Decimal,
          total: Decimal) -> AllocationRow:
-    actual = (value / total).quantize(SHARE_EXP) if total else None
+    # Единое правило округления проекта (app.money.money) — ROUND_HALF_UP.
+    actual = (value / total).quantize(SHARE_EXP, rounding=ROUND_HALF_UP) if total else None
     return AllocationRow(
         kind=kind, key=key, title=title, target=target, value=money(value), actual=actual,
-        deviation_points=(((actual - target) * 100).quantize(Decimal("0.01"))
+        deviation_points=(((actual - target) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                           if actual is not None else None),
         deviation_rub=money(value - target * total),
     )

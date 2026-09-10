@@ -92,6 +92,9 @@ def test_value_outside_full_targets_is_unfixable_by_contribution(session):
     replace_targets(session, [TargetInput(share=Decimal("1"), asset_class="equity")])
     report = allocation_report(session)
     assert report.rebalance.unfixable == {UNASSIGNED_KEY: Decimal("40000.0000")}
+    # Цель равна 100 % на «equity», дефицит 40 000 финансируется продажей
+    # неразмеченной группы — deficits считает и его.
+    assert report.rebalance.buy_total == Decimal("40000.0000")
 
 
 def test_instrument_target_is_measured_by_its_position(session):

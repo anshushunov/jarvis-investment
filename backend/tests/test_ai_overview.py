@@ -63,7 +63,7 @@ def test_account_without_fx_rate_appears_with_null_value(session):
     store_cash(session, acc2, [BrokerCash(currency="XAG", amount=Decimal("5"), blocked=Decimal("0"))])
     session.flush()
     result = run_tool(session, "portfolio_overview", {})
-    # Find acc-2 in by_account
+    # Ищем acc-2 в by_account: денег есть, курса нет — счёт всё равно должен быть виден.
     acc2_entry = next((entry for entry in result["by_account"] if entry["account_id"] == acc2.id), None)
     assert acc2_entry is not None
     assert acc2_entry["value_rub"] is None

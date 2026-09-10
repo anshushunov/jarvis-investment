@@ -47,21 +47,24 @@ def search_instruments(session: Session, query: str, limit: int = 10) -> list[Ca
         ))
     ).scalars().all()
 
-    # Частичные совпадения (ILIKE во всех полях, с LIMIT).
+    # Частичные совпадения (ILIKE во всех полях, с LIMIT). Сортировка задаёт,
+    # какая полсотня попадёт под лимит, — иначе выбор недетерминирован.
     pattern = f"%{text}%"
     partial_rows = session.execute(
         select(Instrument).where(or_(
             Instrument.ticker.ilike(pattern), Instrument.secid.ilike(pattern),
             Instrument.isin.ilike(pattern), Instrument.issuer.ilike(pattern),
-        )).limit(FETCH_LIMIT)
+        )).order_by(Instrument.issuer, Instrument.id).limit(FETCH_LIMIT)
     ).scalars().all()
 
-    # Мерж: exact_rows + partial_rows, по instrument_id, с приоритетом exact.
+    # Мерж: exact_rows + partial_rows, по instrument_id, с приоритетом exact —
+    # точные совпадения пишутся в by_id вторыми и перезатирают частичные,
+    # поэтому флаг exact у мержа выставляется верно.
     by_id = {}
     for row in partial_rows:
-        by_id[row.id] = (row, False)  # False = not exact
+        by_id[row.id] = (row, False)
     for row in exact_rows:
-        by_id[row.id] = (row, True)  # True = exact
+        by_id[row.id] = (row, True)
 
     candidates = [
         Candidate(

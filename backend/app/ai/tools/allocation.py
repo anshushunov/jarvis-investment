@@ -24,11 +24,21 @@ def allocation(
             contribution = Decimal(contribution_rub.replace(" ", "").replace(" ", "").replace(",", "."))
         except InvalidOperation:
             raise ToolRefusal(f"Сумма пополнения «{contribution_rub}» не читается как число") from None
+        if not contribution.is_finite():
+            raise ToolRefusal(f"Сумма пополнения «{contribution_rub}» не читается как число")
         if contribution < 0:
             raise ToolRefusal("Сумма пополнения не может быть отрицательной: продаж расчёт не предлагает")
 
     report = allocation_report(session, contribution)
     plan = report.rebalance
+    notes = list(report.notes)
+    if plan.unfixable:
+        surplus = s.amount(plan.buy_total - plan.contribution)
+        notes.append(
+            f"Покупки на {s.amount(plan.buy_total)} ₽ больше пополнения на {surplus} ₽: "
+            "разница финансируется продажей групп из unfixable_without_selling — "
+            "пополнением их не выправить"
+        )
     return {
         "as_of": s.day(report.as_of),
         "total_value_rub": s.amount(report.total_value),
@@ -45,11 +55,12 @@ def allocation(
             "contribution_rub": s.amount(plan.contribution),
             "contribution_is_custom": contribution is not None,
             "short_by_rub": s.amount(plan.short_by),
+            "buy_total_rub": s.amount(plan.buy_total),
             "buy_by_group": {key: s.amount(value) for key, value in plan.deficits.items()},
             "not_closed_by_contribution": plan.not_closed,
             "unfixable_without_selling": {key: s.amount(value) for key, value in plan.unfixable.items()},
         },
         "coverage": {"positions_total": report.positions_total,
                      "valued_positions": report.valued_positions, "unpriced": report.unpriced},
-        "notes": report.notes,
+        "notes": notes,
     }

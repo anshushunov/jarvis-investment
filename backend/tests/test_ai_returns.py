@@ -12,6 +12,7 @@ def test_returns_shape_and_all_breakdowns(session, account):
            day=date(2024, 1, 10), amount="100000")
     add_snapshot(session, date(2024, 1, 10), "100000")
     result = run_tool(session, "returns", {"period": "all", "breakdown": "all"})
+    assert result["as_of"] == result["period"]["to"]
     assert result["period"]["from"] == "2024-01-10"
     assert isinstance(result["portfolio"]["profit_rub"], str)
     assert result["twr_coverage"]["days_total"] == 1
