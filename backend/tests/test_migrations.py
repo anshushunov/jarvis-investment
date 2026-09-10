@@ -82,7 +82,8 @@ def test_full_chain_upgrades_matches_models_and_downgrades(migrations_engine):
         assert ALEMBIC_VERSION_TABLE in tables
         # Схема действительно создана, а не просто «команда не упала».
         assert {"account", "instrument", "transaction", "price", "position",
-                "reconciliation", "sync_run", "daily_snapshot"} <= tables
+                "reconciliation", "sync_run", "daily_snapshot",
+                "target_allocation"} <= tables
 
         # 2. Результат обязан совпасть с метаданными моделей: расхождение
         #    моделей и миграций не ловится ничем другим — тестовая схема

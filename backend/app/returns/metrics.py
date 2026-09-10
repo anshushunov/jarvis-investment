@@ -18,6 +18,14 @@ from app.returns.xirr import DAYS_IN_YEAR, Flow, xirr
 PERIOD_ALL = "all"
 PERIOD_12M = "12m"
 PERIOD_YTD = "ytd"
+# Произвольные границы (фаза 5a): вопрос «сколько я заработал в 2024 году»
+# тремя ключами не задать. Даты несёт вызов, а не ключ.
+PERIOD_CUSTOM = "custom"
+
+
+class PeriodError(ValueError):
+    """Период задан противоречиво или считать за него нечего. Текст — для
+    владельца, по-русски: инструмент ассистента отдаёт его как есть."""
 
 # Причины отсутствия числа. Каждая переводится в слова на экране.
 REASON_NO_FLOWS = "no_flows"
@@ -66,7 +74,8 @@ class Metric:
     reason: str | None = None
 
 
-def period_bounds(period_key: str, today: date, first_day: date | None) -> Period:
+def period_bounds(period_key: str, today: date, first_day: date | None,
+                  since: date | None = None, until: date | None = None) -> Period:
     """Границы периода и признак «показывать в годовых».
 
     Порог аннуализации — годовая база XIRR (`app.returns.xirr.DAYS_IN_YEAR`),
@@ -77,16 +86,28 @@ def period_bounds(period_key: str, today: date, first_day: date | None) -> Perio
     Период короче года аннуализировать нельзя: ставка врёт кратно — два
     процента за полтора месяца превращаются в двадцать семь годовых, — и такой
     период показывается за период (дизайн, раздел 4.3).
+
+    Произвольный период задаётся началом, конец по умолчанию — сегодня. Конец
+    в будущем отвергается: снимков за него нет и быть не может.
     """
-    if period_key == PERIOD_12M:
+    end = today
+    if period_key == PERIOD_CUSTOM:
+        if since is None:
+            raise PeriodError("Произвольный период задаётся хотя бы началом (since)")
+        end = until or today
+        if since > end:
+            raise PeriodError(f"Начало периода {since} позже конца {end}")
+        if end > today:
+            raise PeriodError(f"Конец периода {end} в будущем: снимков за него нет")
+    elif period_key == PERIOD_12M:
         since = today - timedelta(days=int(DAYS_IN_YEAR))
     elif period_key == PERIOD_YTD:
         since = date(today.year, 1, 1)
     else:
         since = first_day
 
-    length = (today - since).days if since is not None else 0
-    return Period(key=period_key, since=since, until=today, annualized=length >= DAYS_IN_YEAR)
+    length = (end - since).days if since is not None else 0
+    return Period(key=period_key, since=since, until=end, annualized=length >= DAYS_IN_YEAR)
 
 
 def over_period(rate: Decimal, days: int) -> Decimal | None:

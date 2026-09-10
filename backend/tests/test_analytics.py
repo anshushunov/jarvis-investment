@@ -1019,3 +1019,15 @@ def test_position_without_rate_is_named_too(session):
     assert overview.currencies_without_rate == ["HKD"]
     assert overview.unpriced == ["Alibaba"]
     assert overview.total_value == Decimal("0.0000")
+
+
+def test_position_rows_carry_instrument_id_and_asset_class(session):
+    """Идентификатор — для реестра инструментов ассистента (тикеры не уникальны),
+    класс — той же функцией, что считает разбивку капитала: целевые доли
+    сравниваются с фактом по одним и тем же ключам."""
+    seed(session)
+    rows = {row.ticker: row for row in position_rows(session)}
+    assert rows["SBER"].asset_class == "equity"
+    assert rows["OFZ"].asset_class == "bonds"
+    assert rows["TMOS"].asset_class == "equity"
+    assert all(isinstance(row.instrument_id, int) for row in rows.values())

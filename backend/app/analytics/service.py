@@ -35,11 +35,33 @@ CASH_CLASS = "cash"
 def cash_asset_class(currency: str) -> str:
     return METAL_CURRENCIES.get(currency.upper(), CASH_CLASS)
 
+
+# Все классы активов, которые оценка способна назначить: по виду инструмента
+# (CLASS_BY_KIND), фонду («mixed» по умолчанию — Instrument.asset_class код
+# сегодня не заполняет, «money_market» зарезервирован под фонды денежного
+# рынка), денежным остаткам и металлам. Целевая доля задаётся только на класс
+# из этого списка: опечатка «equities» заводила бы группу с нулевым фактом и
+# честным на вид дефицитом.
+ASSET_CLASSES = (
+    frozenset(CLASS_BY_KIND.values())
+    | frozenset(METAL_CURRENCIES.values())
+    | frozenset({CASH_CLASS, "mixed", "money_market", "other"})
+)
+
+
 @dataclass(frozen=True)
 class PositionRow:
     isin: str | None
     ticker: str | None
     name: str
+    # Идентификатор бумаги. Нужен реестру инструментов ассистента (фаза 5a):
+    # модель называет бумагу этим ключом в ledger и instrument_prices, а тикер
+    # ключом быть не может — у 252 бумаг живого портфеля тикеры не уникальны.
+    instrument_id: int
+    # Класс актива — той же функцией, что считает разбивку капитала
+    # (asset_class_of): целевые доли по классу сравниваются с фактом по тем же
+    # ключам, и второй расстановки классов рядом быть не должно.
+    asset_class: str
     broker: str
     # Счёт, на котором лежит позиция. Один и тот же тикер на пяти счетах
     # одного брокера давал пять визуально одинаковых строк, различить которые
@@ -228,6 +250,8 @@ def position_rows(session: Session) -> list[PositionRow]:
                 isin=instrument.isin,
                 ticker=instrument.ticker,
                 name=instrument.issuer or instrument.ticker or instrument.isin or "—",
+                instrument_id=instrument.id,
+                asset_class=asset_class_of(instrument),
                 broker=account.broker,
                 account_id=account.id,
                 # Валюта строки — валюта цены, а не справочника: у замещающей

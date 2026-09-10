@@ -35,6 +35,10 @@ export interface PositionRow {
   isin: string | null;
   ticker: string | null;
   name: string;
+  // Идентификатор бумаги и класс актива: те же ключи, которыми оперирует
+  // ассистент. Экран «Активы» их не показывает, но контракт с бэкендом один.
+  instrument_id: number;
+  asset_class: string;
   broker: string;
   // Подпись счёта: один и тот же тикер на нескольких счетах одного брокера
   // даёт несколько строк, различить которые больше нечем.
@@ -236,6 +240,23 @@ export interface Returns {
 
 export type ReturnsPeriod = "all" | "12m" | "ytd";
 
+export interface AllocationTarget {
+  // Ровно один из двух ключей заполнен: класс активов или ISIN бумаги.
+  asset_class: string | null;
+  isin: string | null;
+  ticker: string | null;
+  name: string | null;
+  // Доля от всего портфеля дробью: "0.6000" — это 60 %.
+  share: string;
+  updated_at: string;
+}
+
+export interface AllocationTargetInput {
+  asset_class: string | null;
+  isin: string | null;
+  share: string;
+}
+
 // FastAPI сериализует HTTPException как {"detail": "..."} — настоящая причина
 // сбоя (например, «Не задан TBANK_TOKEN в .env») лежит в теле ответа; без
 // этого пользователь видит только код состояния, который ничего не объясняет.
@@ -289,4 +310,14 @@ export const api = {
     }),
   returns: (period: ReturnsPeriod) =>
     request<Returns>(`/analytics/returns?period=${period}`),
+  allocationTargets: () => request<AllocationTarget[]>("/allocation/targets"),
+  // Набор целей заменяется целиком: бэкенд проверяет его как одно целое
+  // (сумма не больше ста, бумага не внутри класса с целью) и либо принимает
+  // весь, либо отвергает весь с русским объяснением.
+  saveAllocationTargets: (body: AllocationTargetInput[]) =>
+    request<AllocationTarget[]>("/allocation/targets", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

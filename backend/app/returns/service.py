@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.analytics.service import portfolio_overview
 from app.models import Account, DailySnapshot
 from app.returns.breakdown import (  # noqa: F401 — часть публичного лица пакета
+    MONEY_CLASSES,
     MONEY_ROW_CLASS,
     AssetClassRow,
     InstrumentRow,
@@ -39,6 +40,7 @@ from app.returns.flows import (
 from app.returns.metrics import (  # noqa: F401 — часть публичного лица пакета
     PERIOD_12M,
     PERIOD_ALL,
+    PERIOD_CUSTOM,
     PERIOD_YTD,
     REASON_CASH,
     REASON_EMPTY_PERIOD,
@@ -49,6 +51,7 @@ from app.returns.metrics import (  # noqa: F401 — часть публично�
     REASON_SERIES_GAPS,
     Metric,
     Period,
+    PeriodError,
     incomplete_days,
     metric,
     period_bounds,
@@ -133,6 +136,21 @@ def opening_snapshot(session: Session, since: date | None) -> DailySnapshot | No
     ).scalars().first()
 
 
+def closing_snapshot(session: Session, until: date) -> DailySnapshot | None:
+    """Последний снимок не позже конца периода — его конечная стоимость.
+
+    Нужен только периоду, закончившемуся в прошлом: сегодняшний период
+    заканчивается живой оценкой (`portfolio_overview`), и второй источник для
+    него не нужен. Разбивка по классам берётся из снимка как есть, а
+    стоимость денежного периметра — суммой денежных классов из неё же: иного
+    источника у прошлой даты нет (см. MONEY_CLASSES в breakdown.py).
+    """
+    return session.execute(
+        select(DailySnapshot).where(DailySnapshot.on_date <= until)
+        .order_by(DailySnapshot.on_date.desc()).limit(1)
+    ).scalars().first()
+
+
 def _first_snapshot_day(session: Session) -> date | None:
     return session.execute(
         select(DailySnapshot.on_date).order_by(DailySnapshot.on_date).limit(1)
@@ -143,7 +161,8 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
                    value_now: Decimal | None = None,
                    by_account_now: dict[int, Decimal] | None = None,
                    by_class_now: dict[str, Decimal] | None = None,
-                   cash_now: Decimal | None = None) -> ReturnsReport:
+                   cash_now: Decimal | None = None,
+                   since: date | None = None, until: date | None = None) -> ReturnsReport:
     """Отчёт о доходности за период.
 
     Сегодняшние стоимости приходят параметрами, а не считаются здесь: их уже
@@ -158,8 +177,32 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
     `by_asset_class` для этого не годится: те же имена классов возвращает
     `asset_class_of` для инструментов вида «валюта» и «металл», и появись такой
     в журнале — его стоимость посчиталась бы дважды.
+
+    `since`/`until` — произвольные границы (`PERIOD_CUSTOM`): период,
+    закончившийся в прошлом, не может кончаться сегодняшней оценкой — его
+    конец берётся из последнего снимка не позже границы (`closing_snapshot`),
+    а не из `portfolio_overview`.
     """
     today = today or moscow_today()
+    period = period_bounds(period_key, today, _first_snapshot_day(session), since, until)
+
+    if period.until < today:
+        # Период кончился в прошлом: его конец — снимок, а не сегодняшняя
+        # оценка. Переданные значения не перетираются, по той же причине, что
+        # и ниже у обзора.
+        closing = closing_snapshot(session, period.until)
+        if closing is None:
+            raise PeriodError(f"На {period.until} нет ни одного снимка стоимости: "
+                              "считать конец периода не из чего")
+        by_class_closing = {key: Decimal(str(value))
+                            for key, value in (closing.by_asset_class or {}).items()}
+        value_now = closing.total_value if value_now is None else value_now
+        by_account_now = (snapshot_account_values(closing) if by_account_now is None
+                          else by_account_now)
+        by_class_now = by_class_closing if by_class_now is None else by_class_now
+        cash_now = (sum((by_class_closing.get(klass, Decimal("0")) for klass in MONEY_CLASSES),
+                        Decimal("0")) if cash_now is None else cash_now)
+
     if (value_now is None or by_account_now is None or by_class_now is None
             or cash_now is None):
         # Обзор считается один раз, но заполняет только то, чего не передали:
@@ -171,7 +214,6 @@ def returns_report(session: Session, period_key: str, today: date | None = None,
         by_class_now = overview.by_asset_class if by_class_now is None else by_class_now
         cash_now = overview.cash_value if cash_now is None else cash_now
 
-    period = period_bounds(period_key, today, _first_snapshot_day(session))
     book = RateBook.load(session)
     snapshots = _snapshots(session, period.since, period.until)
     # Ряд для цепочки начинается с точки отсчёта — той же, от которой считается

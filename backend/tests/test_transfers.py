@@ -12,6 +12,7 @@ from decimal import Decimal
 from app.connectors.tbank.mapper import map_operation
 from app.models import OperationType
 from app.positions.engine import LedgerEntry, fold
+from tests.test_analytics import price_day
 
 
 def _entry(op_type: OperationType, quantity: str, price: str = "0",
@@ -97,8 +98,9 @@ def test_position_row_hides_average_and_profit_when_cost_unknown(session):
     session.add(Position(account_id=account.id, instrument_id=instrument.id,
                          quantity=Decimal("560"), average_price=Decimal("0"),
                          cost_basis_known=False))
-    session.add(Price(instrument_id=instrument.id, on_date=date(2026, 8, 10),
+    session.add(Price(instrument_id=instrument.id, on_date=price_day(),
                       close=Decimal("200"), currency="RUB", source="moex"))
+    # Дата относительно сегодня: цена старше PRICE_MAX_AGE в оценку не идёт
     session.flush()
 
     row = next(r for r in position_rows(session) if r.isin == "RU000A0JQUZ6")
