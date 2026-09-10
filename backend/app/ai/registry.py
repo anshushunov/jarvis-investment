@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai.errors import ToolRefusal
-from app.ai.tools import history, instruments, overview, positions, returns
+from app.ai.tools import history, instruments, ledger, overview, positions, returns
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,13 @@ TOOLS: list[ToolSpec] = [
         description=("Как двигалась стоимость портфеля по дням: ряд снимков в окне дат с "
                      "пометкой дней неполной оценки и бумаг без цены в каждый из них."),
         handler=history.value_history,
+    ),
+    ToolSpec(
+        name="ledger",
+        description=("Журнал операций: что происходило по бумаге, счёту, типу операции и датам. "
+                     "Страница строк плюс агрегаты по всей выборке (количество, суммы по типам и "
+                     "валютам, диапазон дат) и признак усечения."),
+        handler=ledger.ledger,
     ),
     ToolSpec(
         name="instrument_prices",
