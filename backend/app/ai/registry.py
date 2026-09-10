@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.ai.errors import ToolRefusal
-from app.ai.tools import overview
+from app.ai.tools import instruments, overview, positions
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,20 @@ TOOLS: list[ToolSpec] = [
                      "валютам, недоступное к распоряжению, дата оценки, покрытие оценкой и "
                      "последняя синхронизация. Начинать с него."),
         handler=overview.portfolio_overview,
+    ),
+    ToolSpec(
+        name="positions",
+        description=("Открытые позиции: бумага, счёт, класс, количество, средняя цена против "
+                     "текущей, стоимость в рублях, доля портфеля, прибыль либо причина её "
+                     "отсутствия. Фильтры по счёту, классу и «только неоценённые»."),
+        handler=positions.positions,
+    ),
+    ToolSpec(
+        name="find_instrument",
+        description=("Найти бумагу по тикеру, ISIN или названию и получить её instrument_id для "
+                     "ledger и instrument_prices. Тикеры не уникальны — всегда искать здесь, а "
+                     "не угадывать."),
+        handler=instruments.find_instrument,
     ),
 ]
 
